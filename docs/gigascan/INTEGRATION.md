@@ -2,7 +2,7 @@
 
 `lumia-gigascan-core` is an independent Rust repository at
 `C:\Users\sunyy\Projects\lumia-gigascan-core`. The reviewed local dependency
-pin is commit `032e761` (`fix: narrow parallax blend ghosts`). No remote
+pin is commit `af39e3e` (`feat: parameterize deghost feather`). No remote
 or release tag is configured, so mobile build artifacts are still supplied
 locally or by a future artifact pipeline.
 
@@ -44,6 +44,9 @@ The renderer uses a high-order geometric feather to keep a continuous seam
 while sharply reducing the width of parallax double-exposures. Projection and
 lens calibration requests remain
 forward-compatible fields and report warnings where they are not applied.
+`blendPower` is constrained to 1–32 and defaults to 12 based on the same-scan
+P1/P4/P8/P12/P16 visual comparison; it is a development tuning surface, not a
+substitute for graph-cut seams or local warp.
 
 PTZ Manager's opt-in 5×4 real scan baseline produced a 7491×5943 PNG with all
 20 tiles connected, but only 94.16% rectangular canvas fill and visible

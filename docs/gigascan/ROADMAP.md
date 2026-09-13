@@ -10,7 +10,7 @@ binding is not evidence of a packaged native library or a hardware workflow.
 | PG-003 | Define `PocketCamera` and capability boundary in the shell | PG-002 | in progress | camera shell | `PocketCapabilities`; Android wire/profile tests |
 | PG-004 | Pocket 2 connect, preview, gimbal, capture loop | PG-003 | pending | camera shell | Physical Pocket 2 acceptance evidence |
 | PG-005 | Gimbal center/+10/center/-10/center repeatability test | PG-004 | pending | camera shell | Automated report plus physical cycles |
-| PG-006 | Pin and integrate `lumia-gigascan-core` stable API | — | in progress | core integration | Core `032e761`; Swift/Kotlin/JNI bindings; mobile native artifacts pending |
+| PG-006 | Pin and integrate `lumia-gigascan-core` stable API | — | in progress | core integration | Core `af39e3e`; Swift/Kotlin/JNI bindings; mobile native artifacts pending |
 | PG-007 | Custom 3×3 plan, capture, preserve nine originals, stitch | PG-005, PG-006 | pending | scan shell | Source manifest, Core report, seam review |
 | PG-008 | Background sharpness/features/matching during capture | PG-007 | pending | core integration | Timing and cancellation evidence |
 | PG-009 | Persist/resume `ScanJob` | PG-007 | pending | scan shell | Restart/resume automated test and device journal |
