@@ -194,6 +194,7 @@ public final class LumiaGigaScanCore: @unchecked Sendable {
     }
 
     public func stitch(request: [String: Any]) throws -> [String: Any] {
+        let request = Self.withMobileRenderPreference(request)
         guard JSONSerialization.isValidJSONObject(request) else {
             throw LumiaGigaScanCoreError.invalidRequest
         }
@@ -206,6 +207,20 @@ public final class LumiaGigaScanCore: @unchecked Sendable {
         return try invokeRaw(data: data) { pointer in
             stitchFunction(pointer, nil, nil)
         }
+    }
+
+    /// Mobile stitching prefers the platform GPU renderer. An explicit caller
+    /// choice is preserved so diagnostics and CPU-only comparison runs remain
+    /// possible.
+    public static func withMobileRenderPreference(
+        _ request: [String: Any]
+    ) -> [String: Any] {
+        guard request["renderBackendPreference"] == nil else {
+            return request
+        }
+        var preferred = request
+        preferred["renderBackendPreference"] = "gpuPreferred"
+        return preferred
     }
 
     private func invoke(

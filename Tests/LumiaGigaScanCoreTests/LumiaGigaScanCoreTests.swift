@@ -41,3 +41,15 @@ func missingNativeLibraryIsAnExplicitUnavailableState() {
     #expect(core.isAvailable == false)
     #expect(core.unavailableReason != nil)
 }
+
+@Test
+func mobileStitchDefaultsToGPUAndPreservesExplicitCPUChoice() {
+    let preferred = LumiaGigaScanCore.withMobileRenderPreference(["rows": 5])
+    #expect(preferred["renderBackendPreference"] as? String == "gpuPreferred")
+
+    let cpuOnly = LumiaGigaScanCore.withMobileRenderPreference([
+        "rows": 5,
+        "renderBackendPreference": "cpuOnly",
+    ])
+    #expect(cpuOnly["renderBackendPreference"] as? String == "cpuOnly")
+}

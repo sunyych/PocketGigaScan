@@ -2,7 +2,7 @@
 
 `lumia-gigascan-core` is an independent Rust repository at
 `C:\Users\sunyy\Projects\lumia-gigascan-core`. The reviewed local dependency
-pin is commit `20e8c5f` (`feat: preserve projective registration geometry`). No remote
+pin is commit `d596cd2` (`feat: report mobile render preference`). No remote
 or release tag is configured, so mobile build artifacts are still supplied
 locally or by a future artifact pipeline.
 
@@ -37,10 +37,37 @@ absent. Android stages `liblumia_gigascan_core.so` from
 `LUMIA_GIGASCAN_CORE_DIR` or the sibling Core target directory. iOS resolves
 the same ABI from a bundled library or statically linked process symbols.
 
-The current renderer reports `planarTranslationFeather`. Projection and lens
-calibration are accepted by ABI v1 but are not applied by the production
-pipeline; the Core response includes warnings instead of silently claiming
-support.
+The current renderer reports `planarPairwiseHomographyFeather` and preserves
+pairwise 3×3 transforms through a globally anchored projective layout. It is
+still CPU-only feather blending, not bundle adjustment, APAP, content-aware
+seams, or verified deghosting. Projection and lens calibration requests remain
+forward-compatible fields and report warnings where they are not applied.
+
+PTZ Manager's opt-in 5×4 real scan baseline produced a 7491×5943 PNG with all
+20 tiles connected, but only 94.16% rectangular canvas fill and visible
+foreground feather ghosts. Mobile acceptance must run the same source set and
+must not lower that measured floor.
+
+## Mobile execution and acceleration
+
+Mobile stitch requests default to `renderBackendPreference=gpuPreferred`.
+Production physical-device acceptance requires a GPU renderer; CPU is a
+compatibility fallback, not the preferred mobile path:
+
+- keep SIFT/RANSAC registration and quality decisions deterministic on CPU;
+- run projective warp, bilinear sampling, and feather accumulation on Metal
+  (iOS) or Vulkan compute (Android);
+- use bounded output bands so GPU accumulation does not allocate the complete
+  full-resolution panorama;
+- report the actual `renderBackend` and `renderBackendFallback`; never label a
+  CPU fallback as hardware accelerated;
+- compare GPU/CPU dimensions, connectivity, coverage, seam regions, and pixel
+  error on the same manifest.
+
+ABI v1 now accepts the preference and reports the actual backend. Until the
+Metal/Vulkan renderer is linked, Core explicitly returns
+`renderBackend=cpu-rust-banded` and `renderBackendFallback=true`; this state is
+not mobile performance acceptance.
 
 Passing synthetic Core tests does not prove mobile packaging, hardware,
 visual seams, or end-to-end behavior. iOS and Android artifacts still require

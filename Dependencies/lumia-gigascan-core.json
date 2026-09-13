@@ -1,6 +1,6 @@
 {
   "repository": "../lumia-gigascan-core",
-  "commit": "20e8c5f",
+  "commit": "d596cd2",
   "abiVersion": 1,
   "artifacts": {
     "ios": "liblumia_gigascan_core.a",

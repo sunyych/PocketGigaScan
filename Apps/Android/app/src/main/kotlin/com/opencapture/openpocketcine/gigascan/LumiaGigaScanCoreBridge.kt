@@ -28,7 +28,15 @@ object LumiaGigaScanCoreBridge {
 
     fun stitch(request: JSONObject): JSONObject {
         checkAvailable()
-        return parseResponse(nativeStitchJson(request.toString()))
+        return parseResponse(nativeStitchJson(withMobileRenderPreference(request).toString()))
+    }
+
+    internal fun withMobileRenderPreference(request: JSONObject): JSONObject {
+        val preferred = JSONObject(request.toString())
+        if (!preferred.has("renderBackendPreference")) {
+            preferred.put("renderBackendPreference", "gpuPreferred")
+        }
+        return preferred
     }
 
     private fun checkAvailable() {
