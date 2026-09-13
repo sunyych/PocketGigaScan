@@ -2,7 +2,7 @@
 
 `lumia-gigascan-core` is an independent Rust repository at
 `C:\Users\sunyy\Projects\lumia-gigascan-core`. The reviewed local dependency
-pin is commit `d596cd2` (`feat: report mobile render preference`). No remote
+pin is commit `032e761` (`fix: narrow parallax blend ghosts`). No remote
 or release tag is configured, so mobile build artifacts are still supplied
 locally or by a future artifact pipeline.
 
@@ -37,10 +37,12 @@ absent. Android stages `liblumia_gigascan_core.so` from
 `LUMIA_GIGASCAN_CORE_DIR` or the sibling Core target directory. iOS resolves
 the same ABI from a bundled library or statically linked process symbols.
 
-The current renderer reports `planarPairwiseHomographyFeather` and preserves
+The current renderer reports `planarPairwiseHomographyDeghostFeather` and preserves
 pairwise 3×3 transforms through a globally anchored projective layout. It is
-still CPU-only feather blending, not bundle adjustment, APAP, content-aware
-seams, or verified deghosting. Projection and lens calibration requests remain
+still CPU-only, not bundle adjustment, APAP, or graph-cut seam optimization.
+The renderer uses a high-order geometric feather to keep a continuous seam
+while sharply reducing the width of parallax double-exposures. Projection and
+lens calibration requests remain
 forward-compatible fields and report warnings where they are not applied.
 
 PTZ Manager's opt-in 5×4 real scan baseline produced a 7491×5943 PNG with all
