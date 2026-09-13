@@ -134,6 +134,23 @@ struct AndroidSessionWireTests {
     }
 
     @Test
+    func cameraModelJSONKeepsPocket2ProtocolUnknown() {
+        let json = AndroidSessionWire.cameraModelJSON(
+            modelId: nil, name: "OsmoPocket2-A1B2")
+        #expect(json.contains("\"name\":\"Osmo Pocket 2\""))
+        #expect(json.contains("\"verified\":false"))
+        #expect(json.contains("\"supportsTapFocus\":false"))
+        #expect(json.contains("\"supportsFocusMode\":false"))
+        #expect(json.contains("\"zoomStops\":[1.0]") || json.contains("\"zoomStops\":[1]"))
+        #expect(json.contains("\"protocolProfile\":\"pocket2-unverified\""))
+        #expect(json.contains("\"liveCodecHint\":\"unknown\""))
+        #expect(json.contains("\"gimbalControlSupport\":\"unknown\""))
+        #expect(json.contains("\"tapFocusSupport\":\"unknown\""))
+        #expect(json.contains("\"rawCaptureSupport\":\"unknown\""))
+        #expect(json.contains("\"builtInPanoramaSupport\":\"unknown\""))
+    }
+
+    @Test
     func statusJSONRoundTripsAvailableVideoFormats() {
         var status = CameraStatus()
         status.availableVideoFormats = [

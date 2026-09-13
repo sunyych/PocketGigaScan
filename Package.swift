@@ -12,6 +12,7 @@ let package = Package(
     platforms: [.iOS(.v17), .macOS(.v12), .watchOS(.v10)],
     products: [
         .library(name: "OpenPocketViewCore", targets: ["OpenPocketViewCore"]),
+        .library(name: "LumiaGigaScanCore", targets: ["LumiaGigaScanCore"]),
         // JNI facade consumed by the Android app (`just android-core`). The JNI
         // shims are `#if os(Android)`-gated; on Darwin only the wire helpers
         // compile, so iOS/macOS behavior is unchanged.
@@ -20,6 +21,11 @@ let package = Package(
     ],
     targets: [
         .target(name: "OpenPocketViewCore"),
+        .target(name: "LumiaGigaScanCore"),
+        .testTarget(
+            name: "LumiaGigaScanCoreTests",
+            dependencies: ["LumiaGigaScanCore"]
+        ),
         .testTarget(
             name: "OpenPocketViewCoreTests",
             dependencies: ["OpenPocketViewCore"],

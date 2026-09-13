@@ -56,6 +56,7 @@ export default defineConfig({
             { label: 'DUML frame', slug: 'protocol/duml-frame' },
             { label: 'DUML transport', slug: 'protocol/duml-transport' },
             { label: 'Command catalog', slug: 'protocol/commands' },
+            { label: 'Pocket 2 audit', slug: 'protocol/pocket2' },
             { label: 'Pocket 3 findings', slug: 'protocol/pocket3' },
             { label: 'Live view', slug: 'protocol/live-view' },
             { label: 'HTTP media', slug: 'protocol/media' },

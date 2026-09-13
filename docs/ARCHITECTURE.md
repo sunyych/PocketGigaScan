@@ -9,6 +9,7 @@ OpenPocketCine is a shared Swift business/protocol core with native platform she
 | **Watch companion** | `ios/OpenPocketCineWatch/` | watchOS SwiftUI remote. WatchConnectivity only — never SoftAP. Embedded in the iPhone app. |
 | **Android app** | `Apps/Android/app/` | Compose **shell**. Live picture and HUD I/O: [`ANDROID.md`](../ANDROID.md). Operator-visible behavior: [parity](PARITY.md). Teardown: [live-session](live-session.md). |
 | **Android facade** | `Sources/OpenPocketCineAndroidFacade/` | Swift session and JNI boundary |
+| **GigaScan Core binding** | `Sources/LumiaGigaScanCore/`, Android `gigascan/` + JNI | Thin JSON C ABI consumer for the independent `lumia-gigascan-core` repository. No camera protocol or stitch algorithm source. |
 | **Tests** | `Tests/OpenPocketViewCoreTests/` | Swift Testing suite for the portable core |
 
 HUD glyphs that both shells share are vendored Lucide SVGs (`OpcIcon` on iOS and Android).

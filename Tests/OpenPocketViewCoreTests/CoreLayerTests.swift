@@ -55,6 +55,23 @@ import Testing
         #expect(!CameraModel.resolve(modelId: 0x22, name: nil).needsFirstPictureFormatPoke)
         #expect(!CameraModel.resolve(modelId: 0x19, name: nil).needsFirstPictureFormatPoke)
     }
+
+    @Test func pocket2NameGetsAnExplicitUnverifiedProfile() {
+        let model = CameraModel.resolve(modelId: nil, name: "OsmoPocket2-A1B2")
+        #expect(model.name == "Osmo Pocket 2")
+        #expect(model.family == .pocket)
+        #expect(model.isPocket2)
+        #expect(!model.verified)
+        #expect(!model.hasGimbal)
+        #expect(!model.supportsTapFocus)
+        #expect(!model.supportsFocusMode)
+        #expect(model.zoomStops == [1])
+        #expect(ColorMode.available(for: model) == [.normal])
+        #expect(model.pocketCapabilities == .pocket2Unverified)
+        #expect(model.pocketCapabilities?.liveCodecHint == .unknown)
+        #expect(model.pocketCapabilities?.gimbalControl == .unknown)
+        #expect(model.pocketCapabilities?.builtInPanorama == .unknown)
+    }
 }
 
 @Suite struct CommandsTests {

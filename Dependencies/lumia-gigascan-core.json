@@ -1,0 +1,10 @@
+{
+  "repository": "../lumia-gigascan-core",
+  "commit": "20e8c5f",
+  "abiVersion": 1,
+  "artifacts": {
+    "ios": "liblumia_gigascan_core.a",
+    "macos": "liblumia_gigascan_core.dylib",
+    "androidArm64": "liblumia_gigascan_core.so"
+  }
+}

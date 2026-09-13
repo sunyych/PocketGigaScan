@@ -15,6 +15,7 @@ Model id is decoded from the advert:
 
 | Model | Advert model id |
 | --- | --- |
+| Pocket 2 | unknown — physical audit required |
 | Pocket 3 | `0x20` (verified on hardware) |
 | Pocket 4 | `0x21` |
 | Pocket 4 Pro | `0x22` |

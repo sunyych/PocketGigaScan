@@ -23,11 +23,26 @@ data class CameraModel(
     val needsFirstPictureFormatPoke: Boolean = false,
     /** Video-mode chip cycle. 4 Pro 1/3/6/12; Pocket 4/3 1/2/4; Nano 1. */
     val zoomStops: List<Double> = listOf(1.0, 2.0, 4.0),
+    /** Protocol evidence profile. Pocket 2 stays explicitly unverified until a physical capture. */
+    val protocolProfile: String = "generic-pocket",
+    val liveCodecHint: String = "unknown",
+    val gimbalControlSupport: String = "unknown",
+    val gimbalFeedbackSupport: String = "unknown",
+    val tapFocusSupport: String = "unknown",
+    val focusModeSupport: String = "unknown",
+    val photoCaptureSupport: String = "unknown",
+    val photoDownloadSupport: String = "unknown",
+    val rawCaptureSupport: String = "unknown",
+    val opticalTeleSupport: String = "unknown",
+    val builtInPanoramaSupport: String = "unknown",
 ) {
     val zoomMax: Double get() = activeZoomStops().lastOrNull() ?: 1.0
 
-    /** Pocket 3-axis gimbal. Nano has none. */
-    val hasGimbal: Boolean get() = family == "pocket"
+    /** Unknown Pocket 2 DUML control must not expose production gimbal controls. */
+    val hasGimbal: Boolean
+        get() =
+            family == "pocket" &&
+                (gimbalControlSupport == "supported" || protocolProfile == "generic-pocket")
 
     val isoAutoRangeFloor: Int get() = Companion.isoAutoRangeFloorFor(name)
 
@@ -41,6 +56,7 @@ data class CameraModel(
         val isPro = n.contains("pocket4p") || n.contains("4pro")
         val isPocket4 = n.contains("pocket4")
         val isPocket3 = n.contains("pocket3") || n.contains("muse")
+        val isPocket2 = n.contains("pocket2")
         val digitalLocked =
             shootingMode == CameraCommands.SHOOT_SLOWMO ||
                 shootingMode == CameraCommands.SHOOT_TIMELAPSE ||
@@ -51,6 +67,7 @@ data class CameraModel(
         if (isPocket3) {
             return if (resolutionCode == CameraCommands.RES_4K) listOf(1.0, 2.0) else listOf(1.0, 2.0, 4.0)
         }
+        if (isPocket2) return listOf(1.0)
         if (family != "pocket") return listOf(1.0)
         return zoomStops.ifEmpty { listOf(1.0, 2.0, 4.0) }
     }
@@ -62,6 +79,9 @@ data class CameraModel(
             val n = name.lowercase().replace(" ", "")
             return n.contains("pocket3") || n.contains("muse")
         }
+
+        fun looksLikePocket2(name: String): Boolean =
+            name.lowercase().replace(" ", "").contains("pocket2")
 
         fun looksLikeNano(name: String, family: String = ""): Boolean {
             if (family == "nano") return true
@@ -86,6 +106,7 @@ data class CameraModel(
                 return listOf(CameraCommands.COLOR_NORMAL, CameraCommands.COLOR_NORMAL10, CameraCommands.COLOR_DLOG_M)
             }
             val n = name.lowercase().replace(" ", "")
+            if (n.contains("pocket2")) return listOf(CameraCommands.COLOR_NORMAL)
             if (n.contains("pocket4p") || n.contains("4pro")) {
                 return listOf(
                     CameraCommands.COLOR_NORMAL,
@@ -117,6 +138,7 @@ data class CameraModel(
 
         fun zoomStopsFor(name: String, family: String): List<Double> {
             val n = name.lowercase().replace(" ", "")
+            if (n.contains("pocket2")) return listOf(1.0)
             if (n.contains("pocket4p") || n.contains("4pro")) return listOf(1.0, 3.0, 6.0, 12.0)
             if (n.contains("pocket4") || n.contains("pocket3") || n.contains("muse")) {
                 return listOf(1.0, 2.0, 4.0)
@@ -152,6 +174,18 @@ data class CameraModel(
                     needsFirstPictureFormatPoke =
                         obj.optBoolean("needsFirstPictureFormatPoke", looksLikePocket3(name)),
                     zoomStops = zoomStopsFromJson(obj, name, obj.optString("family", "pocket")),
+                    protocolProfile = obj.optString("protocolProfile", "generic-pocket"),
+                    liveCodecHint = obj.optString("liveCodecHint", "unknown"),
+                    gimbalControlSupport = obj.optString("gimbalControlSupport", "unknown"),
+                    gimbalFeedbackSupport = obj.optString("gimbalFeedbackSupport", "unknown"),
+                    tapFocusSupport = obj.optString("tapFocusSupport", "unknown"),
+                    focusModeSupport = obj.optString("focusModeSupport", "unknown"),
+                    photoCaptureSupport = obj.optString("photoCaptureSupport", "unknown"),
+                    photoDownloadSupport = obj.optString("photoDownloadSupport", "unknown"),
+                    rawCaptureSupport = obj.optString("rawCaptureSupport", "unknown"),
+                    opticalTeleSupport = obj.optString("opticalTeleSupport", "unknown"),
+                    builtInPanoramaSupport =
+                        obj.optString("builtInPanoramaSupport", "unknown"),
                 )
             }.getOrElse { default }
         }

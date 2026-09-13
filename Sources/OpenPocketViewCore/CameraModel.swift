@@ -63,6 +63,13 @@ public struct CameraModel: Equatable, Sendable {
         return n.contains("pocket3") || n.contains("muse")
     }
 
+    /// Pocket 2 has no captured BLE model id in this repository yet. Resolve
+    /// by advertised name without marking the protocol profile verified.
+    public var isPocket2: Bool {
+        let n = name.lowercased().replacingOccurrences(of: " ", with: "")
+        return n.contains("pocket2")
+    }
+
     /// Pocket 3 first picture needs a 1080→boot-4K `0x02/0x18` after enable.
     /// Pocket 4 / 4 Pro first picture is captured — do not GOP-cut them.
     public var needsFirstPictureFormatPoke: Bool { isPocket3 }
@@ -79,17 +86,22 @@ public struct CameraModel: Equatable, Sendable {
         return 100
     }
 
-    /// Pocket 3-axis gimbal. Nano has none — hide stick, mode, and A·B·C.
-    public var hasGimbal: Bool { family == .pocket }
+    /// Pocket 3-axis gimbal control. Pocket 2 hardware has a gimbal, but its
+    /// app-control DUML exchange is not captured yet.
+    public var hasGimbal: Bool { family == .pocket && !isPocket2 }
 
     /// Pocket tap-focus burst (`0x22`/`0x30`/`0x68`/`0x32`). Nano has no AF.
-    public var supportsTapFocus: Bool { family != .nano }
+    public var supportsTapFocus: Bool { family != .nano && !isPocket2 }
 
     /// AF-S / AF-C (`0x02/0x24`) and AF-C track (`0x8E` pid `0x3B`). Nano has neither.
-    public var supportsFocusMode: Bool { family != .nano }
+    public var supportsFocusMode: Bool { family != .nano && !isPocket2 }
 
     public var family: CameraBodyFamily {
         CameraBodyFamily.resolve(modelId: nil, name: name)
+    }
+
+    public var pocketCapabilities: PocketCapabilities? {
+        PocketCapabilities.resolve(for: self)
     }
 
     /// Video-mode chip stops (DJI spec). SlowMo / 4K Pocket 3 clamp in
@@ -109,6 +121,7 @@ public struct CameraModel: Equatable, Sendable {
         let isPro = n.contains("pocket4p") || n.contains("4pro")
         let isPocket4 = n.contains("pocket4")
         let isPocket3 = n.contains("pocket3") || n.contains("muse")
+        let isPocket2 = n.contains("pocket2")
         let digitalLocked: Bool = {
             switch ShootingMode(rawValue: UInt8(truncatingIfNeeded: shootingMode)) {
             case .slowMo, .timeLapse, .superNight: return true
@@ -119,6 +132,7 @@ public struct CameraModel: Equatable, Sendable {
         if digitalLocked { return [1] }
         if isPocket4 { return [1, 2, 4] }
         if isPocket3 { return resolution == .p4K ? [1, 2] : [1, 2, 4] }
+        if isPocket2 { return [1] }
         switch family {
         case .pocket: return [1, 2, 4]
         case .nano, .other: return [1]
@@ -193,6 +207,8 @@ public struct CameraModel: Equatable, Sendable {
         let n = (name ?? "").lowercased().replacingOccurrences(of: " ", with: "")
         // "pocket4p" before "pocket4": the Pro's BLE name is OsmoPocket4P-XXXX.
         switch true {
+        case n.contains("pocket2"):
+            return CameraModel(name: "Osmo Pocket 2")
         case n.contains("pocket3"), n.contains("muse"): return byId[0x0020]!
         case n.contains("pocket4p"): return byId[0x0022]!
         case n.contains("pocket4"): return byId[0x0021]!

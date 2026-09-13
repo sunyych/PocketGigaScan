@@ -4,6 +4,12 @@ project(opc_vulkan LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_library(lumia_gigascan_jni SHARED
+  lumia_gigascan_jni.cpp)
+target_link_libraries(lumia_gigascan_jni
+  dl
+  log)
+
 if(NOT ANDROID_NDK)
   message(FATAL_ERROR "ANDROID_NDK is required")
 endif()

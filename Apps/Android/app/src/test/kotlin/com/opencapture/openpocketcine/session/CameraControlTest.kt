@@ -1145,6 +1145,27 @@ class CameraControlTest {
     }
 
     @Test
+    fun cameraModelJsonKeepsPocket2ProtocolUnknown() {
+        val parsed =
+            CameraModel.fromJson(
+                """{"name":"Osmo Pocket 2","family":"pocket","verified":false,"supportsTapFocus":false,"supportsFocusMode":false,"zoomStops":[1],"protocolProfile":"pocket2-unverified","liveCodecHint":"unknown","gimbalControlSupport":"unknown","gimbalFeedbackSupport":"unknown","tapFocusSupport":"unknown","focusModeSupport":"unknown","photoCaptureSupport":"unknown","photoDownloadSupport":"unknown","rawCaptureSupport":"unknown","opticalTeleSupport":"unsupported","builtInPanoramaSupport":"unknown"}""",
+            )
+        assertTrue(CameraModel.looksLikePocket2(parsed.name))
+        assertEquals(false, parsed.verified)
+        assertEquals(false, parsed.supportsTapFocus)
+        assertEquals(false, parsed.supportsFocusMode)
+        assertEquals(listOf(1.0), parsed.activeZoomStops())
+        assertEquals(listOf(CameraCommands.COLOR_NORMAL), CameraModel.colorModesFor(parsed.name, parsed.family))
+        assertEquals("pocket2-unverified", parsed.protocolProfile)
+        assertEquals("unknown", parsed.liveCodecHint)
+        assertEquals("unknown", parsed.gimbalControlSupport)
+        assertEquals("unknown", parsed.tapFocusSupport)
+        assertEquals("unknown", parsed.rawCaptureSupport)
+        assertEquals("unknown", parsed.builtInPanoramaSupport)
+        assertEquals(false, parsed.hasGimbal)
+    }
+
+    @Test
     fun isoLimitGetReplyUpdatesStatus() {
         val reply = hex("0000010f000107")
         val next = StatusExtras.applyParamReply(reply, CameraStatus())

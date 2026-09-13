@@ -26,6 +26,13 @@ Source: the public [OpenZCine](https://github.com/erik-sutton95/OpenZCine) repos
 
 iOS links the core via Swift Package Manager. Android does **not** consume that SPM product at runtime — only the cross-compiled `.so`.
 
+The optional GigaScan stitch engine is a separate Rust artifact. Gradle stages
+`liblumia_gigascan_core.so` from `LUMIA_GIGASCAN_CORE_DIR` or the sibling
+repository's arm64 release directory. `LumiaGigaScanCoreBridge` calls its
+versioned JSON C ABI through `liblumia_gigascan_jni.so`; it does not add stitch
+code to `OpenPocketCineAndroidFacade` or couple the camera protocol core to
+Rust.
+
 ## Pocket mapping
 
 | Piece | OpenPocketCine |

@@ -480,6 +480,9 @@ public enum ColorMode: UInt8, CaseIterable, Sendable {
     /// Nano is the captured `camcap_color_mode` wheel. D-Log2 is 4 Pro only.
     public static func available(for model: CameraModel) -> [ColorMode] {
         if model.family == .nano { return available(for: .nano) }
+        // Pocket 2 color SET bytes have not been captured. Expose only the
+        // neutral fallback instead of inheriting Pocket 4's HDR/D-Log wheel.
+        if model.isPocket2 { return [.normal] }
         let n = model.name.lowercased().replacingOccurrences(of: " ", with: "")
         if n.contains("pocket4p") || n.contains("4pro") {
             return [.normal, .hdr, .dLog, .dLog2]

@@ -6,8 +6,20 @@ plugins {
 val supportedAndroidAbi = "arm64-v8a"
 val swiftCoreJniLibsRoot = layout.buildDirectory.dir("generated/swiftCore/jniLibs")
 val swiftCoreArm64Directory = swiftCoreJniLibsRoot.map { it.dir(supportedAndroidAbi) }
+val lumiaCoreJniLibsRoot = layout.buildDirectory.dir("generated/lumiaCore/jniLibs").get().asFile
+val lumiaCoreArm64Directory = lumiaCoreJniLibsRoot.resolve(supportedAndroidAbi)
 val repositoryRoot = rootProject.projectDir.parentFile.parentFile
 val stageSwiftCoreScript = repositoryRoot.resolve("scripts/android-stage-swift-core.sh")
+
+fun File.bashPath(): String {
+    val normalized = invariantSeparatorsPath
+    val drivePath = Regex("^([A-Za-z]):/(.*)$").matchEntire(normalized)
+    return if (drivePath == null) {
+        normalized
+    } else {
+        "/mnt/${drivePath.groupValues[1].lowercase()}/${drivePath.groupValues[2]}"
+    }
+}
 
 val resolvedVersionCode: Int =
     (findProperty("versionCode") ?: property("openpocketcine.versionCode")).toString().toInt()
@@ -100,6 +112,7 @@ android {
         getByName("main").jniLibs.directories.apply {
             clear()
             add(swiftCoreJniLibsRoot.get().asFile.absolutePath)
+            add(lumiaCoreJniLibsRoot.absolutePath)
         }
     }
 }
@@ -123,14 +136,32 @@ val stageSwiftCore =
         outputs.dir(swiftCoreArm64Directory)
         commandLine(
             "bash",
-            stageSwiftCoreScript.absolutePath,
+            stageSwiftCoreScript.bashPath(),
             "--output",
-            swiftCoreArm64Directory.get().asFile.absolutePath,
+            swiftCoreArm64Directory.get().asFile.bashPath(),
         )
+    }
+
+val lumiaCoreArtifactDirectory =
+    file(
+        System.getenv("LUMIA_GIGASCAN_CORE_DIR")
+            ?: repositoryRoot.parentFile.resolve(
+                "lumia-gigascan-core/target/aarch64-linux-android/release",
+            ).path,
+    )
+val lumiaCoreArtifact = lumiaCoreArtifactDirectory.resolve("liblumia_gigascan_core.so")
+
+val stageLumiaGigaScanCore =
+    tasks.register<Copy>("stageLumiaGigaScanCore") {
+        group = "build"
+        description = "Stage the independently built Lumia GigaScan Core for arm64-v8a."
+        from(lumiaCoreArtifact)
+        into(lumiaCoreArm64Directory)
     }
 
 tasks.named("preBuild").configure {
     dependsOn(stageSwiftCore)
+    dependsOn(stageLumiaGigaScanCore)
 }
 
 // Compose BOM / androidx.core AARs currently declare compileSdk 37. Local and
