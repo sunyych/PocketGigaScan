@@ -1,5 +1,9 @@
-* text=auto eol=lf
-
-# Keep GitHub's language stats honest.
-docs/**   linguist-documentation
-*.pdf     binary
+* text=auto
+*.dart text eol=lf
+*.rs text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.ps1 text eol=lf
+*.png binary
+*.ico binary
+*.jar binary

@@ -1,0 +1,615 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart' hide Text;
+import 'package:path/path.dart' as p;
+
+import 'models/batch_queue.dart';
+import 'models/stitch_quality.dart';
+import 'services/batch_queue_controller.dart';
+import 'services/native_job_api.dart';
+import 'models/stitch_task.dart';
+import 'widgets/exported_image_viewer.dart';
+import 'l10n/localized_text.dart';
+import 'l10n/stitch_localizations.dart';
+
+class BatchQueuePage extends StatefulWidget {
+  const BatchQueuePage({
+    super.key,
+    required this.api,
+    this.controller,
+    this.mobileOverride,
+  });
+  final JobApi api;
+  final BatchQueueController? controller;
+  final bool? mobileOverride;
+
+  @override
+  State<BatchQueuePage> createState() => _BatchQueuePageState();
+}
+
+class _BatchQueuePageState extends State<BatchQueuePage> {
+  late final bool _ownsController = widget.controller == null;
+  late final BatchQueueController _controller =
+      widget.controller ?? BatchQueueController(api: widget.api);
+  bool _busy = false;
+  bool _jxlAvailable = false;
+  bool get _mobile =>
+      widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_changed);
+    if (!_mobile) {
+      if (_ownsController) _controller.initialize();
+      _refreshFormatCapabilities();
+    }
+  }
+
+  Future<void> _refreshFormatCapabilities() async {
+    try {
+      final response = await widget.api.capabilities();
+      final caps = response['capabilities'] as Map<String, Object?>?;
+      if (mounted) {
+        setState(() => _jxlAvailable = caps?['jpegXlAvailable'] == true);
+      }
+    } on Object {
+      if (mounted) setState(() => _jxlAvailable = false);
+    }
+  }
+
+  void _changed() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_changed);
+    if (_ownsController) _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _selectParent() async {
+    if (_busy || _mobile) return;
+    final path = await FilePicker.platform.getDirectoryPath(
+      dialogTitle: '选择包含多个全景子目录的母目录',
+    );
+    if (path == null || !mounted) return;
+    final format = await showDialog<ExportFormat>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('批量整图格式'),
+        children: ExportFormat.values
+            .map(
+              (format) => SimpleDialogOption(
+                onPressed: format == ExportFormat.jpegXl && !_jxlAvailable
+                    ? null
+                    : () => Navigator.pop(context, format),
+                child: Text(
+                  format == ExportFormat.jpegXl && !_jxlAvailable
+                      ? 'JPEG XL（需随程序加载 libjxl）'
+                      : format.label,
+                ),
+              ),
+            )
+            .toList(),
+      ),
+    );
+    if (format == null || !mounted) return;
+    setState(() => _busy = true);
+    try {
+      await _controller.addParent(path, outputFormat: format);
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('无法加入批处理：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _settings(BatchQueue queue, BatchQueueItem item) async {
+    final initial = await _controller.settingsFor(queue.id, item.id);
+    if (!mounted) return;
+    final rows = TextEditingController(text: '${initial.$1}');
+    final columns = TextEditingController(text: '${initial.$2}');
+    final fov = TextEditingController(text: '${initial.$3}');
+    final result = await showDialog<(int, int, double)>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('设置 ${item.name}'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: rows,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: StitchLocalizations.of(context).text('行数'),
+              ),
+            ),
+            TextField(
+              controller: columns,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: StitchLocalizations.of(context).text('列数'),
+              ),
+            ),
+            TextField(
+              controller: fov,
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+              ),
+              decoration: InputDecoration(
+                labelText: StitchLocalizations.of(context).text('水平视角（度）'),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('返回'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final r = int.tryParse(rows.text),
+                  c = int.tryParse(columns.text),
+                  f = double.tryParse(fov.text);
+              if (r != null && c != null && f != null) {
+                Navigator.pop(context, (r, c, f));
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    rows.dispose();
+    columns.dispose();
+    fov.dispose();
+    if (result == null) return;
+    try {
+      await _controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: result.$1,
+        columns: result.$2,
+        horizontalFovDegrees: result.$3,
+      );
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('$error')));
+      }
+    }
+  }
+
+  Future<void> _resourceSettings() async {
+    try {
+      final response = await widget.api.capabilities();
+      final caps =
+          response['capabilities'] as Map<String, Object?>? ?? const {};
+      if (!mounted) return;
+      final cpu = TextEditingController(
+        text: '${caps['totalCpuWorkers'] ?? 1}',
+      );
+      final memory = TextEditingController(
+        text: '${caps['totalMemoryBudgetMiB'] ?? 1024}',
+      );
+      final jobs = TextEditingController(
+        text: '${caps['maxConcurrentJobs'] ?? 2}',
+      );
+      final values = await showDialog<(int, int, int)>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('批处理资源'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: cpu,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: StitchLocalizations.of(context).text('总 CPU 工作线程'),
+                ),
+              ),
+              TextField(
+                controller: memory,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: StitchLocalizations.of(context).text('总内存预算（MiB）'),
+                ),
+              ),
+              TextField(
+                controller: jobs,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  labelText: StitchLocalizations.of(
+                    context,
+                  ).text('并发任务数（最多 8）'),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final a = int.tryParse(cpu.text),
+                    b = int.tryParse(memory.text),
+                    c = int.tryParse(jobs.text);
+                if (a != null && b != null && c != null) {
+                  Navigator.pop(context, (a, b, c));
+                }
+              },
+              child: const Text('应用'),
+            ),
+          ],
+        ),
+      );
+      cpu.dispose();
+      memory.dispose();
+      jobs.dispose();
+      if (values == null) return;
+      await widget.api.configureResources(
+        totalCpuWorkers: values.$1,
+        totalMemoryBudgetMiB: values.$2,
+        maxConcurrentJobs: values.$3,
+      );
+      await _controller.tick();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('资源设置失败：$error')));
+      }
+    }
+  }
+
+  Future<void> _removeItem(BatchQueue queue, BatchQueueItem item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除本地任务？'),
+        content: const Text('只移除任务记录和队列项目。原片、渲染瓦片及已导出照片都会保留。处理中任务会先请求停止。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('保留'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除任务记录'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    try {
+      await _controller.removeQueueItem(queue.id, item.id);
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('没有删除队列项目：$error')));
+      }
+    }
+  }
+
+  Future<void> _openCompleted(BatchQueueItem item) async {
+    final task = await _controller.taskForItem(item);
+    if (!mounted) return;
+    if (task == null ||
+        task.phase != StitchPhase.completed ||
+        task.exportPath == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('找不到已完成任务的导出照片。')));
+      return;
+    }
+    var nativeVerified = false;
+    if (task.exportFingerprint == null && task.nativeJobId != null) {
+      try {
+        final status = await widget.api.status(task.nativeJobId!);
+        nativeVerified =
+            status['state'] == 'completed' &&
+            status['operation'] == 'export' &&
+            status['exportDestination'] is String &&
+            nativeJobPathsMatch(
+              status['exportDestination']! as String,
+              task.exportPath!,
+            );
+      } on Object {
+        // The viewer identifies this retained task-record link as unverified.
+      }
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => ExportedImageViewer(
+          exportFilePath: task.exportPath!,
+          pyramidDirectory: task.outputDirectory,
+          expectedExportFingerprint: task.exportFingerprint,
+          legacyTaskAssociationPresent: true,
+          legacyTaskBindingVerified: nativeVerified,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+    appBar: AppBar(
+      title: const Text('批处理队列'),
+      actions: [
+        IconButton(
+          tooltip: StitchLocalizations.of(context).text('批处理资源设置'),
+          onPressed: _mobile ? null : _resourceSettings,
+          icon: const Icon(Icons.tune),
+        ),
+        IconButton(
+          tooltip: StitchLocalizations.of(context).text('选择母目录'),
+          onPressed: _mobile || _busy ? null : _selectParent,
+          icon: const Icon(Icons.create_new_folder_outlined),
+        ),
+      ],
+    ),
+    body: _mobile
+        ? const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text(
+                '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。',
+                textAlign: TextAlign.center,
+              ),
+            ),
+          )
+        : _controller.loading && _controller.queues.isEmpty
+        ? const Center(child: CircularProgressIndicator())
+        : ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              if (_controller.error != null) _errorBanner(_controller.error!),
+              if (_busy || _controller.loading) ...[
+                const LinearProgressIndicator(),
+                const ListTile(
+                  dense: true,
+                  leading: Icon(Icons.folder_open),
+                  title: Text('正在导入子目录；已加入队列的任务会继续处理。'),
+                ),
+              ],
+              if (_controller.queues.isEmpty)
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(28),
+                    child: Column(
+                      children: [
+                        const Icon(Icons.queue, size: 44),
+                        const SizedBox(height: 12),
+                        const Text('选择一个母目录；每个直接子目录会成为独立全景任务。'),
+                        const SizedBox(height: 12),
+                        FilledButton.icon(
+                          onPressed: _busy ? null : _selectParent,
+                          icon: const Icon(Icons.folder_open),
+                          label: const Text('选择母目录'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else ...[
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: FilledButton.icon(
+                    onPressed: _busy ? null : _selectParent,
+                    icon: const Icon(Icons.add),
+                    label: const Text('添加批次'),
+                  ),
+                ),
+                for (final queue in _controller.queues) ...[
+                  _queueHeader(queue),
+                  for (final item in queue.items) _itemCard(queue, item),
+                  const SizedBox(height: 12),
+                ],
+              ],
+            ],
+          ),
+  );
+
+  Widget _queueHeader(BatchQueue queue) {
+    final completed = queue.items
+        .where((item) => item.state == BatchItemState.completed)
+        .length;
+    final active = queue.items
+        .where(
+          (item) =>
+              item.state == BatchItemState.running ||
+              item.state == BatchItemState.exporting,
+        )
+        .length;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_copy_outlined),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  p.basename(queue.parentDirectory),
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                Text(
+                  '$completed/${queue.items.length} 已导出 · $active 项处理中',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                Text(
+                  '整图格式：${queue.outputFormat.label}',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: StitchLocalizations.of(context).text('资源设置'),
+            onPressed: _resourceSettings,
+            icon: const Icon(Icons.settings_outlined),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _itemCard(BatchQueue queue, BatchQueueItem item) {
+    final active =
+        item.state == BatchItemState.running ||
+        item.state == BatchItemState.exporting;
+    final progress = item.progress.clamp(0, 1).toDouble();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Icon(_iconFor(item.state), color: _colorFor(item.state)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item.name,
+                        translate: false,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      Text(
+                        _detail(item),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+                if (item.state == BatchItemState.needsSettings)
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('设置行列与相机视角'),
+                    onPressed: () => _settings(queue, item),
+                    icon: const Icon(Icons.tune),
+                  )
+                else if (active || item.state == BatchItemState.ready) ...[
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('暂停任务'),
+                    onPressed: () => _controller.pause(queue.id, item.id),
+                    icon: const Icon(Icons.pause_circle_outline),
+                  ),
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('取消任务'),
+                    onPressed: () => _controller.cancel(queue.id, item.id),
+                    icon: const Icon(Icons.cancel_outlined),
+                  ),
+                ] else if (item.state == BatchItemState.failed ||
+                    item.state == BatchItemState.cancelled ||
+                    item.state == BatchItemState.paused)
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('重试或继续'),
+                    onPressed: () => _controller.retry(queue.id, item.id),
+                    icon: const Icon(Icons.refresh),
+                  ),
+                if (item.state == BatchItemState.completed)
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('打开全景查看器'),
+                    onPressed: () => _openCompleted(item),
+                    icon: const Icon(Icons.zoom_in),
+                  ),
+                IconButton(
+                  tooltip: StitchLocalizations.of(context).text('删除本地任务记录'),
+                  onPressed: () => _removeItem(queue, item),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ],
+            ),
+            if (active || item.progress > 0) ...[
+              const SizedBox(height: 8),
+              LinearProgressIndicator(value: progress.clamp(0, 1)),
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${(progress * 100).round()}%${item.etaSeconds == null ? '' : ' · 本阶段预计剩余 ${_formatEta(item.etaSeconds!)}'}',
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _detail(BatchQueueItem item) {
+    if (item.state == BatchItemState.ready && item.estimatedLayout) {
+      return '${item.message ?? '估算布局'} · 估算排列，建议检查';
+    }
+    final stateText =
+        item.message ??
+        switch (item.state) {
+          BatchItemState.pending => '等待资源',
+          BatchItemState.needsSettings => '需要处理设置',
+          BatchItemState.skipped => '已跳过',
+          BatchItemState.ready => '等待开始',
+          BatchItemState.running => '合成中',
+          BatchItemState.exporting => '导出整图 PNG',
+          BatchItemState.paused => '已暂停',
+          BatchItemState.cancelled => '已取消',
+          BatchItemState.failed => '需要处理',
+          BatchItemState.completed => '整图已导出',
+        };
+    if (item.pauseRequested && item.state == BatchItemState.running) {
+      return '正在暂停 · ${_formatElapsed(item.elapsedSeconds)}';
+    }
+    if (item.state == BatchItemState.running ||
+        item.state == BatchItemState.exporting) {
+      return '$stateText · ${_formatElapsed(item.elapsedSeconds)}';
+    }
+    return stateText;
+  }
+
+  IconData _iconFor(BatchItemState state) => switch (state) {
+    BatchItemState.completed => Icons.check_circle,
+    BatchItemState.failed => Icons.error_outline,
+    BatchItemState.skipped => Icons.remove_circle_outline,
+    BatchItemState.running || BatchItemState.exporting => Icons.autorenew,
+    BatchItemState.paused ||
+    BatchItemState.cancelled => Icons.pause_circle_outline,
+    BatchItemState.needsSettings => Icons.tune,
+    _ => Icons.schedule,
+  };
+
+  Color? _colorFor(BatchItemState state) => switch (state) {
+    BatchItemState.completed => Colors.green,
+    BatchItemState.failed ||
+    BatchItemState.needsSettings => Theme.of(context).colorScheme.error,
+    BatchItemState.skipped => Theme.of(context).disabledColor,
+    _ => null,
+  };
+
+  String _formatEta(int seconds) =>
+      seconds < 60 ? '$seconds 秒' : '${seconds ~/ 60} 分 ${seconds % 60} 秒';
+  String _formatElapsed(int seconds) => seconds < 60
+      ? '已用 $seconds 秒'
+      : '已用 ${seconds ~/ 60} 分 ${seconds % 60} 秒';
+  Widget _errorBanner(String value) => Card(
+    color: Theme.of(context).colorScheme.errorContainer,
+    child: Padding(padding: const EdgeInsets.all(12), child: Text(value)),
+  );
+}
