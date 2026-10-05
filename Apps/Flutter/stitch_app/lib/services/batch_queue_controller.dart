@@ -41,6 +41,8 @@ class BatchQueueController extends ChangeNotifier {
   final Map<String, StitchTask> _taskCache = {};
   final Map<String, int> _generations = {};
   Future<void> _taskWriteTail = Future.value();
+  Future<void> _queueWriteTail = Future.value();
+  Future<void> _tickWork = Future.value();
   Timer? _timer;
   bool _loading = false;
   bool _importing = false;
@@ -51,6 +53,7 @@ class BatchQueueController extends ChangeNotifier {
   int _generation(String id) => _generations[id] ?? 0;
   int _bumpGeneration(String id) => _generations[id] = _generation(id) + 1;
   bool _stillReady(String queueId, String itemId, int generation) =>
+      !_disposed &&
       generation == _generation(itemId) &&
       _find(queueId, itemId)?.item.state == BatchItemState.ready;
   String _nativeErrorText(Object? value, String fallback) {
@@ -321,6 +324,7 @@ class BatchQueueController extends ChangeNotifier {
       _loading = false;
       if (!_disposed) notifyListeners();
     }
+    if (_disposed) return;
     _timer?.cancel();
     _timer = Timer.periodic(
       const Duration(seconds: 2),
@@ -670,7 +674,7 @@ class BatchQueueController extends ChangeNotifier {
           ],
         );
         _queues[current.index] = next;
-        await _queueRepository.save(next);
+        await _save(next);
       }
       await _taskRepository.removeTaskRecord(taskId);
       _taskCache.remove(taskId);
@@ -708,7 +712,7 @@ class BatchQueueController extends ChangeNotifier {
       ],
     );
     _queues[found.index] = queue;
-    await _queueRepository.save(queue);
+    await _save(queue);
     notifyListeners();
   }
 
@@ -802,15 +806,19 @@ class BatchQueueController extends ChangeNotifier {
     unawaited(tick());
   }
 
-  Future<void> tick() async {
-    if (_ticking || _loading || _disposed) return;
+  Future<void> tick() {
+    if (_ticking) return _tickWork;
+    if (_loading || _disposed) return Future<void>.value();
     _ticking = true;
-    try {
-      await _pollRunning();
-      await _startReady();
-    } finally {
-      _ticking = false;
-    }
+    final work = _runTick().whenComplete(() => _ticking = false);
+    _tickWork = work;
+    return work;
+  }
+
+  Future<void> _runTick() async {
+    await _pollRunning();
+    if (_disposed) return;
+    await _startReady();
   }
 
   Future<void> _pollRunning() async {
@@ -1386,7 +1394,7 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> _startReady() async {
-    if (!_api.isAvailable) return;
+    if (_disposed || !_api.isAvailable) return;
     Map<String, Object?> caps;
     try {
       final response = await _api.capabilities();
@@ -1413,16 +1421,15 @@ class BatchQueueController extends ChangeNotifier {
             (queue, item),
     ];
     for (final candidate in candidates) {
-      if (activeJobs >= maxJobs) break;
+      if (_disposed || activeJobs >= maxJobs) break;
       final queue = candidate.$1;
       final item = candidate.$2;
       final generation = _generation(item.id);
-      if (_find(queue.id, item.id)?.item.state != BatchItemState.ready) {
+      if (!_stillReady(queue.id, item.id, generation)) {
         continue;
       }
       var task = await _loadTask(item);
-      if (generation != _generation(item.id) ||
-          _find(queue.id, item.id)?.item.state != BatchItemState.ready) {
+      if (!_stillReady(queue.id, item.id, generation)) {
         continue;
       }
       if (task == null) {
@@ -1475,8 +1482,7 @@ class BatchQueueController extends ChangeNotifier {
       if (resuming) {
         try {
           nativeOperationStatus = await _api.status(task.nativeJobId!);
-          if (generation != _generation(item.id) ||
-              _find(queue.id, item.id)?.item.state != BatchItemState.ready) {
+          if (!_stillReady(queue.id, item.id, generation)) {
             continue;
           }
         } on Object catch (exception) {
@@ -1600,9 +1606,12 @@ class BatchQueueController extends ChangeNotifier {
           if (await _directoryHasEntries(output)) {
             throw const FileSystemException('任务渲染目录已有内容，拒绝覆盖');
           }
+          if (!_stillReady(queue.id, item.id, generation)) {
+            _inFlight.remove(item.id);
+            continue;
+          }
           await output.create(recursive: true);
-          if (generation != _generation(item.id) ||
-              _find(queue.id, item.id)?.item.state != BatchItemState.ready) {
+          if (!_stillReady(queue.id, item.id, generation)) {
             _inFlight.remove(item.id);
             continue;
           }
@@ -1614,8 +1623,7 @@ class BatchQueueController extends ChangeNotifier {
             stage: 'start-intent',
           );
           await _saveTask(intent, guardItem: item.id, generation: generation);
-          if (generation != _generation(item.id) ||
-              _find(queue.id, item.id)?.item.state != BatchItemState.ready) {
+          if (!_stillReady(queue.id, item.id, generation)) {
             _inFlight.remove(item.id);
             continue;
           }
@@ -1896,13 +1904,39 @@ class BatchQueueController extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
-  Future<void> _save(BatchQueue queue) async {
-    await _queueRepository.save(queue);
+  Future<void> _save(BatchQueue queue) {
+    final write = _queueWriteTail.then((_) => _queueRepository.save(queue));
+    _queueWriteTail = write.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return write;
   }
 
   Future<void> _persistAll() async {
     for (final queue in _queues) {
       await _save(queue);
+    }
+  }
+
+  /// Waits for the active scheduler pass and all queued persistence writes.
+  /// Call after [dispose] when the owner must release the queue's storage files.
+  Future<void> drain() async {
+    _timer?.cancel();
+    while (true) {
+      final tickWork = _tickWork;
+      final taskWrites = _taskWriteTail;
+      final queueWrites = _queueWriteTail;
+      await Future.wait<void>([tickWork, taskWrites, queueWrites]);
+      if (identical(tickWork, _tickWork) &&
+          identical(taskWrites, _taskWriteTail) &&
+          identical(queueWrites, _queueWriteTail) &&
+          !_ticking &&
+          !_loading &&
+          !_importing) {
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 1));
     }
   }
 

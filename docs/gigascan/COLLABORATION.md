@@ -31,5 +31,13 @@ well as the positive/missing-DLL/wrong-architecture contracts.
 Final coordinator handoff: the clean hosted build passed; its downloaded ZIP,
 source commit, manifest, runtime/core hashes and dependency licenses were
 independently checked. The final local builder and repeated native real-photo
-automatic exports also pass. Only documentation was updated after the qualified
-source commit; main publication uses the same reviewed product/workflow code.
+automatic exports also pass. A later main build exposed an asynchronous queue
+test teardown race before release publication.
+
+Queue lifecycle follow-up: Luna localization coder tracks active scheduler work
+and serialized persistence; owners can drain writes before releasing storage.
+The coordinator reviewed disposal across pre-start awaits and preservation of
+already-started native jobs. Gated persistence and gated task-load regressions
+cover both boundaries. Test teardown waits for completion instead of a fixed
+sleep; state polling uses a bounded monotonic deadline. Current rerun and hosted
+publication evidence is recorded in the linked qualification report.

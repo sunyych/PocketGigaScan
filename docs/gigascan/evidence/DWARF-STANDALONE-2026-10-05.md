@@ -45,8 +45,25 @@ runtime hashes/versions, and all 45 Rust registry license inventories.
 - This qualified branch artifact is 20,248,061 bytes.
 - Its SHA-256 is `a93df0ed9eec3150abdc595c2df6beb41fed1309a4a0be38ee465143000c230e`.
 
-Only documentation changed after this qualified product/workflow source. Successful
-main builds automatically publish the complete ZIP, checksum and source manifest
+The first main publication attempt exposed a queue-test cleanup race: temporary
+storage could be removed before asynchronous queue writes ended. A subsequent
+Luna repair adds explicit scheduler/persistence draining and guards disposal
+during pre-start awaits while preserving already-started native jobs. Gated-save
+and gated-load tests exercise those boundaries; teardown no longer relies on a
+fixed sleep. This repair requires its own application and hosted-build reruns.
+
+Coordinator repeat check: the 15 queue-controller tests passed on three
+consecutive runs, including both new gated lifecycle regressions. Logs:
+`queue-drain-pass-3.log`, `queue-drain-pass-4.log`, `queue-drain-pass-5.log`
+in the ignored qualification directory above.
+
+The repaired application passes analysis without issues and all 123 application
+tests, including strict screenshots. The normal Windows Release build also
+passes; hosted publication must pass its full native/build/package gate.
+Logs: `queue-drain-analyze.log`, `queue-drain-full-tests.log`,
+`queue-drain-main-release.log`.
+
+Successful main builds automatically publish the complete ZIP, checksum and source manifest
 at the [latest download](https://github.com/sunyych/PocketGigaScan/releases/tag/latest).
 Verify a current download using its adjacent checksum; later commit metadata
 produces a different ZIP hash from the reference branch artifact above.
