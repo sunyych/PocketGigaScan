@@ -27,3 +27,9 @@ changed screenshot. All 121 application tests and analysis pass. Luna build
 coder added app-local x64 VC runtime packaging, version/hash provenance and
 failure screenshot uploads; coordinator tested actual VS runtime copying as
 well as the positive/missing-DLL/wrong-architecture contracts.
+
+Final coordinator handoff: the clean hosted build passed; its downloaded ZIP,
+source commit, manifest, runtime/core hashes and dependency licenses were
+independently checked. The final local builder and repeated native real-photo
+automatic exports also pass. Only documentation was updated after the qualified
+source commit; main publication uses the same reviewed product/workflow code.

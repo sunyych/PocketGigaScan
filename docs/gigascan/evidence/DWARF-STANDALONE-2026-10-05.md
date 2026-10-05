@@ -1,69 +1,56 @@
-# PG-048 standalone PocketGigaScan
+# PocketGigaScan DWARF Windows qualification — 2026-10-05
 
-## Source and migration
+PocketGigaScan 1.1.0 is an independent DWARF stitcher. The confirmed retired
+camera-app directories and caches were removed after making the local recovery
+archive. The published source contains the Flutter Windows shell, future Android
+runner and independent Rust/OpenCV engine snapshot. Historical LICENSE/NOTICE,
+original photos, existing exports and compatible task storage are preserved.
 
-The product remains PocketGigaScan, Windows first with independent Android
-stitching planned. Retired OpenPocketCine camera/mobile code is removed from
-the published tree. The modern Flutter Android runner and portable Rust engine
-are retained. LICENSE and historical NOTICE are unchanged.
+## Reproducible validation
 
-The user confirmed deletion of the retired directories/caches. The previous
-index and retired source recovery archive remain in ignored `.local` storage.
-Original photographs, exported panoramas and AppData records were not deleted.
-Windows storage resolution preserves both tasks and queues in the legacy base
-whenever either legacy directory exists.
+- Final local builder: 156 core tests passed, zero failed, two optional real-data
+  tests ignored by default. The production DLL is rebuilt with test helpers unset.
+- Flutter analysis: no issues. All 121 application tests pass, covering system
+  English/Chinese, main/queue/viewer states, texture/grid controls, export lifecycle,
+  task removal, gestures and strict screenshot regression comparison.
+- Task path regressions cover saving/loading beneath an aliased canonical root,
+  escaping links and malformed IDs. The missing-output screenshot uses a fixed
+  relative fixture path; only its filename/error-area baseline changed.
+- Enabled Windows integration on the final source automatically exported PNG,
+  TIFF and JPEG XL using copied real-photo fixtures: passed. Normal application
+  Release was restored afterward.
+- Builder contracts pass: owned output paths/reparse rejection, complete ZIP
+  member/hash checks, nested libjxl layout, Rust license inventory and app-local
+  x64 runtime copying with missing-DLL/wrong-architecture negative controls.
+- Actual VS18 runtime copying, including architecture/version/hash inventory:
+  passed. Final local complete ZIP checksum:
+  `ed19312341c81d1dc2e47a4233ee6060e39b29d032fea2c8093037efc9311ec9`.
+- Independent Python seam-checker unit suite: 14 passed. Native formatting passed.
+- Publication hygiene: no retired source roots, caches, built native binaries or
+  original photos are tracked. Retained PNGs are synthetic fixtures, screenshot
+  baselines and icons.
 
-## Local reproducible checks
+Command logs remain in ignored `.local/dwarf-restructure-backup-20261005/`.
+See [testing commands](../STITCH-TESTING.md) and [build instructions](../../BUILD.md).
 
-- Rust 1.88.0 `cargo test --release --locked --manifest-path native/core/Cargo.toml`:
-  156 passed, zero failed, two real-data tests ignored by default. Production
-  release rebuilt with test-only JPEG XL helpers unset.
-- `cargo +1.88.0 fmt --manifest-path native/core/Cargo.toml -- --check`: passed.
-- Flutter 3.44.2 analysis: no issues; complete application suite: 117 passed.
-  Includes English/Chinese system locale and runtime switching, actual English
-  main/queue/viewer surfaces, legacy task storage, texture/grid-facing controls,
-  export lifecycle, task deletion, gestures and screenshot regressions.
-- Six updated screenshots differ only in the product-title rectangle; independent
-  pixel comparison found no other changes. Normal tests pass after updating.
-- PowerShell builder contracts: passed, including out-of-root/junction rejection,
-  nested ZIP positives/negative controls, nested libjxl SDK layout and Rust license
-  inventory/fallback/missing-license checks.
-- Independent seam checker Python unit suite: 14 passed.
-- Publication allowlist check: no build/cache/native binaries, originals or files
-  over 5 MB in the staged source tree. Retained PNGs are synthetic core fixtures,
-  screenshot baselines and application icons.
+## Clean hosted source build
 
-The full local builder passed again: 156 debug-profile core tests, 117 Flutter
-tests, normal Windows Release, all three capabilities, 45 Rust registry license
-packages, and ZIP member hashes. Source commit: `e48f4d81c08fa359ef541f6f243902301a83ba52`.
-Local ZIP SHA-256: `7120f63a8570922d79ddc465eab697d89915414f6f399d864bf09b202afb280f`.
-An enabled Windows native integration used four real source copies and
-automatically exported PNG, TIFF and JPEG XL once each: passed. The normal
-`lib/main.dart` Release entry was restored after the integration.
+Source `db715474caead2ebb0b21220f6aef72db1057f70` passed the
+[clean hosted Windows build](https://github.com/sunyych/PocketGigaScan/actions/runs/37379310434):
+156 native tests, 121 application tests, production Release and packaging checks.
+Coordinator downloaded its artifact and independently checked ZIP CRC/SHA-256,
+source commit/embedded manifest, three-format capabilities, core and Microsoft
+runtime hashes/versions, and all 45 Rust registry license inventories.
 
-The first clean hosted run built OpenCV successfully, then found that the official
-libjxl static SDK needs newer Microsoft STL symbols than VS 2022/MSVC 14.44
-provides. Local VS 2026 succeeds. The workflow is being qualified on the explicit
-VS 2026 hosted image with a compatible toolchain preflight.
+- This qualified branch artifact is 20,248,061 bytes.
+- Its SHA-256 is `a93df0ed9eec3150abdc595c2df6beb41fed1309a4a0be38ee465143000c230e`.
 
-Local command logs are preserved in ignored
-`.local/dwarf-restructure-backup-20261005/`. This verification is separate
-from the pending clean hosted build and release download.
-Historical real 384-photo and original-resolution corner evidence is unchanged;
-no new whole-canvas seam or physical Android qualification is implied.
+Only documentation changed after this qualified product/workflow source. Successful
+main builds automatically publish the complete ZIP, checksum and source manifest
+at the [latest download](https://github.com/sunyych/PocketGigaScan/releases/tag/latest).
+Verify a current download using its adjacent checksum; later commit metadata
+produces a different ZIP hash from the reference branch artifact above.
 
-Clean CI reached the complete Flutter suite after the cold SDK initialization
-repair. It exposed three task-repository failures caused by Windows short-name
-temporary paths and one machine-dependent missing-output screenshot. Task
-children are now constructed beneath the resolved canonical root; escaping
-links, absolute/traversal IDs and trailing dot/space IDs are rejected. A positive
-alias-root save/load regression and an escaping-link negative control pass.
-The missing-output fixture now uses a fixed relative path; only its baseline
-changed, in the filename and error-message areas. Full application analysis and
-121 tests pass with strict screenshot comparison.
-
-PE import review identified missing MSVCP140/VCRUNTIME140/VCRUNTIME140_1 runtime
-DLLs in the earlier local ZIP. The builder now copies the selected VS18 x64
-Release CRT directory into the package and records actual source, file versions
-and SHA-256 values. Actual VS18 runtime copying passed; missing-DLL and x86
-negative controls also pass. New clean CI qualification remains pending.
+Future Android packaging and physical-device testing remain planned separately.
+Historical 384-photo corner evidence is retained; this restructuring introduces
+no new whole original-resolution panorama seam qualification.
