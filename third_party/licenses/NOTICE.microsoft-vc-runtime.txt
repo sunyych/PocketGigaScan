@@ -1,0 +1,19 @@
+PocketGigaScan Windows packages include unmodified Microsoft Visual C++ runtime
+files copied from the x64 Release directory of the selected Visual Studio 2026
+installation's VC/Redist/MSVC toolset. The package build verifies that the
+runtime directory is the x64 Microsoft.VC*.CRT release directory and checks
+that every included DLL is a valid x64 PE image. Debug runtime files are not
+included.
+
+Microsoft permits app-local redistribution of applicable Visual C++ runtime
+files subject to the Visual Studio license terms. Consult the current official
+redistribution terms before copying or modifying these files:
+https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution
+
+Microsoft's deployment guidance:
+https://learn.microsoft.com/en-us/cpp/windows/choosing-a-deployment-method?view=msvc-170
+https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute?view=msvc-170
+
+The runtime DLLs remain Microsoft's copyrighted materials and are distributed
+without modification. This notice is informational and does not replace or
+expand Microsoft's license terms.

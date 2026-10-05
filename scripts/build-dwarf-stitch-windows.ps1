@@ -125,13 +125,89 @@ function Initialize-Vs18Environment {
             throw "The selected $($compiler.Name) is outside the VS 18 installation: $($compiler.Source)"
         }
     }
+    $redistRoot = $env:VCToolsRedistDir
+    if (-not $redistRoot) { $redistRoot = Join-Path $installationPath "VC/Redist/MSVC/$env:VCToolsVersion" }
+    $redistRoot = [IO.Path]::GetFullPath($redistRoot)
+    if (-not $redistRoot.StartsWith($installPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "The selected VC runtime directory is outside the VS 18 installation: $redistRoot"
+    }
+    $x64RuntimeRoot = Join-Path $redistRoot 'x64'
+    $crtDirectories = @(Get-ChildItem -LiteralPath $x64RuntimeRoot -Directory -Filter 'Microsoft.VC*.CRT' -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -match '^Microsoft\.VC\d+\.CRT$' -and $_.FullName -notmatch '(?i)debug'
+    })
+    if ($crtDirectories.Count -ne 1) {
+        throw "Expected one x64 Release Microsoft.VC*.CRT directory under $x64RuntimeRoot, found $($crtDirectories.Count)."
+    }
     Write-Host "MSVC toolchain: Visual Studio $env:VisualStudioVersion, MSVC $env:VCToolsVersion, linker $($link.Source)"
     return [pscustomobject]@{
         visualStudioVersion = $env:VisualStudioVersion
         msvcToolsetVersion = $env:VCToolsVersion
         linkerPath = $link.Source
         generator = 'Visual Studio 18 2026'
+        visualStudioInstallPath = $installationPath
+        vcRuntimeDirectory = $crtDirectories[0].FullName
     }
+}
+
+function Get-PeMachine([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        if ($stream.Length -lt 0x40) { throw "Not a valid PE file: $Path" }
+        $reader = New-Object IO.BinaryReader($stream)
+        if ($reader.ReadUInt16() -ne 0x5A4D) { throw "Missing DOS MZ signature: $Path" }
+        $stream.Position = 0x3C
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 6)) { throw "Invalid PE header offset: $Path" }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) { throw "Missing PE signature: $Path" }
+        $machine = $reader.ReadUInt16()
+        switch ($machine) {
+            0x8664 { return 'x64' }
+            0x014c { return 'x86' }
+            0xAA64 { return 'arm64' }
+            default { return ('unknown-0x{0:X4}' -f $machine) }
+        }
+    } finally { $stream.Dispose() }
+}
+
+function Copy-VcRuntime([string]$RuntimeDirectory, [string]$TargetDirectory) {
+    $runtimeDirectory = [IO.Path]::GetFullPath($RuntimeDirectory)
+    if ((Split-Path $runtimeDirectory -Leaf) -notmatch '^Microsoft\.VC\d+\.CRT$' -or
+        (Split-Path (Split-Path $runtimeDirectory -Parent) -Leaf) -ne 'x64' -or
+        $runtimeDirectory -match '(?i)debug_nonredist') {
+        throw "Expected the x64 Release Microsoft.VC*.CRT app-local runtime directory, got: $runtimeDirectory"
+    }
+    $runtimeItem = Get-Item -LiteralPath $runtimeDirectory -Force -ErrorAction Stop
+    if (($runtimeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing a reparse point as the VC runtime source: $runtimeDirectory"
+    }
+    $files = @(Get-ChildItem -LiteralPath $runtimeDirectory -File -Force | Where-Object {
+        $_.Extension -in @('.dll', '.manifest')
+    } | Sort-Object Name)
+    $requiredNames = @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')
+    $presentNames = @($files | ForEach-Object Name)
+    foreach ($requiredName in $requiredNames) {
+        if ($requiredName -notin $presentNames) { throw "Required x64 Visual C++ runtime file is missing: $requiredName ($runtimeDirectory)" }
+    }
+    if ($files.Count -eq 0) { throw "No redistributable DLL or manifest files found under $runtimeDirectory" }
+    New-Item -ItemType Directory -Force -Path $TargetDirectory | Out-Null
+    $inventory = @()
+    foreach ($file in $files) {
+        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Refusing a reparse point in the VC runtime directory: $($file.FullName)" }
+        if ($file.Extension -eq '.dll') {
+            $machine = Get-PeMachine $file.FullName
+            if ($machine -ne 'x64') { throw "VC runtime DLL is not x64 ($machine): $($file.Name)" }
+        }
+        $destination = Join-Path $TargetDirectory $file.Name
+        Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+        $inventory += [pscustomobject]@{
+            name = $file.Name
+            architecture = if ($file.Extension -eq '.dll') { 'x64' } else { 'metadata' }
+            fileVersion = if ($file.Extension -eq '.dll') { [Diagnostics.FileVersionInfo]::GetVersionInfo($destination).FileVersion } else { $null }
+            sha256 = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    return ,$inventory
 }
 
 function Copy-RustRegistryLicenses([string]$MetadataJson, [string]$DestinationRoot) {
@@ -480,6 +556,7 @@ if (Test-Path -LiteralPath $packageDir) {
 }
 New-Item -ItemType Directory -Force -Path $packageDir | Out-Null
 Get-ChildItem -LiteralPath $releaseDir -Force | Copy-Item -Destination $packageDir -Recurse -Force
+$vcRuntimeInventory = Copy-VcRuntime $vsToolchain.vcRuntimeDirectory $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE'), (Join-Path $repo 'NOTICE') -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'third_party/licenses') -Destination (Join-Path $packageDir 'licenses') -Recurse -Force
 $rustLicenseInventory = Copy-RustRegistryLicenses ($cargoMetadataJson -join [Environment]::NewLine) (Join-Path $packageDir 'licenses/rust')
@@ -498,6 +575,12 @@ $manifest = [ordered]@{
     msvcToolsetVersion = $vsToolchain.msvcToolsetVersion
     cmakeGenerator = $vsToolchain.generator
     linkerPath = $vsToolchain.linkerPath
+    microsoftVcRuntime = [ordered]@{
+        architecture = 'x64'
+        source = [IO.Path]::GetRelativePath($vsToolchain.visualStudioInstallPath, $vsToolchain.vcRuntimeDirectory).Replace('\', '/')
+        redistributionTerms = 'https://learn.microsoft.com/en-us/visualstudio/releases/2026/redistribution'
+        files = $vcRuntimeInventory
+    }
     flutterArchiveSha256 = $pin.flutterSha256
     formats = @('PNG', 'TIFF', 'JPEG XL')
     capabilities = $capabilities

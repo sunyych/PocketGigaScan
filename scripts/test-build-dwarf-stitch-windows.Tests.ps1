@@ -52,6 +52,18 @@ $zipGuardAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $zipGuardAst) 'Builder must validate the final archive against the package directory.'
 Invoke-Expression $zipGuardAst.Extent.Text
+$peMachineAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-PeMachine'
+}, $true)
+Assert-True ($null -ne $peMachineAst) 'Builder must inspect the architecture of redistributable runtime DLLs.'
+Invoke-Expression $peMachineAst.Extent.Text
+$vcRuntimeAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-VcRuntime'
+}, $true)
+Assert-True ($null -ne $vcRuntimeAst) 'Builder must package the selected app-local VC runtime.'
+Invoke-Expression $vcRuntimeAst.Extent.Text
 
 $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
 $jxlTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-jxl-sdk-test-' + [guid]::NewGuid().ToString('N'))
@@ -100,6 +112,42 @@ $missingLicenseRejected = $false
 try { Copy-RustRegistryLicenses $missingFixture (Join-Path $cargoLicenseTestRoot 'output/missing') } catch { $missingLicenseRejected = $true }
 Assert-True $missingLicenseRejected 'Cargo license collector accepted a registry dependency without license text.'
 Remove-Item -LiteralPath $cargoLicenseTestRoot -Recurse -Force
+
+$vcRuntimeTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-vc-runtime-test-' + [guid]::NewGuid().ToString('N'))
+$vcRuntimeTestRoot = [IO.Path]::GetFullPath($vcRuntimeTestRoot)
+Assert-True ($vcRuntimeTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($vcRuntimeTestRoot) -match '^pocket-vc-runtime-test-[0-9a-f]{32}$') 'Refusing unsafe VC runtime fixture path.'
+$crtFixture = Join-Path $vcRuntimeTestRoot 'VC/Redist/MSVC/14.51.36231/x64/Microsoft.VC145.CRT'
+$crtPackage = Join-Path $vcRuntimeTestRoot 'package'
+New-Item -ItemType Directory -Force -Path $crtFixture | Out-Null
+function Write-TestPe([string]$Path, [int]$Machine) {
+    $bytes = New-Object byte[] 160
+    $bytes[0] = 0x4D; $bytes[1] = 0x5A
+    [BitConverter]::GetBytes([int]0x80).CopyTo($bytes, 0x3C)
+    $bytes[0x80] = 0x50; $bytes[0x81] = 0x45
+    [BitConverter]::GetBytes([uint16]$Machine).CopyTo($bytes, 0x84)
+    [IO.File]::WriteAllBytes($Path, $bytes)
+}
+foreach ($runtimeDll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+    Write-TestPe (Join-Path $crtFixture $runtimeDll) 0x8664
+}
+Set-Content -LiteralPath (Join-Path $crtFixture 'Microsoft.VC145.CRT.manifest') -Value '<assembly />' -Encoding ascii
+$runtimeInventory = Copy-VcRuntime $crtFixture $crtPackage
+Assert-True (@($runtimeInventory | Where-Object { $_.architecture -eq 'x64' }).Count -eq 3) 'Runtime package inventory did not identify all x64 DLLs.'
+$invalidRuntimeHashes = @($runtimeInventory | Where-Object { $_.sha256 -notmatch '^[0-9a-f]{64}$' })
+Assert-True ($invalidRuntimeHashes.Count -eq 0) 'Runtime package inventory omitted file SHA-256 hashes.'
+foreach ($runtimeDll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
+    Assert-True (Test-Path -LiteralPath (Join-Path $crtPackage $runtimeDll) -PathType Leaf) "VC runtime DLL was not copied: $runtimeDll"
+}
+Remove-Item -LiteralPath (Join-Path $crtFixture 'vcruntime140_1.dll') -Force
+$missingRuntimeRejected = $false
+try { Copy-VcRuntime $crtFixture (Join-Path $vcRuntimeTestRoot 'missing-package') } catch { $missingRuntimeRejected = $true }
+Assert-True $missingRuntimeRejected 'VC runtime copier accepted a missing required runtime DLL.'
+Write-TestPe (Join-Path $crtFixture 'vcruntime140_1.dll') 0x014c
+$wrongArchitectureRejected = $false
+try { Copy-VcRuntime $crtFixture (Join-Path $vcRuntimeTestRoot 'wrong-architecture-package') } catch { $wrongArchitectureRejected = $true }
+Assert-True $wrongArchitectureRejected 'VC runtime copier accepted an x86 DLL in the x64 runtime folder.'
+Remove-Item -LiteralPath $vcRuntimeTestRoot -Recurse -Force
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-build-path-test-' + [guid]::NewGuid().ToString('N'))
 $testRoot = [IO.Path]::GetFullPath($testRoot)
@@ -179,6 +227,7 @@ Assert-True ($resource -match 'VALUE "ProductName", "PocketGigaScan"') 'Windows 
 $workflow = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/windows-build.yml') -Raw
 Assert-True ($workflow -match 'pull_request:' -and $workflow -match 'push:') 'Workflow must verify both pushes and pull requests.'
 Assert-True ($workflow -match 'actions/upload-artifact@') 'Workflow does not publish per-run build artifacts.'
+Assert-True ($workflow -match '(?s)name: Upload Flutter test failure screenshots\s+if: failure\(\).*?path: Apps/Flutter/stitch_app/test/failures/\*\.png\s+if-no-files-found: ignore\s+retention-days: 7') 'Workflow must preserve failure-only Flutter screenshot diagnostics with bounded retention.'
 Assert-True ($workflow -match 'actions/cache@caa296126883cff596d87d8935842f9db880ef25') 'Workflow does not cache pinned build dependencies.'
 Assert-True ($workflow -match 'runs-on: windows-2025-vs2026') 'Workflow must use the compatible VS 2026 hosted image.'
 Assert-True ($workflow -match 'windows-2025-vs2026-vs18-msvc-14\.50') 'Dependency cache key must encode the compatible MSVC toolchain.'

@@ -51,3 +51,19 @@ Local command logs are preserved in ignored
 from the pending clean hosted build and release download.
 Historical real 384-photo and original-resolution corner evidence is unchanged;
 no new whole-canvas seam or physical Android qualification is implied.
+
+Clean CI reached the complete Flutter suite after the cold SDK initialization
+repair. It exposed three task-repository failures caused by Windows short-name
+temporary paths and one machine-dependent missing-output screenshot. Task
+children are now constructed beneath the resolved canonical root; escaping
+links, absolute/traversal IDs and trailing dot/space IDs are rejected. A positive
+alias-root save/load regression and an escaping-link negative control pass.
+The missing-output fixture now uses a fixed relative path; only its baseline
+changed, in the filename and error-message areas. Full application analysis and
+121 tests pass with strict screenshot comparison.
+
+PE import review identified missing MSVCP140/VCRUNTIME140/VCRUNTIME140_1 runtime
+DLLs in the earlier local ZIP. The builder now copies the selected VS18 x64
+Release CRT directory into the package and records actual source, file versions
+and SHA-256 values. Actual VS18 runtime copying passed; missing-DLL and x86
+negative controls also pass. New clean CI qualification remains pending.

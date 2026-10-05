@@ -19,3 +19,11 @@ screenshot changes reviewed independently. Full local Windows builder and enable
 three-format native automatic-export integration pass. Clean CI exposed the
 official libjxl SDK's newer Microsoft STL requirement; the Luna build coder owns
 the VS 2026 runner/preflight repair. [Current evidence](evidence/DWARF-STANDALONE-2026-10-05.md).
+
+Clean-run follow-up: Luna localization coder repaired canonical task paths for
+Windows short-name aliases and made the missing-output screenshot fixture
+machine-independent. Coordinator reviewed the containment checks and the sole
+changed screenshot. All 121 application tests and analysis pass. Luna build
+coder added app-local x64 VC runtime packaging, version/hash provenance and
+failure screenshot uploads; coordinator tested actual VS runtime copying as
+well as the positive/missing-DLL/wrong-architecture contracts.

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
@@ -21,6 +22,89 @@ void main() {
   tearDown(() async {
     if (await temporary.exists()) await temporary.delete(recursive: true);
   });
+
+  test('constructs a new task folder beneath the canonical root', () async {
+    const id = '123459-abcd04';
+    final canonicalRoot = await root
+        .create(recursive: true)
+        .then((_) => root.resolveSymbolicLinks());
+
+    final directory = await repository.directoryFor(id);
+
+    expect(directory.path, p.join(canonicalRoot, id));
+    expect(p.isWithin(canonicalRoot, directory.path), isTrue);
+  });
+
+  test('resolves an aliased root before creating and saving a task', () async {
+    const id = '123461-abcd06';
+    final canonicalRoot = Directory(
+      '${temporary.path}${Platform.pathSeparator}canonical-tasks',
+    )..createSync(recursive: true);
+    final rootAlias = Link(
+      '${temporary.path}${Platform.pathSeparator}tasks-alias',
+    );
+    await rootAlias.create(canonicalRoot.path);
+    final aliasedRepository = TaskRepository(
+      rootDirectory: Directory(rootAlias.path),
+    );
+    final task = StitchTask(
+      id: id,
+      createdAt: DateTime.utc(2026, 10, 5),
+      sourceDirectory: 'source',
+      outputDirectory: 'output',
+      photos: const [],
+      grid: const GridOptions(),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 128,
+      workers: 1,
+      phase: StitchPhase.imported,
+    );
+
+    await aliasedRepository.save(task);
+
+    final resolvedRoot = await canonicalRoot.resolveSymbolicLinks();
+    final directory = await aliasedRepository.directoryFor(id);
+    expect(directory.path, p.join(resolvedRoot, id));
+    expect(await aliasedRepository.loadById(id), isNotNull);
+    expect(await File(p.join(directory.path, 'task.json')).exists(), isTrue);
+  });
+
+  test('rejects empty, absolute, and traversal task IDs', () async {
+    for (final id in [
+      '',
+      '..',
+      '.. ',
+      ' .',
+      'id.',
+      '../outside',
+      r'..\outside',
+      p.absolute('${temporary.path}${Platform.pathSeparator}outside'),
+    ]) {
+      await expectLater(
+        repository.directoryFor(id),
+        throwsA(isA<FileSystemException>()),
+        reason: 'Task ID must stay inside the canonical task root: $id',
+      );
+    }
+  });
+
+  test(
+    'rejects an existing task link that resolves outside the root',
+    () async {
+      const id = '123460-abcd05';
+      final outside = Directory(
+        '${temporary.path}${Platform.pathSeparator}outside',
+      )..createSync(recursive: true);
+      final link = Link(p.join(root.path, id));
+      await root.create(recursive: true);
+      await link.create(outside.path);
+
+      await expectLater(
+        repository.directoryFor(id),
+        throwsA(isA<FileSystemException>()),
+      );
+    },
+  );
 
   test(
     'metadata tombstone blocks late saves and preserves all task files',

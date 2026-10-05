@@ -334,13 +334,20 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
     await tester.binding.setSurfaceSize(const Size(1180, 800));
     final output = File('build/viewer-golden-output.jxl');
+    final missingOutput = File('build/viewer-golden-missing.jxl');
     await _fileIo(tester, () async {
       await output.parent.create(recursive: true);
       await output.writeAsBytes([1, 2, 3, 4]);
+      if (await missingOutput.exists()) await missingOutput.delete();
     });
     addTearDown(
       () => _fileIo(tester, () async {
         if (await output.exists()) await output.delete();
+      }),
+    );
+    addTearDown(
+      () => _fileIo(tester, () async {
+        if (await missingOutput.exists()) await missingOutput.delete();
       }),
     );
     final root = Directory(
@@ -414,7 +421,7 @@ void main() {
     await capture(
       'missing_output',
       fingerprint,
-      exportPath: '${root.path}/missing.jxl',
+      exportPath: missingOutput.path,
     );
     await tester.binding.setSurfaceSize(null);
   });

@@ -46,8 +46,24 @@ class TaskRepository {
 
   Future<Directory> directoryFor(String id) async {
     final base = await root();
-    final directory = Directory(p.join(base.path, id));
     final resolvedRoot = await base.resolveSymbolicLinks();
+    if (id.trim().isEmpty ||
+        id != id.trim() ||
+        id == '.' ||
+        id == '..' ||
+        id.endsWith('.') ||
+        p.isAbsolute(id) ||
+        id.contains('/') ||
+        id.contains('\\') ||
+        id.contains(':')) {
+      throw const FileSystemException('Invalid task directory');
+    }
+    // Build new children from the canonical root. On Windows, the support
+    // directory can be reached through an 8.3 alias while resolveSymbolicLinks
+    // returns its long name; mixing those paths makes valid children appear
+    // outside the root. Existing children are still resolved below so a
+    // junction/symlink that escapes the task root is rejected.
+    final directory = Directory(p.join(resolvedRoot, id));
     final resolved = await directory.exists()
         ? await directory.resolveSymbolicLinks()
         : p.normalize(directory.absolute.path);
