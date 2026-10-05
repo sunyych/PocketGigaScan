@@ -84,6 +84,56 @@ function Find-JxlSdkRoot([string]$Root) {
     return $null
 }
 
+function Assert-Vs18ToolchainVersion([string]$VisualStudioVersion, [string]$VCToolsVersion) {
+    if ($VisualStudioVersion -notmatch '^18(?:\.|$)') {
+        throw "Visual Studio 18 is required to link against the pinned libjxl SDK; found '$VisualStudioVersion'."
+    }
+    $toolsetMatch = [regex]::Match($VCToolsVersion, '^(\d+\.\d+(?:\.\d+){0,2})')
+    if (-not $toolsetMatch.Success -or [version]$toolsetMatch.Groups[1].Value -lt [version]'14.50') {
+        throw "MSVC 14.50 or newer is required to link against the pinned libjxl SDK; found '$VCToolsVersion'."
+    }
+}
+
+function Initialize-Vs18Environment {
+    $installerDirectory = Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft Visual Studio/Installer'
+    $vswhere = Join-Path $installerDirectory 'vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { throw "Visual Studio locator is missing: $vswhere" }
+    $vswhereOutput = @(& $vswhere -latest -products '*' -version '[18.0,19.0)' -property installationPath)
+    if ($LASTEXITCODE -ne 0) { throw 'Visual Studio locator failed while searching for Visual Studio 18.' }
+    $installationPath = $vswhereOutput | Select-Object -First 1
+    if (-not $installationPath) { throw 'Visual Studio 18 with an x64 C++ toolchain is required.' }
+    $installationPath = [IO.Path]::GetFullPath($installationPath.Trim())
+    $devCmd = Join-Path $installationPath 'Common7/Tools/VsDevCmd.bat'
+    if (-not (Test-Path -LiteralPath $devCmd -PathType Leaf)) { throw "VS 18 developer environment script is missing: $devCmd" }
+
+    $commandLine = 'call "{0}" -no_logo -arch=x64 -host_arch=x64 >nul && set' -f $devCmd
+    $environmentLines = & $env:ComSpec /d /c $commandLine
+    if ($LASTEXITCODE -ne 0) { throw 'Could not initialize the Visual Studio 18 x64 developer environment.' }
+    foreach ($line in $environmentLines) {
+        $separator = $line.IndexOf('=')
+        if ($separator -gt 0) {
+            $name = $line.Substring(0, $separator)
+            Set-Item -Path "Env:$name" -Value $line.Substring($separator + 1)
+        }
+    }
+    Assert-Vs18ToolchainVersion $env:VisualStudioVersion $env:VCToolsVersion
+    $link = Get-Command link.exe -ErrorAction Stop
+    $cl = Get-Command cl.exe -ErrorAction Stop
+    $installPrefix = $installationPath.TrimEnd([char[]]@('\', '/')) + [IO.Path]::DirectorySeparatorChar
+    foreach ($compiler in @($link, $cl)) {
+        if (-not ([IO.Path]::GetFullPath($compiler.Source)).StartsWith($installPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "The selected $($compiler.Name) is outside the VS 18 installation: $($compiler.Source)"
+        }
+    }
+    Write-Host "MSVC toolchain: Visual Studio $env:VisualStudioVersion, MSVC $env:VCToolsVersion, linker $($link.Source)"
+    return [pscustomobject]@{
+        visualStudioVersion = $env:VisualStudioVersion
+        msvcToolsetVersion = $env:VCToolsVersion
+        linkerPath = $link.Source
+        generator = 'Visual Studio 18 2026'
+    }
+}
+
 function Copy-RustRegistryLicenses([string]$MetadataJson, [string]$DestinationRoot) {
     $metadata = $MetadataJson | ConvertFrom-Json
     if (-not $metadata.packages) { throw 'Cargo metadata did not contain packages.' }
@@ -157,6 +207,8 @@ function Get-BuildPlan {
         flutterVersion = $pin.flutterVersion
         flutterCommit = $pin.flutterCommit
         rustVersion = $pin.rustVersion
+        minimumVisualStudioVersion = '18.0'
+        minimumMsvcToolsetVersion = '14.50'
         nativeOutputs = @('png', 'tiff', 'jxl')
         releaseExecutable = Join-Path $releaseDir 'PocketGigaScan.exe'
         zip = $archivePath
@@ -173,8 +225,9 @@ if ($PlanOnly) {
 if (-not (Test-Path -LiteralPath (Join-Path $native 'Cargo.toml'))) {
     throw "Vendored Rust core is missing: $native"
 }
-if (-not (Get-Command cmake.exe -ErrorAction SilentlyContinue)) { throw 'CMake is required (Visual Studio 2022 C++ workload must be installed).' }
 if (-not (Get-Command cargo.exe -ErrorAction SilentlyContinue)) { throw 'Rust/Cargo is required; install the pinned Rust toolchain 1.88.0.' }
+$vsToolchain = Initialize-Vs18Environment
+if (-not (Get-Command cmake.exe -ErrorAction SilentlyContinue)) { throw 'CMake is required (Visual Studio 2026 C++ workload must be installed).' }
 
 Assert-OwnedPath $cache $OutputDirectory
 New-Item -ItemType Directory -Force -Path $cache, $OutputDirectory | Out-Null
@@ -285,7 +338,7 @@ if (-not $OpenCvDir) {
         New-Item -ItemType Directory -Force -Path $opencvSource | Out-Null
         Invoke-Checked 'tar.exe' @('-xzf', $sourceArchive, '--strip-components=1', '-C', $opencvSource) $cache
     }
-    $vsGenerator = 'Visual Studio 17 2022'
+    $vsGenerator = $vsToolchain.generator
     $cmakeArgs = @(
         '-S', $opencvSource, '-B', $opencvBuild, '-G', $vsGenerator, '-A', 'x64',
         "-DCMAKE_INSTALL_PREFIX=$opencvInstall",
@@ -440,6 +493,10 @@ $manifest = [ordered]@{
     libjxlVersion = $pin.jxlVersion
     libjxlSdkSha256 = $pin.jxlSha256
     flutterCommit = $pin.flutterCommit
+    visualStudioVersion = $vsToolchain.visualStudioVersion
+    msvcToolsetVersion = $vsToolchain.msvcToolsetVersion
+    cmakeGenerator = $vsToolchain.generator
+    linkerPath = $vsToolchain.linkerPath
     flutterArchiveSha256 = $pin.flutterSha256
     formats = @('PNG', 'TIFF', 'JPEG XL')
     capabilities = $capabilities

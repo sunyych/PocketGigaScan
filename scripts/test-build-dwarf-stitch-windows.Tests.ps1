@@ -26,6 +26,20 @@ $jxlRootAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $jxlRootAst) 'Builder must locate the official libjxl SDK directory.'
 Invoke-Expression $jxlRootAst.Extent.Text
+$vsVersionAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-Vs18ToolchainVersion'
+}, $true)
+Assert-True ($null -ne $vsVersionAst) 'Builder must fail fast on incompatible Visual Studio/MSVC toolsets.'
+Invoke-Expression $vsVersionAst.Extent.Text
+Assert-Vs18ToolchainVersion '18.0' '14.50.35717'
+Assert-Vs18ToolchainVersion '18.0' '14.51.36217'
+$wrongVsRejected = $false
+try { Assert-Vs18ToolchainVersion '17.14' '14.51.36217' } catch { $wrongVsRejected = $true }
+Assert-True $wrongVsRejected 'Toolchain preflight accepted Visual Studio 17.'
+$oldMsvcRejected = $false
+try { Assert-Vs18ToolchainVersion '18.0' '14.44.35207' } catch { $oldMsvcRejected = $true }
+Assert-True $oldMsvcRejected 'Toolchain preflight accepted the VS2026 MSVC 14.44 compatibility toolset.'
 $rustLicenseAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-RustRegistryLicenses'
@@ -137,6 +151,7 @@ Assert-True ($plan.product -eq 'PocketGigaScan' -and $plan.subtitle -eq 'DWARF S
 Assert-True ($plan.flutterVersion -eq '3.44.2') 'Flutter pin changed unexpectedly.'
 Assert-True ($plan.flutterCommit -eq 'c9a6c484230f8b5e408ec57be1ef71dee1e77020') 'Flutter commit pin changed unexpectedly.'
 Assert-True ($plan.rustVersion -eq '1.88.0') 'Rust pin changed unexpectedly.'
+Assert-True ($plan.minimumVisualStudioVersion -eq '18.0' -and $plan.minimumMsvcToolsetVersion -eq '14.50') 'Plan does not require the libjxl-compatible VS 18 / MSVC 14.50 toolchain.'
 Assert-True ($plan.openCvVersion -eq '4.13.0' -and $plan.openCvSha256 -eq '1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d') 'OpenCV source pin or checksum changed unexpectedly.'
 Assert-True ($plan.libjxlVersion -eq '0.12.0' -and $plan.libjxlSha256 -eq '3025d7e308390796d20492322e606bc92decaee7b6bc99d3f7547870ae5db7de') 'libjxl SDK pin or checksum changed unexpectedly.'
 Assert-True ($plan.djxlSha256 -eq '6970ce73de51e046b39bd5f28fc7bc5da64e9f6505c11194319f43d8849d2bf4') 'Independent djxl verification tool pin changed unexpectedly.'
@@ -145,10 +160,15 @@ Assert-True ([IO.Path]::GetFileName($plan.releaseExecutable) -eq 'PocketGigaScan
 Assert-True ([IO.Path]::GetFileName($plan.zip) -eq 'PocketGigaScan-Windows-x64.zip') 'Windows ZIP name changed unexpectedly.'
 
 $cmake = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/CMakeLists.txt') -Raw
+$builderText = Get-Content -LiteralPath $builderPath -Raw
 $runner = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/runner/CMakeLists.txt') -Raw
+Assert-True ($builderText -match '\$vswhereOutput = @\(& \$vswhere' -and
+    $builderText -match '\$installationPath = \$vswhereOutput \| Select-Object -First 1') 'vswhere output must be captured before reading its native exit code.'
 Assert-True ($cmake -match 'set\(BINARY_NAME "PocketGigaScan"\)') 'CMake binary target is not PocketGigaScan.'
 Assert-True ($cmake -match 'native/core/target/release/lumia_gigascan_core\.dll') 'CMake does not stage the vendored core build.'
 Assert-True ($cmake -notmatch '\.local[/\\]flutter-stitch-core') 'Windows CMake still depends on a machine-local core DLL.'
+Assert-True ($builderText -match "generator = 'Visual Studio 18 2026'") 'OpenCV source build is not configured for Visual Studio 18.'
+Assert-True ($builderText -match '\$vsGenerator = \$vsToolchain\.generator') 'OpenCV build does not use the selected VS 18 generator.'
 Assert-True ($runner -match 'native/core/target/release/lumia_gigascan_core\.dll') 'Runner debug launch does not stage the vendored core.'
 $resource = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/runner/Runner.rc') -Raw
 Assert-True ($resource -match 'VALUE "ProductName", "PocketGigaScan"') 'Windows product metadata is not branded PocketGigaScan.'
@@ -157,6 +177,8 @@ $workflow = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/windows
 Assert-True ($workflow -match 'pull_request:' -and $workflow -match 'push:') 'Workflow must verify both pushes and pull requests.'
 Assert-True ($workflow -match 'actions/upload-artifact@') 'Workflow does not publish per-run build artifacts.'
 Assert-True ($workflow -match 'actions/cache@caa296126883cff596d87d8935842f9db880ef25') 'Workflow does not cache pinned build dependencies.'
+Assert-True ($workflow -match 'runs-on: windows-2025-vs2026') 'Workflow must use the compatible VS 2026 hosted image.'
+Assert-True ($workflow -match 'windows-2025-vs2026-vs18-msvc-14\.50') 'Dependency cache key must encode the compatible MSVC toolchain.'
 Assert-True ($workflow -match 'opencv-1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d') 'Dependency cache key must include the OpenCV source hash.'
 Assert-True ($workflow -notmatch 'native/core/target') 'Workflow must not cache generated native DLL or Cargo target output.'
 Assert-True ($workflow -match "github\.event_name == 'push'") 'Prerelease publication is not limited to push events.'

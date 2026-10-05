@@ -6,7 +6,7 @@ GitHub workflow: `.github/workflows/windows-build.yml`. Each push builds a ZIP/c
 
 ## Local setup
 
-Install Flutter 3.44.2 (Dart 3.12.2), Rust 1.88.0 with MSVC target, Visual Studio C++ desktop tools, CMake, Python and Git. Run the PowerShell builder from the repository in the Visual Studio developer environment. Native dependencies may be reused through its explicit path options; clean CI downloads/builds them independently.
+Install Flutter 3.44.2 (Dart 3.12.2), Rust 1.88.0 with MSVC target, Visual Studio 2026 C++ desktop tools (MSVC 14.50 or newer), CMake with the Visual Studio 18 generator, Python and Git. Run the PowerShell builder from the repository. The verified libjxl static SDK needs the newer Microsoft STL; VS 2022's 14.44 libraries cannot link it. CI uses the explicit `windows-2025-vs2026` hosted image. Native dependencies may be reused through explicit path options; clean CI downloads/builds them independently.
 
 ```powershell
 pwsh -File scripts/build-dwarf-stitch-windows.ps1
