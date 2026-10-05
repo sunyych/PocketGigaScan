@@ -1,0 +1,82 @@
+name: PocketGigaScan Windows build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dwarf-windows-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows x64 release
+    runs-on: windows-2022
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore pinned native and Flutter dependencies
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/PocketGigaScan-Windows/dependencies
+          key: dwarf-deps-windows-2022-opencv-1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d-jxl-3025d7e308390796d20492322e606bc92decaee7b6bc99d3f7547870ae5db7de-flutter-d79ae99807ba744b843e54f048308c629061456fdc7b0753251fb96eb5346a0e-rust-1.88.0-v1
+
+      - name: Validate builder and packaging tests
+        shell: pwsh
+        run: ./scripts/test-build-dwarf-stitch-windows.Tests.ps1
+
+      - name: Build Rust core and Flutter Windows release
+        shell: pwsh
+        run: ./scripts/build-dwarf-stitch-windows.ps1 -OutputDirectory "$env:RUNNER_TEMP\PocketGigaScan-Windows"
+
+      - name: Upload this push build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-Windows-x64-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-x64.zip
+            ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-x64.zip.sha256
+            ${{ runner.temp }}/PocketGigaScan-Windows/build-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Refresh latest Windows prerelease
+        if: >-
+          github.event_name == 'push' &&
+          github.repository == 'sunyych/PocketGigaScan' &&
+          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACKAGE_DIR: ${{ runner.temp }}/PocketGigaScan-Windows
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Command gh.exe -ErrorAction SilentlyContinue)) { throw 'GitHub CLI is missing from the hosted runner.' }
+          $assets = @(
+            (Join-Path $env:PACKAGE_DIR 'PocketGigaScan-Windows-x64.zip'),
+            (Join-Path $env:PACKAGE_DIR 'PocketGigaScan-Windows-x64.zip.sha256'),
+            (Join-Path $env:PACKAGE_DIR 'build-manifest.json')
+          )
+          foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset)) { throw "Release asset missing: $asset" } }
+          & gh release view latest *> $null
+          if ($LASTEXITCODE -ne 0) {
+            & gh release create latest @assets --target $env:GITHUB_SHA --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest successful Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
+          } else {
+            & gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/latest" --method PATCH --field "sha=$env:GITHUB_SHA" --field force=true
+            if ($LASTEXITCODE -ne 0) { throw 'Could not move the latest prerelease tag to this commit.' }
+            & gh release edit latest --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest successful Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update latest prerelease metadata.' }
+            & gh release upload latest @assets --clobber
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the latest Windows release assets.' }

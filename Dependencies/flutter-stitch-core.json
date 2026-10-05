@@ -1,0 +1,12 @@
+{
+  "abiVersion": 1,
+  "jobSymbol": "lumia_gigascan_job_json",
+  "repository": "native/core",
+  "vendoredSnapshot": "bff2a6627d3afdc90a0b62cea4565124920d40a3",
+  "processingBaseline": "687e17f17f92bf3cad553d6904b7af95c5d1596c",
+  "sourceBuildRequirement": "Build vendored Rust source with pinned OpenCV4.13.0 and official static libjxl0.12.0; release manifest records the PocketGigaScan source commit and exact DLL hash.",
+  "platforms": {
+    "windowsX64": "current release target",
+    "android": "future shared-engine packaging; not qualified by Windows checks"
+  }
+}
