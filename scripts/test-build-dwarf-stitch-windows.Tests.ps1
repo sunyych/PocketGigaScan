@@ -164,6 +164,9 @@ $builderText = Get-Content -LiteralPath $builderPath -Raw
 $runner = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/runner/CMakeLists.txt') -Raw
 Assert-True ($builderText -match '\$vswhereOutput = @\(& \$vswhere' -and
     $builderText -match '\$installationPath = \$vswhereOutput \| Select-Object -First 1') 'vswhere output must be captured before reading its native exit code.'
+$flutterWarmupIndex = $builderText.IndexOf("Invoke-Checked `$FlutterPath @('--version') `$repo", [StringComparison]::Ordinal)
+$flutterMachineIndex = $builderText.IndexOf("`$flutterVersionOutput = & `$FlutterPath '--version' '--machine'", [StringComparison]::Ordinal)
+Assert-True ($flutterWarmupIndex -ge 0 -and $flutterMachineIndex -gt $flutterWarmupIndex) 'Flutter must finish cold-start output before the strict machine-readable version query.'
 Assert-True ($cmake -match 'set\(BINARY_NAME "PocketGigaScan"\)') 'CMake binary target is not PocketGigaScan.'
 Assert-True ($cmake -match 'native/core/target/release/lumia_gigascan_core\.dll') 'CMake does not stage the vendored core build.'
 Assert-True ($cmake -notmatch '\.local[/\\]flutter-stitch-core') 'Windows CMake still depends on a machine-local core DLL.'
@@ -192,5 +195,10 @@ Assert-True ($icon.Length -gt 64 -and $icon[0] -eq 0 -and $icon[1] -eq 0 -and $i
 Assert-True ($icon[4] -ge 5) 'Windows icon is missing multi-resolution images.'
 Assert-True (Test-Path -LiteralPath (Join-Path $repo 'branding/dwarf-stitch-icon.svg')) 'Editable SVG icon source is missing.'
 Assert-True (Test-Path -LiteralPath (Join-Path $repo 'branding/generate_app_icon.py')) 'Reproducible icon generator is missing.'
+foreach ($dependencyLicense in @('LICENSE.libtiff', 'LICENSE.openjpeg')) {
+    $dependencyLicensePath = Join-Path $repo "third_party/licenses/$dependencyLicense"
+    Assert-True (Test-Path -LiteralPath $dependencyLicensePath -PathType Leaf) "Static OpenCV dependency license is missing: $dependencyLicense"
+    Assert-True ((Get-Item -LiteralPath $dependencyLicensePath).Length -gt 1000) "Static OpenCV dependency license is unexpectedly incomplete: $dependencyLicense"
+}
 
 Write-Host 'Windows builder plan, vendored core paths, release safety, and app icon tests passed.'

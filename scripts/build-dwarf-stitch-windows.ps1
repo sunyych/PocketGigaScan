@@ -450,6 +450,7 @@ if (-not $FlutterPath) {
 }
 if (-not (Test-Path -LiteralPath $FlutterPath -PathType Leaf)) { throw "Flutter executable not found: $FlutterPath" }
 $FlutterPath = [IO.Path]::GetFullPath($FlutterPath)
+Invoke-Checked $FlutterPath @('--version') $repo
 $flutterVersionOutput = & $FlutterPath '--version' '--machine'
 if ($LASTEXITCODE -ne 0) { throw 'Could not query Flutter version.' }
 $flutterVersionInfo = ($flutterVersionOutput -join [Environment]::NewLine) | ConvertFrom-Json
