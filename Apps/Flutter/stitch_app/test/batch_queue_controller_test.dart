@@ -3,6 +3,8 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/models/batch_queue.dart';
+import 'package:stitch_app/models/grid_options.dart';
+import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
@@ -78,6 +80,24 @@ class _MemoryTasks extends TaskRepository {
     });
     await save(task);
     return task;
+  }
+}
+
+class _GatedTaskLoads extends _MemoryTasks {
+  _GatedTaskLoads(super.taskRoot);
+
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  bool blockReads = false;
+
+  @override
+  Future<StitchTask?> loadById(String id) async {
+    if (blockReads) {
+      blockReads = false;
+      entered.complete();
+      await release.future;
+    }
+    return super.loadById(id);
   }
 }
 
@@ -287,6 +307,24 @@ class _GatedStartApi extends _FakeApi {
   }
 }
 
+class _GatedQueueRepository extends BatchQueueRepository {
+  _GatedQueueRepository({required super.rootDirectory});
+
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  bool _firstSave = true;
+
+  @override
+  Future<void> save(BatchQueue queue) async {
+    if (_firstSave) {
+      _firstSave = false;
+      entered.complete();
+      await release.future;
+    }
+    await super.save(queue);
+  }
+}
+
 Future<void> _makeFolder(Directory parent, String name, int count) async {
   final folder = Directory('${parent.path}${Platform.pathSeparator}$name')
     ..createSync();
@@ -298,11 +336,16 @@ Future<void> _makeFolder(Directory parent, String name, int count) async {
 }
 
 Future<void> _waitUntil(bool Function() condition, [String? reason]) async {
-  for (var attempt = 0; attempt < 200; attempt++) {
+  final elapsed = Stopwatch()..start();
+  const timeout = Duration(seconds: 20);
+  while (elapsed.elapsed < timeout) {
     if (condition()) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
-  fail(reason ?? 'Timed out waiting for batch controller state');
+  fail(
+    '${reason ?? 'Timed out waiting for batch controller state'} '
+    'after ${elapsed.elapsed}',
+  );
 }
 
 void main() {
@@ -339,7 +382,7 @@ void main() {
 
   tearDown(() async {
     controller.dispose();
-    await Future<void>.delayed(const Duration(milliseconds: 40));
+    await controller.drain();
     if (await temporary.exists()) await temporary.delete(recursive: true);
   });
 
@@ -421,6 +464,165 @@ void main() {
           (item) => item.state == BatchItemState.completed,
         ),
       );
+    },
+  );
+
+  test(
+    'drain waits for an in-flight queue save before storage cleanup',
+    () async {
+      final isolated = await Directory.systemTemp.createTemp(
+        'batch-controller-drain-test-',
+      );
+      final isolatedParent = Directory(
+        '${isolated.path}${Platform.pathSeparator}source',
+      )..createSync();
+      await _makeFolder(isolatedParent, 'scene', 4);
+      final gatedRepository = _GatedQueueRepository(
+        rootDirectory: Directory(
+          '${isolated.path}${Platform.pathSeparator}queues',
+        ),
+      );
+      final isolatedApi = _FakeApi();
+      final isolatedController = BatchQueueController(
+        api: isolatedApi,
+        queueRepository: gatedRepository,
+        taskRepository: _MemoryTasks(
+          Directory('${isolated.path}${Platform.pathSeparator}tasks'),
+        ),
+      );
+      await isolatedController.initialize();
+      var released = false;
+      var disposed = false;
+      try {
+        final importing = isolatedController.addParent(isolatedParent.path);
+        await gatedRepository.entered.future.timeout(
+          const Duration(seconds: 10),
+        );
+        isolatedController.dispose();
+        disposed = true;
+        var drained = false;
+        final drain = isolatedController.drain().then((_) => drained = true);
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+        expect(
+          drained,
+          isFalse,
+          reason: 'The first queue save is still gated.',
+        );
+
+        gatedRepository.release.complete();
+        released = true;
+        await importing;
+        await drain;
+
+        expect(await gatedRepository.loadAll(), hasLength(1));
+        expect(
+          isolatedApi.active,
+          0,
+          reason: 'dispose prevents new job starts.',
+        );
+      } finally {
+        if (!released) gatedRepository.release.complete();
+        if (!disposed) isolatedController.dispose();
+        await isolatedController.drain();
+        if (await isolated.exists()) await isolated.delete(recursive: true);
+      }
+    },
+  );
+
+  test(
+    'dispose during a gated task load prevents a new native start',
+    () async {
+      final isolated = await Directory.systemTemp.createTemp(
+        'batch-controller-dispose-load-',
+      );
+      final queueRepository = BatchQueueRepository(
+        rootDirectory: Directory(
+          '${isolated.path}${Platform.pathSeparator}queues',
+        ),
+      );
+      const taskId = '12345-abcd';
+      const itemId = 'ready-item';
+      final sourceParent = Directory(
+        '${isolated.path}${Platform.pathSeparator}source',
+      )..createSync();
+      final sourceChild = Directory(
+        '${sourceParent.path}${Platform.pathSeparator}scene',
+      )..createSync();
+      final queueOutputDirectory =
+          '${isolated.path}${Platform.pathSeparator}source_stitched';
+      final outputDirectory =
+          '${isolated.path}${Platform.pathSeparator}tasks'
+          '${Platform.pathSeparator}$taskId${Platform.pathSeparator}render';
+      final tasks = _GatedTaskLoads(
+        Directory('${isolated.path}${Platform.pathSeparator}tasks'),
+      )..blockReads = true;
+      tasks.values[taskId] = StitchTask(
+        id: taskId,
+        createdAt: DateTime.utc(2026, 10, 5),
+        sourceDirectory: sourceChild.path,
+        outputDirectory: outputDirectory,
+        photos: const [
+          ImportedPhoto(
+            originalName: 'one.jpg',
+            storedPath: 'one.jpg',
+            sha256: 'synthetic',
+            width: 64,
+            height: 48,
+            originalOrder: 0,
+          ),
+        ],
+        grid: const GridOptions(mode: GridMode.sequence, rows: 1, columns: 1),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.imported,
+      );
+      await queueRepository.save(
+        BatchQueue(
+          id: 'queue',
+          createdAt: DateTime.utc(2026, 10, 5),
+          parentDirectory: sourceParent.path,
+          outputDirectory: queueOutputDirectory,
+          items: [
+            BatchQueueItem(
+              id: itemId,
+              name: 'scene',
+              sourceDirectory: sourceChild.path,
+              taskId: taskId,
+              state: BatchItemState.ready,
+            ),
+          ],
+        ),
+      );
+      expect(await queueRepository.loadAll(), hasLength(1));
+      final api = _FakeApi(slots: 1);
+      final gatedController = BatchQueueController(
+        api: api,
+        queueRepository: queueRepository,
+        taskRepository: tasks,
+      );
+      var disposed = false;
+      try {
+        await gatedController.initialize();
+        await tasks.entered.future.timeout(const Duration(seconds: 10));
+        gatedController.dispose();
+        disposed = true;
+        final drain = gatedController.drain();
+        tasks.release.complete();
+        await drain;
+
+        expect(api.jobs, isEmpty);
+        expect(tasks.values[taskId]?.nativeJobId, isNull);
+        expect(
+          gatedController.queues.single.items.single.state,
+          BatchItemState.ready,
+        );
+      } finally {
+        if (!tasks.release.isCompleted) tasks.release.complete();
+        if (!disposed) gatedController.dispose();
+        await gatedController.drain();
+        if (await isolated.exists()) await isolated.delete(recursive: true);
+      }
     },
   );
 
@@ -547,6 +749,7 @@ void main() {
     () async {
       api = _FakeApi(cpu: 9, memory: 512, slots: 1);
       controller.dispose();
+      await controller.drain();
       controller = BatchQueueController(
         api: api,
         queueRepository: queues,
@@ -628,6 +831,7 @@ void main() {
         clock: () => currentTime,
       );
       controller.dispose();
+      await controller.drain();
       controller = reopened;
       await reopened.initialize();
       expect(reopened.queues.single.items.single.state, BatchItemState.paused);
@@ -642,6 +846,7 @@ void main() {
       await _makeFolder(parent, 'gated-start', 4);
       final gated = _GatedStartApi();
       controller.dispose();
+      await controller.drain();
       controller = BatchQueueController(
         api: gated,
         queueRepository: queues,
@@ -681,6 +886,7 @@ void main() {
       await _makeFolder(parent, 'gated-busy', 4);
       final gated = _GatedStartApi()..resourceBusy = true;
       controller.dispose();
+      await controller.drain();
       controller = BatchQueueController(
         api: gated,
         queueRepository: queues,
@@ -768,6 +974,7 @@ void main() {
     final destination = job.destination;
     job.state = 'paused';
     controller.dispose();
+    await controller.drain();
 
     final reopened = BatchQueueController(
       api: api,
