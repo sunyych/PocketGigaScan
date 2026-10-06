@@ -10,6 +10,7 @@ import 'services/batch_queue_controller.dart';
 import 'services/native_job_api.dart';
 import 'services/mobile_storage_service.dart';
 import 'services/mobile_runtime_service.dart';
+import 'services/settings_controller.dart';
 import 'services/power_service.dart';
 import 'models/stitch_task.dart';
 import 'widgets/exported_image_viewer.dart';
@@ -26,6 +27,7 @@ class BatchQueuePage extends StatefulWidget {
     this.mobileStorageService,
     this.runtimeService,
     this.resourceBudget,
+    this.settingsController,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -34,6 +36,7 @@ class BatchQueuePage extends StatefulWidget {
   final MobileStorageService? mobileStorageService;
   final MobileRuntimeService? runtimeService;
   final MobileResourceBudget? resourceBudget;
+  final SettingsController? settingsController;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -42,7 +45,12 @@ class BatchQueuePage extends StatefulWidget {
 class _BatchQueuePageState extends State<BatchQueuePage> {
   late final bool _ownsController = widget.controller == null;
   late final BatchQueueController _controller =
-      widget.controller ?? BatchQueueController(api: widget.api);
+      widget.controller ??
+      BatchQueueController(
+        api: widget.api,
+        storageService:
+            widget.mobileStorageService ?? const MobileStorageService(),
+      );
   bool _busy = false;
   bool _jxlAvailable = false;
   late final MobileStorageService _storage =
@@ -85,6 +93,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
 
   Future<void> _selectParent() async {
     if (_busy || (_mobile && !_android)) return;
+    await widget.settingsController?.ready;
     final path = _android
         ? await _storage.pickBatchParent()
         : await FilePicker.platform.getDirectoryPath(
@@ -95,7 +104,8 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       if (_android) await _storage.releaseBatchParent(path);
       return;
     }
-    var selectedFormat = ExportFormat.tiff;
+    var selectedFormat =
+        widget.settingsController?.settings.exportFormat ?? ExportFormat.tiff;
     final format = await showDialog<ExportFormat>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -144,7 +154,11 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     }
     setState(() => _busy = true);
     try {
-      await _controller.addParent(path, outputFormat: format);
+      await _controller.addParent(
+        path,
+        outputFormat: format,
+        settings: widget.settingsController?.settings,
+      );
     } on Object catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(
@@ -649,6 +663,14 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                     tooltip: StitchLocalizations.of(context).text('打开全景查看器'),
                     onPressed: () => _openCompleted(item),
                     icon: const Icon(Icons.zoom_in),
+                  ),
+                if (item.state == BatchItemState.completed &&
+                    (item.message?.contains('发布失败') ?? false))
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('重试发布整图'),
+                    onPressed: () =>
+                        _controller.retryPublish(queue.id, item.id),
+                    icon: const Icon(Icons.upload_file),
                   ),
                 IconButton(
                   tooltip: StitchLocalizations.of(context).text('删除本地任务记录'),

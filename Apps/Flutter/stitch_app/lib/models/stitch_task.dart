@@ -7,6 +7,7 @@ import 'imported_photo.dart';
 import 'performance_options.dart';
 import 'stitch_quality.dart';
 import 'export_fingerprint.dart';
+import 'stitch_timeline.dart';
 
 enum StitchPhase {
   imported,
@@ -56,6 +57,10 @@ class StitchTask {
     this.exportFingerprint,
     this.exportCheckpointPath,
     this.largeJobApprovalScope,
+    this.timeline = const StitchTimeline(),
+    this.exportDirectory,
+    this.publishedExportPath,
+    this.publishError,
   });
 
   final String id;
@@ -90,15 +95,24 @@ class StitchTask {
   final Map<String, Object?>? resultStats;
   final ExportFileFingerprint? exportFingerprint;
   final String? exportCheckpointPath;
+
   /// Approval is bound to this task identity, the current grid and photo bytes.
   final String? largeJobApprovalScope;
+  final StitchTimeline timeline;
+  final String? exportDirectory;
+  final String? publishedExportPath;
+  final String? publishError;
 
   bool get needsLargeJobConfirmation =>
       grid.rows > 6 || grid.columns > 6 || photos.length > 36;
 
   String get currentLargeJobApprovalScope {
     final forced = grid.forceGridCells.toList()
-      ..sort((a, b) => a.row != b.row ? a.row.compareTo(b.row) : a.column.compareTo(b.column));
+      ..sort(
+        (a, b) => a.row != b.row
+            ? a.row.compareTo(b.row)
+            : a.column.compareTo(b.column),
+      );
     final canonical = jsonEncode({
       'taskId': id,
       'jobPath': outputDirectory,
@@ -109,13 +123,17 @@ class StitchTask {
       'startCorner': grid.startCorner.name,
       'serpentine': grid.serpentine,
       'forced': forced.map((cell) => [cell.row, cell.column]).toList(),
-      'photos': photos.map((photo) => {
-        'path': photo.storedPath,
-        'sha256': photo.sha256,
-        'width': photo.width,
-        'height': photo.height,
-        'order': photo.originalOrder,
-      }).toList(),
+      'photos': photos
+          .map(
+            (photo) => {
+              'path': photo.storedPath,
+              'sha256': photo.sha256,
+              'width': photo.width,
+              'height': photo.height,
+              'order': photo.originalOrder,
+            },
+          )
+          .toList(),
     });
     return sha256.convert(utf8.encode(canonical)).toString();
   }
@@ -162,6 +180,13 @@ class StitchTask {
     bool clearExportCheckpointPath = false,
     String? largeJobApprovalScope,
     bool clearLargeJobApprovalScope = false,
+    StitchTimeline? timeline,
+    String? exportDirectory,
+    bool clearExportDirectory = false,
+    String? publishedExportPath,
+    bool clearPublishedExportPath = false,
+    String? publishError,
+    bool clearPublishError = false,
   }) => StitchTask(
     id: id,
     createdAt: createdAt,
@@ -208,6 +233,14 @@ class StitchTask {
     largeJobApprovalScope: clearLargeJobApprovalScope
         ? null
         : largeJobApprovalScope ?? this.largeJobApprovalScope,
+    timeline: timeline ?? this.timeline,
+    exportDirectory: clearExportDirectory
+        ? null
+        : exportDirectory ?? this.exportDirectory,
+    publishedExportPath: clearPublishedExportPath
+        ? null
+        : publishedExportPath ?? this.publishedExportPath,
+    publishError: clearPublishError ? null : publishError ?? this.publishError,
   );
 
   Map<String, Object?> toJson() => {
@@ -247,6 +280,10 @@ class StitchTask {
     'exportFingerprint': exportFingerprint?.toJson(),
     'exportCheckpointPath': exportCheckpointPath,
     'largeJobApprovalScope': largeJobApprovalScope,
+    'timeline': timeline.toJson(),
+    'exportDirectory': exportDirectory,
+    'publishedExportPath': publishedExportPath,
+    'publishError': publishError,
   };
 
   factory StitchTask.fromJson(Map<String, Object?> json) {
@@ -346,6 +383,12 @@ class StitchTask {
           : null,
       exportCheckpointPath: legacyExportCheckpoint,
       largeJobApprovalScope: json['largeJobApprovalScope'] as String?,
+      timeline: StitchTimeline.fromJson(
+        json['timeline'] as Map<String, Object?>?,
+      ),
+      exportDirectory: json['exportDirectory'] as String?,
+      publishedExportPath: json['publishedExportPath'] as String?,
+      publishError: json['publishError'] as String?,
     );
   }
 }

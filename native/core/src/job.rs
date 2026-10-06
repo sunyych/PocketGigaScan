@@ -61,6 +61,46 @@ struct Snapshot {
     height: Option<u32>,
     #[serde(default)]
     commit_started: bool,
+    #[serde(default)]
+    events: Vec<Value>,
+    #[serde(default)]
+    next_event_id: u64,
+}
+
+fn stage_family(stage: &str) -> &str {
+    if stage.starts_with("grid-component-pose-") {
+        "optimize-grid-poses"
+    } else if stage.starts_with("pixel-refinement-") || stage.starts_with("pixel-bundle-") {
+        "refine-pixel-texture"
+    } else if stage.starts_with("joint-cycle-prune-") {
+        "prune-conflicting-neighbors"
+    } else if stage.starts_with("source-plane-warp-") {
+        "fit-local-texture-warp"
+    } else {
+        stage
+    }
+}
+
+fn record_transition(s: &mut Snapshot) {
+    let changed = s.events.last().is_none_or(|event| {
+        event["stage"] != stage_family(&s.stage)
+            || event["state"] != s.state
+            || event["operation"] != s.operation
+    });
+    if !changed {
+        return;
+    }
+    append_event(s, "native-transition");
+}
+
+fn append_event(s: &mut Snapshot, kind: &str) {
+    let id = s.next_event_id.max(1);
+    s.next_event_id = id + 1;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    s.events.push(json!({"id":id,"timestampUtc":millis,"kind":kind,"stage":stage_family(&s.stage),"state":s.state,"operation":s.operation}));
 }
 struct Control {
     root: PathBuf,
@@ -102,9 +142,11 @@ impl Control {
     fn update(&self, f: impl FnOnce(&mut Snapshot)) {
         let mut s = self.snapshot.lock().expect("job lock");
         f(&mut s);
+        record_transition(&mut s);
         if let Err(e) = persist(&self.root, &s) {
             s.state = "failed".into();
             s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut s);
         }
     }
     /// Atomically close the cancellation window before publishing a completed artifact.
@@ -121,9 +163,11 @@ impl Control {
             if s.state == "running" && !s.commit_started && !self.cancel.load(Ordering::SeqCst) {
                 s.stage = stage.into();
                 s.commit_started = true;
+                append_event(&mut s, "commit-started");
                 if let Err(e) = persist(&self.root, &s) {
                     s.state = "failed".into();
                     s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+                    record_transition(&mut s);
                     return false;
                 }
                 return true;
@@ -141,6 +185,7 @@ impl Control {
         if s.state == "cancelled" || self.cancel.load(Ordering::SeqCst) {
             s.state = "cancelled".into();
             s.stage = stage.into();
+            record_transition(&mut s);
             let _ = persist(&self.root, &s);
             return false;
         }
@@ -157,6 +202,7 @@ impl Control {
         }
         if self.cancel.load(Ordering::SeqCst) {
             s.state = "cancelled".into();
+            record_transition(&mut s);
             let _ = persist(&self.root, &s);
             return false;
         }
@@ -169,31 +215,37 @@ impl Control {
                 failed.error = Some(
                     json!({"code":"INPUT_CHANGED","message":"source or request fingerprint changed while paused"}),
                 );
+                record_transition(&mut failed);
                 let _ = persist(&self.root, &failed);
                 return false;
             }
             s = self.snapshot.lock().expect("job lock");
             if self.cancel.load(Ordering::SeqCst) {
                 s.state = "cancelled".into();
+                record_transition(&mut s);
                 let _ = persist(&self.root, &s);
                 return false;
             }
         }
+        let old_state = s.state.clone();
         if s.state == "paused" {
             s.state = "running".into();
         }
-        let stage_changed = s.stage != stage;
+        let stage_changed = stage_family(&s.stage) != stage_family(stage);
         let old_progress = s.progress;
         s.stage = stage.into();
         if let Some(p) = progress {
             s.progress = p;
         }
-        let should_persist =
-            stage_changed || progress.is_some_and(|p| (p - old_progress).abs() >= 0.005);
+        let should_persist = old_state != s.state
+            || stage_changed
+            || progress.is_some_and(|p| (p - old_progress).abs() >= 0.005);
         if should_persist {
+            record_transition(&mut s);
             if let Err(e) = persist(&self.root, &s) {
                 s.state = "failed".into();
                 s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+                record_transition(&mut s);
                 return false;
             }
         }
@@ -221,7 +273,7 @@ fn response(s: &Snapshot) -> Value {
         .export_destination
         .as_deref()
         .map(|path| export_format_for_path(Path::new(path)).unwrap_or("unknown"));
-    json!({"ok":true,"abiVersion":1,"jobId":s.job_id,"state":s.state,"stage":s.stage,"progress":s.progress,"backend":s.backend,"operation":s.operation,"workersRequested":s.workers_requested,"workersEffective":s.workers_effective,"operationWorkers":operation_workers,"memoryBudgetMiB":s.memory_budget_mib,"layoutPath":s.layout_path,"manifestPath":s.manifest_path,"exportDestination":s.export_destination,"exportFormat":export_format,"dimensions":s.width.zip(s.height).map(|(w,h)|json!([w,h])),"resultStats":s.result_stats,"error":s.error})
+    json!({"ok":true,"abiVersion":1,"jobId":s.job_id,"state":s.state,"stage":s.stage,"progress":s.progress,"backend":s.backend,"operation":s.operation,"events":s.events,"workersRequested":s.workers_requested,"workersEffective":s.workers_effective,"operationWorkers":operation_workers,"memoryBudgetMiB":s.memory_budget_mib,"layoutPath":s.layout_path,"manifestPath":s.manifest_path,"exportDestination":s.export_destination,"exportFormat":export_format,"dimensions":s.width.zip(s.height).map(|(w,h)|json!([w,h])),"resultStats":s.result_stats,"error":s.error})
 }
 fn fail(code: &str, msg: impl ToString) -> Value {
     json!({"ok":false,"abiVersion":1,"error":{"code":code,"message":msg.to_string()}})
@@ -569,7 +621,11 @@ fn start(c: Command) -> Value {
         width: None,
         height: None,
         commit_started: false,
+        events: Vec::new(),
+        next_event_id: 1,
     };
+    let mut snapshot = snapshot;
+    record_transition(&mut snapshot);
     let control = Arc::new(Control {
         root: root.clone(),
         snapshot: Mutex::new(snapshot),
@@ -624,6 +680,7 @@ fn get_job(id: Option<&str>) -> Result<Arc<Control>, String> {
     if ["running", "queued", "pausing", "committing"].contains(&s.state.as_str()) {
         s.state = "paused".into();
         s.commit_started = false;
+        record_transition(&mut s);
         persist(&path, &s).map_err(|e| format!("could not recover job state: {e}"))?;
     }
     let control = Arc::new(Control {
@@ -662,9 +719,11 @@ fn pause(j: Arc<Control>) -> Value {
     }
     if snapshot.state == "running" || snapshot.state == "queued" {
         snapshot.state = "pausing".into();
+        record_transition(&mut snapshot);
         if let Err(e) = persist(&j.root, &snapshot) {
             snapshot.state = "failed".into();
             snapshot.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut snapshot);
         }
     }
     let v = response(&snapshot);
@@ -684,17 +743,21 @@ fn cancel(j: Arc<Control>) -> Value {
     if !j.worker_active.load(Ordering::SeqCst) {
         s.state = "cancelled".into();
         s.stage = "cancelled".into();
+        record_transition(&mut s);
         if let Err(e) = persist(&j.root, &s) {
             s.state = "failed".into();
             s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut s);
         }
         return response(&s);
     }
     s.state = "pausing".into();
+    record_transition(&mut s);
     j.cancel.store(true, Ordering::SeqCst);
     if let Err(e) = persist(&j.root, &s) {
         s.state = "failed".into();
         s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+        record_transition(&mut s);
     }
     drop(s);
     j.changed.notify_all();
@@ -1799,7 +1862,11 @@ mod tests {
             width: None,
             height: None,
             commit_started: false,
+            events: Vec::new(),
+            next_event_id: 1,
         };
+        let mut snapshot = snapshot;
+        record_transition(&mut snapshot);
         persist(root, &snapshot).unwrap();
         Arc::new(Control {
             root: root.to_path_buf(),
@@ -1809,6 +1876,145 @@ mod tests {
             worker_active: AtomicBool::new(true),
             verify_on_resume: AtomicBool::new(false),
         })
+    }
+
+    #[test]
+    fn native_transition_events_capture_fast_changes_and_ignore_progress_only_updates() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-events");
+        let source = root.with_extension("source");
+        fs::write(&source, b"timeline fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|s| s.stage = "register".into());
+        control.update(|s| s.stage = "render-level-0".into());
+        let before = control.snapshot().events.len();
+        control.update(|s| s.progress += 0.001);
+        assert_eq!(control.snapshot().events.len(), before);
+        control.update(|s| {
+            s.state = "completed".into();
+            s.stage = "done".into();
+        });
+        let events = control.snapshot().events;
+        assert!(events.len() >= 4);
+        assert_eq!(events[events.len() - 2]["stage"], "render-level-0");
+        assert_eq!(events.last().unwrap()["state"], "completed");
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[0]["id"].as_u64() < pair[1]["id"].as_u64()));
+        assert!(events
+            .iter()
+            .all(|event| event["timestampUtc"].as_u64().is_some()));
+        let saved = control.snapshot();
+        let mut legacy_json = serde_json::to_value(&saved).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("events");
+        legacy_json.as_object_mut().unwrap().remove("next_event_id");
+        let legacy: Snapshot = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.events.is_empty());
+        jobs().lock().unwrap().remove(&root);
+        let root_id = root.to_string_lossy().into_owned();
+        let reloaded = get_job(Some(&root_id)).unwrap();
+        assert_eq!(reloaded.snapshot().events, saved.events);
+        jobs().lock().unwrap().remove(&root);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_start_and_terminal_transition_keep_distinct_event_kinds() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-commit-kind");
+        let source = root.with_extension("source");
+        fs::write(&source, b"commit timeline fixture").unwrap();
+        let control = test_control(&root, &source);
+        assert!(control.begin_commit("publish"));
+        assert_eq!(
+            control.snapshot().events.last().unwrap()["kind"],
+            "commit-started"
+        );
+        control.update(|s| {
+            s.state = "completed".into();
+            s.stage = "done".into();
+            s.commit_started = false;
+        });
+        assert_eq!(
+            control.snapshot().events.last().unwrap()["kind"],
+            "native-transition"
+        );
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeline_collapses_inner_loop_stage_families_but_keeps_exact_status_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-stage-family");
+        let source = root.with_extension("source");
+        fs::write(&source, b"stage family fixture").unwrap();
+        let control = test_control(&root, &source);
+        for stage in [
+            "pixel-refinement-camera",
+            "pixel-refinement-edge",
+            "pixel-refinement-sweep",
+            "pixel-bundle-pcg",
+            "pixel-refinement-camera",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "pixel-refinement-camera");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "refine-pixel-texture"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "refine-pixel-texture")
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.next_event_id, 3);
+        for stage in [
+            "grid-component-pose-cost",
+            "grid-component-pose-sweep",
+            "grid-component-pose-line-search",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "grid-component-pose-line-search");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "optimize-grid-poses"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "optimize-grid-poses")
+                .count(),
+            1
+        );
+        for stage in ["joint-cycle-prune-round", "joint-cycle-prune-candidate"] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "joint-cycle-prune-candidate");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "prune-conflicting-neighbors"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "prune-conflicting-neighbors")
+                .count(),
+            1
+        );
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

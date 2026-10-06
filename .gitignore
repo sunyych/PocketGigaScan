@@ -59,6 +59,14 @@ __pycache__/
 !/docs/RESTRUCTURE.md
 !/docs/PARITY.md
 !/docs/gigascan/
+!/docs/superpowers/
+/docs/superpowers/*
+!/docs/superpowers/specs/
+!/docs/superpowers/plans/
+/docs/superpowers/specs/*
+!/docs/superpowers/specs/2026-10-06-settings-timeline-design.md
+/docs/superpowers/plans/*
+!/docs/superpowers/plans/2026-10-06-settings-timeline.md
 /docs/gigascan/*
 !/docs/gigascan/COLLABORATION.md
 !/docs/gigascan/ROADMAP.md
@@ -76,6 +84,7 @@ __pycache__/
 !/docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md
 !/docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md
 !/docs/gigascan/evidence/BLUR-REPAIR-2026-10-06.md
+!/docs/gigascan/evidence/SETTINGS-TIMELINE-2026-10-06.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1

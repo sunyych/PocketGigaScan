@@ -119,3 +119,48 @@ The new identity is `com.lumiaiq.pocketgigascan`; legacy Windows lookup remains.
 ADB has no connected phone, so physical Android execution remains pending.
 PR #3 was already merged by the time of the final sync; this correction uses
 the separate `codex/export-ui-identity-fixes` branch from the identical main tree.
+
+## PG-052 overlap/export translation and log alignment
+
+User-reported English UI leakage occurs in the calibrated/nominal center-neighbor
+overlap subtitle and the full JPEG XL export action. Luna localization coder owns
+the shared translation table and real-home EN/ZH regressions covering generic,
+nominal and manually touched calibration, all export/retry formats and related
+diagnostic labels. Luna UI coder owns task/technical-log expansion alignment and
+geometry regressions. The coordinator independently reviews and runs Flutter
+analysis/tests serially. Existing geometry, defaults, collapsed-log behavior,
+originals and task ownership remain intact.
+
+The user explicitly deferred commits and all platform builds until their further
+edits are complete. This patch remains in the working tree without a version
+bump, commit, push, Windows build or Android package build. Host widget evidence
+does not claim physical-device validation.
+
+Independent review kept translation rules narrow and checked actual log text
+positions, not only layout properties. The coordinator repaired test-fixture
+scrolling through the owning Luna coder, then verified 25 focused tests and all
+182 Flutter tests, including the unchanged screenshot baselines. Flutter analysis
+reports no issues; the six changed Dart files are formatted. Logs are retained
+locally under `.local/translation-log-fixes-20261006/` and are not committed.
+No native stitching code changed; no platform build or device run was performed.
+
+## PG-053 settings and timestamped timeline
+
+User approved the shared settings/timeline design, Windows and Android rebuilds,
+and a GitHub PR. Settings Luna owns main.dart, l10n and isolated preferences UI;
+timeline Luna owns native job events, task/timeline models and log widget;
+platform Luna owns Android output-folder access and batch integration. Codex
+owns the plan, independent review, serial SDK checks, packages and PR handoff.
+Existing pending PG-052 repairs are preserved and included in the eventual PR.
+Defaults apply only to new tasks; native/private exports and originals remain
+owned by their existing jobs. Actual device evidence is reported separately.
+
+Luna handoffs are complete. Independent review corrected source-event versus UI
+observation deduplication, export-state labels, settings-save races, legacy time
+handling and stale publication ownership. Successful stale copies are retained;
+only a newly created partial SAF document is removed after a copy failure.
+Synthetic batch tests explicitly confirm grid/FOV, and widget export tests yield
+for real filesystem operations and wait for the final destination receipt.
+Reviewed screenshot changes cover the settings action and separate collapsed
+panels. SDK checks and Windows/Android Release qualification are run serially by
+the coordinator; results are recorded in the PG-053 evidence document.

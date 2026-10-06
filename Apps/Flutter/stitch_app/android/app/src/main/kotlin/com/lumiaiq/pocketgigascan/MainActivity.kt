@@ -3,6 +3,8 @@ package com.lumiaiq.pocketgigascan
 import android.app.Activity
 import android.content.Intent
 import android.content.IntentFilter
+import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
@@ -164,6 +166,11 @@ class MainActivity : FlutterActivity() {
         storage.setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickBatchParent" -> launchPicker(result)
+                "pickOutputFolder" -> launchOutputPicker(result)
+                "publishExport" -> publishExport(
+                    call.argument("path"), call.argument("treeUri"),
+                    call.argument("mimeType"), call.argument("suggestedName"), result,
+                )
                 "releaseBatchParent" -> releaseBatchParent(call.argument("path"), result)
                 "saveExport" -> launchSave(call.argument("path"), call.argument("mimeType"), call.argument("suggestedName"), result)
                 "shareExport" -> shareExport(call.argument("path"), call.argument("mimeType"), result)
@@ -186,6 +193,69 @@ class MainActivity : FlutterActivity() {
             result.error("PICKER_UNAVAILABLE", error.message ?: "Folder picker could not be opened", null)
         }
     }
+
+    private fun launchOutputPicker(result: MethodChannel.Result) {
+        if (!reserveResult(result)) return
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+            addFlags(Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+        }
+        try {
+            startActivityForResult(intent, REQUEST_PICK_OUTPUT_TREE)
+        } catch (error: Exception) {
+            pendingStorageResult = null
+            result.error("PICKER_UNAVAILABLE", error.message ?: "Folder picker could not be opened", null)
+        }
+    }
+
+    private fun publishExport(path: String?, treeUriValue: String?, mimeType: String?, suggestedName: String?, result: MethodChannel.Result) {
+        val source = path?.let(::File)
+        val treeUri = treeUriValue?.takeIf { MobilePlatformPolicy.isSafTreeUri(it) }
+            ?.let(android.net.Uri::parse)
+        val format = mimeType?.takeIf { MobilePlatformPolicy.isSupportedExportMimeType(it) }
+        if (source == null || !MobilePlatformPolicy.isAppOwnedFile(source, filesDir) || !source.isFile ||
+            treeUri == null || format == null || suggestedName.isNullOrBlank()) {
+            result.error("INVALID_EXPORT", "Export path, folder, format, or filename is invalid", null)
+            return
+        }
+        val hasGrant = contentResolver.persistedUriPermissions.any {
+            it.uri == treeUri && it.isWritePermission
+        }
+        if (!hasGrant) {
+            result.error("OUTPUT_PERMISSION_MISSING", "Choose the output folder again to restore write access", null)
+            return
+        }
+        storageExecutor.execute {
+            var created: android.net.Uri? = null
+            try {
+                val parent = DocumentsContract.buildDocumentUriUsingTree(
+                    treeUri, DocumentsContract.getTreeDocumentId(treeUri),
+                )
+                created = DocumentsContract.createDocument(
+                    contentResolver, parent, format, MobilePlatformPolicy.safeDocumentName(File(suggestedName).name),
+                ) ?: throw java.io.IOException("The selected folder refused to create the export")
+                contentResolver.openOutputStream(created, "w")?.buffered()?.use { output ->
+                    source.inputStream().buffered().use { input -> input.copyTo(output, COPY_BUFFER_SIZE) }
+                } ?: throw java.io.IOException("The selected export could not be opened for writing")
+                val publishedUri = created
+                val name = queryDisplayName(publishedUri) ?: File(suggestedName).name
+                runOnUiThread { result.success(mapOf("uri" to publishedUri.toString(), "displayName" to name)) }
+            } catch (error: Exception) {
+                created?.let { uri -> try { DocumentsContract.deleteDocument(contentResolver, uri) } catch (_: Exception) { } }
+                runOnUiThread {
+                    result.error("PUBLISH_FAILED", "Could not copy export. Check folder access and free space, then retry: ${error.message ?: "storage error"}", null)
+                }
+            }
+        }
+    }
+
+    private fun queryDisplayName(uri: android.net.Uri): String? = try {
+        contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    } catch (_: Exception) { null }
 
     private fun launchSave(path: String?, mimeType: String?, suggestedName: String?, result: MethodChannel.Result) {
         val source = path?.let(::File)
@@ -271,7 +341,59 @@ class MainActivity : FlutterActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         when (requestCode) {
             REQUEST_PICK_TREE -> handleTreeResult(resultCode, data)
+            REQUEST_PICK_OUTPUT_TREE -> handleOutputTreeResult(resultCode, data)
             REQUEST_SAVE_EXPORT -> handleSaveResult(resultCode, data)
+        }
+    }
+
+    private fun handleOutputTreeResult(resultCode: Int, data: Intent?) {
+        val result = pendingStorageResult ?: return
+        if (resultCode != Activity.RESULT_OK || data?.data == null) {
+            pendingStorageResult = null
+            result.success(null)
+            return
+        }
+        val treeUri = data.data!!
+        try {
+            val accessFlags = data.flags and (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            if (!MobilePlatformPolicy.isPersistableWritableTreeGrant(
+                    accessFlags or (data.flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),
+                )) {
+                throw SecurityException("The selected folder did not grant persistent write access")
+            }
+            contentResolver.takePersistableUriPermission(treeUri, accessFlags)
+        } catch (error: Exception) {
+            pendingStorageResult = null
+            result.error("OUTPUT_FOLDER_INVALID", error.message ?: "Choose a writable folder", null)
+            return
+        }
+        storageExecutor.execute {
+            var probe: android.net.Uri? = null
+            try {
+                val documentId = DocumentsContract.getTreeDocumentId(treeUri)
+                val parent = DocumentsContract.buildDocumentUriUsingTree(treeUri, documentId)
+                probe = DocumentsContract.createDocument(
+                    contentResolver, parent, "application/octet-stream",
+                    ".pocketgigascan-write-check-${UUID.randomUUID()}",
+                ) ?: throw java.io.IOException("The selected folder is not writable")
+                contentResolver.openOutputStream(probe, "w")?.use { it.flush() }
+                    ?: throw java.io.IOException("The selected folder refused write access")
+                if (!DocumentsContract.deleteDocument(contentResolver, probe)) {
+                    throw java.io.IOException("Could not validate write access to the selected folder")
+                }
+                probe = null
+                val name = queryDisplayName(treeUri) ?: "Selected folder"
+                runOnUiThread {
+                    pendingStorageResult = null
+                    result.success(mapOf("uri" to treeUri.toString(), "displayName" to name))
+                }
+            } catch (error: Exception) {
+                probe?.let { uri -> try { DocumentsContract.deleteDocument(contentResolver, uri) } catch (_: Exception) { } }
+                runOnUiThread {
+                    pendingStorageResult = null
+                    result.error("OUTPUT_FOLDER_INVALID", error.message ?: "Choose a writable folder", null)
+                }
+            }
         }
     }
 
@@ -349,6 +471,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val REQUEST_PICK_TREE = 4101
+        private const val REQUEST_PICK_OUTPUT_TREE = 4103
         private const val REQUEST_SAVE_EXPORT = 4102
         private const val COPY_BUFFER_SIZE = 64 * 1024
         private const val SERVICE_READY_TIMEOUT_MS = 5_000L

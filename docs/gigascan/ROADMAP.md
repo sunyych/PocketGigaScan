@@ -1,9 +1,17 @@
 # PocketGigaScan roadmap
 
+PG-052 tracks the user-reported overlap/export translation gaps and left-aligned
+task/technical logs. Luna localization/UI coders implement disjoint patches;
+Codex independently reviewed the patch; Flutter analysis is clean, all 182 host
+tests pass, including 25 focused localization/presentation tests. Builds and
+commits are explicitly deferred until the user's remaining edits are complete.
+
 Historical camera-app tasks are retired from this product. Their prior records remain in Git history and the local recovery archive. Processing IDs remain stable below.
 
 | ID | Goal | Dependencies | Status | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| PG-053 | Persistent settings, timestamped log and output folder defaults | PG-052 | implemented; Release qualification in progress | Luna settings/timeline/platform coders; Codex review | [Approved design](../superpowers/specs/2026-10-06-settings-timeline-design.md), [Plan](../superpowers/plans/2026-10-06-settings-timeline.md) |
+| PG-052 | Overlap/export translations and left-aligned collapsed logs | PG-050,PG-051 | shared UI verified; build/commit deferred by user | Luna localization/UI coders; Codex review | [Handoff and host test evidence](COLLABORATION.md#pg-052-overlapexport-translation-and-log-alignment) |
 | PG-046 | Corner texture/coverage repair and automatic export | PG-044,PG-045 (historical) | Windows1.0.8 verified; every-seam/mobile physical pending | Luna coders; Codex review | [Evidence](evidence/CORNER-AUTO-EXPORT-2026-10-05.md) |
 | PG-047 | Texture and nominal-grid reconstruction tests | PG-046 |156 core tests pass | Luna test coder; Codex review | [Evidence](evidence/TEXTURE-GRID-TESTS-2026-10-05.md) |
 | PG-048 | Independent DWARF stitcher, English/Chinese, icon and GitHub Windows downloads | PG-046,PG-047 | Windows build qualified; main release pipeline enabled | Luna localization/build coders; Codex coordinator | [Scope](../RESTRUCTURE.md), [Build](../BUILD.md), [Hosted build/package evidence](evidence/DWARF-STANDALONE-2026-10-05.md) |

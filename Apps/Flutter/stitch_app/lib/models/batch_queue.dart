@@ -1,4 +1,5 @@
 import 'stitch_quality.dart';
+import 'performance_options.dart';
 
 enum BatchItemState {
   pending,
@@ -158,6 +159,11 @@ class BatchQueue {
     required this.outputDirectory,
     required this.items,
     this.outputFormat = ExportFormat.tiff,
+    this.exportDestination,
+    this.performanceOptions = const PerformanceOptions(),
+    this.refineGridNeighbors = true,
+    this.seamBlendMode = SeamBlendMode.deghost,
+    this.localTextureWarp = true,
   });
 
   final String id;
@@ -167,9 +173,21 @@ class BatchQueue {
   final List<BatchQueueItem> items;
   final ExportFormat outputFormat;
 
+  /// Filesystem folder on desktop, persisted SAF tree URI on Android.
+  final String? exportDestination;
+  final PerformanceOptions performanceOptions;
+  final bool refineGridNeighbors;
+  final SeamBlendMode seamBlendMode;
+  final bool localTextureWarp;
+
   BatchQueue copyWith({
     List<BatchQueueItem>? items,
     ExportFormat? outputFormat,
+    String? exportDestination,
+    PerformanceOptions? performanceOptions,
+    bool? refineGridNeighbors,
+    SeamBlendMode? seamBlendMode,
+    bool? localTextureWarp,
   }) => BatchQueue(
     id: id,
     createdAt: createdAt,
@@ -177,6 +195,11 @@ class BatchQueue {
     outputDirectory: outputDirectory,
     items: items ?? this.items,
     outputFormat: outputFormat ?? this.outputFormat,
+    exportDestination: exportDestination ?? this.exportDestination,
+    performanceOptions: performanceOptions ?? this.performanceOptions,
+    refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
+    seamBlendMode: seamBlendMode ?? this.seamBlendMode,
+    localTextureWarp: localTextureWarp ?? this.localTextureWarp,
   );
 
   Map<String, Object?> toJson() => {
@@ -187,6 +210,11 @@ class BatchQueue {
     'outputDirectory': outputDirectory,
     'items': items.map((item) => item.toJson()).toList(),
     'outputFormat': outputFormat.name,
+    'exportDestination': exportDestination,
+    'performanceOptions': performanceOptions.toJson(),
+    'refineGridNeighbors': refineGridNeighbors,
+    'seamBlendMode': seamBlendMode.name,
+    'localTextureWarp': localTextureWarp,
   };
 
   factory BatchQueue.fromJson(Map<String, Object?> json) => BatchQueue(
@@ -199,5 +227,15 @@ class BatchQueue {
         .map(BatchQueueItem.fromJson)
         .toList(),
     outputFormat: ExportFormat.fromSavedValue(json['outputFormat']),
+    exportDestination: json['exportDestination'] as String?,
+    performanceOptions: PerformanceOptions.fromJson(
+      json['performanceOptions'] as Map<String, Object?>?,
+    ),
+    refineGridNeighbors: json['refineGridNeighbors'] as bool? ?? true,
+    seamBlendMode: SeamBlendMode.values.firstWhere(
+      (value) => value.name == json['seamBlendMode'],
+      orElse: () => SeamBlendMode.deghost,
+    ),
+    localTextureWarp: json['localTextureWarp'] as bool? ?? true,
   );
 }

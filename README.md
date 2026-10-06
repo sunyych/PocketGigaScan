@@ -16,12 +16,16 @@ Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the includ
 - Choose lossless PNG or TIFF/BigTIFF, or high-quality lossy JPEG XL, before stitching. New Windows tasks default to TIFF and export automatically after successful rendering.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
 - Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.
-- Follow the system language: Chinese locales use Chinese; other locales use English, including automatic export and task statuses.
+- Open Settings to choose system/English/Chinese language, system/light/dark appearance, accent color, output quality, performance defaults and output folder. Processing defaults apply to new tasks; saved tasks retain their options.
+- Expand Stitching log separately from Stitch details to see localized steps with timestamps and start/finish/total wall-clock time, including pauses and automatic export. Legacy tasks without timestamps show unknown times.
 
 Android adds folder access through the system document picker, streamed save/share,
 foreground processing and pinch/drag viewing. Android grids have no arbitrary
 photo-count or axis limit: more than 6 rows, 6 columns or 36 photos requires
 confirmation before processing. Concurrency remains bounded by actual resources.
+Choose a persistent output folder in Settings to copy completed Android exports
+automatically. The private result remains available for viewing; a failed copy
+can be retried without re-encoding. Windows encodes directly into its selected folder.
 Package/device qualification status is recorded in the
 [Android evidence](docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md).
 

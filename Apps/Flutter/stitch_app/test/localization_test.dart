@@ -9,6 +9,8 @@ import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/main.dart' show LumiaStitchApp, StitchHomePage;
 import 'package:stitch_app/l10n/localized_text.dart';
 import 'package:stitch_app/l10n/stitch_localizations.dart';
+import 'package:stitch_app/models/imported_photo.dart';
+import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/widgets/exported_image_viewer.dart';
 
 import 'support/empty_batch_queue_controller.dart';
@@ -72,12 +74,27 @@ void main() {
 
   test('elapsed-time templates are fully localized', () {
     const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
 
     expect(english.text('已用 12 秒'), 'Elapsed 12 sec');
     expect(english.text('已用 2 分 12 秒'), 'Elapsed 2 min 12 sec');
     expect(
       english.text('网格为估算值，尚未校准；row 2, column 3'),
       'Grid positions are estimated and are not calibrated; row 2, column 3',
+    );
+    expect(
+      english.text('网格为估算值，尚未校准；置信度 0.83 · estimated-grid-not-calibrated'),
+      'Grid positions are estimated and are not calibrated; Confidence 0.83 · estimated-grid-not-calibrated',
+    );
+    expect(
+      chinese.text('网格为估算值，尚未校准；置信度 0.83 · estimated-grid-not-calibrated'),
+      '网格为估算值，尚未校准；置信度 0.83 · estimated-grid-not-calibrated',
+    );
+    expect(
+      english.text(
+        '已按照片 EXIF 识别 DWARFLAB / DWARF3 / TELE；使用名义 150 mm 配置 fx=75000 px（随图像宽度缩放），未校准。实际 EXIF 焦距：未记录 mm。',
+      ),
+      'DWARFLAB / DWARF3 / TELE identified from photo EXIF. Using nominal 150 mm profile fx=75000 px (scaled to image width), not calibrated. EXIF focal length: not recorded mm.',
     );
     expect(english.text('ready · 0% · 已导入'), 'ready · 0% · Imported');
     expect(
@@ -101,6 +118,29 @@ void main() {
       contains('Overlap is measured from the photos.'),
     );
   });
+
+  test(
+    'full image export and retry actions preserve Chinese and translate all formats',
+    () {
+      const english = StitchLocalizations(Locale('en'));
+      const chinese = StitchLocalizations(Locale('zh'));
+      const expected = <String, (String, String)>{
+        'PNG': ('导出完整 PNG', '重试完整 PNG'),
+        'TIFF': ('导出完整 TIFF', '重试完整 TIFF'),
+        'JPEG XL': ('导出完整 JPEG XL', '重试完整 JPEG XL'),
+      };
+
+      for (final entry in expected.entries) {
+        for (final (source, translated) in [
+          (entry.value.$1, 'Export full ${entry.key}'),
+          (entry.value.$2, 'Retry full ${entry.key}'),
+        ]) {
+          expect(chinese.text(source), source);
+          expect(english.text(source), translated);
+        }
+      }
+    },
+  );
 
   test(
     'dynamic task summaries and export labels follow English and Chinese',
@@ -167,12 +207,14 @@ void main() {
         expect(english.text(source), 'Full image format: ${entry.value}');
         expect(chinese.text(source), source);
       }
-      expect(english.compositionInfoLogs, 'Stitch details / log');
+      expect(english.stitchDetails, 'Stitch details');
+      expect(english.stitchingLog, 'Stitching log');
       expect(
         english.duplicateBeforeEditingSettings,
         'Create a copy before changing settings',
       );
-      expect(chinese.compositionInfoLogs, '合成信息 / 日志');
+      expect(chinese.stitchDetails, '合成详情');
+      expect(chinese.stitchingLog, '合成日志');
       expect(chinese.duplicateBeforeEditingSettings, '先新建副本，再修改设置');
     },
   );
@@ -275,6 +317,274 @@ void main() {
     expect(find.text('Reduce seam ghosting'), findsOneWidget);
     expect(remainingChinese, isEmpty, reason: remainingChinese.join('\n'));
   });
+
+  testWidgets(
+    'home localizes overlap guidance for generic, nominal, and touched calibration states',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const genericChinese =
+          '重叠率由照片实测；未知镜头的视角仍需填写。当前视角用于球面投影，默认 45° 不是照片测量值。最多检查 24 组中心相邻照片，结果仍需目视检查接缝。';
+      const genericEnglish =
+          'Overlap is measured from the photos. Enter the field of view for unknown lenses. The current field of view is used for spherical projection; the default 45° is not measured from the photos. Up to 24 neighboring photo pairs around the center are checked, and the result still requires visual seam inspection.';
+      const estimatedChinese = '最多检查 24 组中心相邻照片；结果是网格估算值，尚未校准，仍需目视检查接缝。';
+      const estimatedEnglish =
+          'Checks up to 24 neighboring photo pairs around the center; grid positions are estimates and are not calibrated. Visually inspect the seams.';
+      const estimateDetailsChinese =
+          '网格为估算值，尚未校准；方法 SIFT/BF · 置信度 0.83 · estimated-grid-not-calibrated';
+      const estimateDetailsEnglish =
+          'Grid positions are estimated and are not calibrated; Method SIFT/BF · Confidence 0.83 · estimated-grid-not-calibrated';
+
+      final photo = ImportedPhoto(
+        originalName: 'synthetic.jpg',
+        storedPath: 'synthetic-input/synthetic.jpg',
+        sha256: 'synthetic-hash',
+        width: 3840,
+        height: 2160,
+        originalOrder: 0,
+        exifFocalLengthMm: 150,
+      );
+      for (final locale in const [Locale('en'), Locale('zh', 'CN')]) {
+        for (final state in ['generic', 'nominal', 'touched']) {
+          await tester.pumpWidget(const SizedBox.shrink());
+          final api = LocalizationSurfaceJobApi();
+          final repository = LocalizationSurfaceTaskRepository();
+          final queue = EmptyBatchQueueController(
+            api: api,
+            taskRepository: repository,
+          );
+          final task = localizationTask().copyWith(
+            photos: [photo],
+            cameraProfileId: state == 'nominal'
+                ? 'dwarf3-tele-nominal-150mm'
+                : null,
+            resultStats: const {
+              'alignment': {
+                'gridOverlapEstimate': {
+                  'method': 'SIFT/BF',
+                  'confidence': 0.83,
+                  'provenance': 'estimated-grid-not-calibrated',
+                },
+              },
+            },
+          );
+          await tester.pumpWidget(
+            LumiaStitchApp(
+              locale: locale,
+              home: StitchHomePage(
+                initialTask: task,
+                jobApi: api,
+                repository: repository,
+                batchQueueController: queue,
+                foregroundWorkLock: LocalizationSurfaceLock(),
+                mobileOverride: false,
+              ),
+            ),
+          );
+          await tester.pump(const Duration(milliseconds: 100));
+          final overlapOption = find.byKey(
+            const Key('auto-grid-overlap-option'),
+          );
+          await tester.ensureVisible(overlapOption);
+          await tester.pump(const Duration(milliseconds: 100));
+          final homeScrollPosition = Scrollable.of(
+            tester.element(overlapOption),
+          ).position;
+          final homeScrollOffset = homeScrollPosition.pixels;
+
+          final isEstimatedInitially = state == 'nominal';
+          final expectedChinese = isEstimatedInitially
+              ? estimatedChinese
+              : genericChinese;
+          final expectedEnglish = isEstimatedInitially
+              ? estimatedEnglish
+              : genericEnglish;
+          expect(
+            find.text(
+              locale.languageCode == 'zh' ? expectedChinese : expectedEnglish,
+            ),
+            findsOneWidget,
+            reason: '$state overlap subtitle in ${locale.languageCode}',
+          );
+
+          if (state == 'touched') {
+            final shortcut = find.text(
+              locale.languageCode == 'zh'
+                  ? 'DWARF 固定视角（名义值）'
+                  : 'DWARF nominal field of view',
+            );
+            await tester.ensureVisible(shortcut);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+            final shortcutRect = tester.getRect(shortcut);
+            final viewportCenterY = tester.view.physicalSize.height / 2;
+            if ((shortcutRect.center.dy - viewportCenterY).abs() > 300) {
+              homeScrollPosition.jumpTo(
+                (homeScrollPosition.pixels +
+                        shortcutRect.center.dy -
+                        viewportCenterY)
+                    .clamp(
+                      homeScrollPosition.minScrollExtent,
+                      homeScrollPosition.maxScrollExtent,
+                    )
+                    .toDouble(),
+              );
+              await tester.pump();
+            }
+            expect(shortcut.hitTestable(), findsOneWidget);
+            await tester.tap(shortcut);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 100));
+            homeScrollPosition.jumpTo(homeScrollOffset);
+            await tester.pump();
+            expect(
+              find.text(
+                locale.languageCode == 'zh'
+                    ? estimatedChinese
+                    : estimatedEnglish,
+              ),
+              findsOneWidget,
+              reason: 'touched calibration subtitle in ${locale.languageCode}',
+            );
+          }
+
+          if (state == 'generic') {
+            homeScrollPosition.jumpTo(0);
+            await tester.pump();
+            final diagnosticsTitle = find.text(
+              locale.languageCode == 'zh' ? '合成详情' : 'Stitch details',
+            );
+            await tester.tap(diagnosticsTitle);
+            await tester.pump();
+            await tester.pump(const Duration(milliseconds: 300));
+            expect(
+              find.text(
+                locale.languageCode == 'zh'
+                    ? estimateDetailsChinese
+                    : estimateDetailsEnglish,
+              ),
+              findsOneWidget,
+              reason: 'overlap estimate diagnostics in ${locale.languageCode}',
+            );
+            homeScrollPosition.jumpTo(homeScrollOffset);
+            await tester.pump();
+          }
+
+          for (final (key, label, helper) in const [
+            (
+              'horizontal-overlap-field',
+              'Manual horizontal overlap %',
+              '15–80; ignored in automatic mode. See measured values in the report.',
+            ),
+            (
+              'vertical-overlap-field',
+              'Manual vertical overlap %',
+              '15–80; ignored in automatic mode. See measured values in the report.',
+            ),
+          ]) {
+            final field = find.byKey(Key(key));
+            await tester.ensureVisible(field);
+            await tester.pump(const Duration(milliseconds: 50));
+            final fieldLabel = locale.languageCode == 'zh'
+                ? (key.startsWith('horizontal') ? '手动水平重叠率 %' : '手动垂直重叠率 %')
+                : label;
+            expect(
+              find.descendant(of: field, matching: find.text(fieldLabel)),
+              findsOneWidget,
+            );
+            final fieldHelper = locale.languageCode == 'zh'
+                ? '15–80；自动模式忽略此值，实测结果见报告'
+                : helper;
+            expect(
+              find.descendant(of: field, matching: find.text(fieldHelper)),
+              findsOneWidget,
+            );
+          }
+
+          if (locale.languageCode == 'en') {
+            final remainingChinese = _visibleChinese(tester);
+            expect(
+              remainingChinese,
+              isEmpty,
+              reason: remainingChinese.join('\n'),
+            );
+          }
+        }
+      }
+    },
+  );
+
+  testWidgets(
+    'home export and recovery actions are localized for every format',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      const formats = <ExportFormat, String>{
+        ExportFormat.png: 'PNG',
+        ExportFormat.tiff: 'TIFF',
+        ExportFormat.jpegXl: 'JPEG XL',
+      };
+      for (final locale in const [Locale('en'), Locale('zh', 'CN')]) {
+        for (final entry in formats.entries) {
+          for (final stage in const ['ready', 'export-failed']) {
+            await tester.pumpWidget(const SizedBox.shrink());
+            final api = LocalizationSurfaceJobApi();
+            final repository = LocalizationSurfaceTaskRepository();
+            final queue = EmptyBatchQueueController(
+              api: api,
+              taskRepository: repository,
+            );
+            final task = localizationTask().copyWith(
+              phase: StitchPhase.completed,
+              stage: stage,
+              nativeJobId: 'synthetic-job',
+              exportFormat: entry.key,
+            );
+            await tester.pumpWidget(
+              LumiaStitchApp(
+                locale: locale,
+                home: StitchHomePage(
+                  initialTask: task,
+                  jobApi: api,
+                  repository: repository,
+                  batchQueueController: queue,
+                  foregroundWorkLock: LocalizationSurfaceLock(),
+                  mobileOverride: false,
+                ),
+              ),
+            );
+            await tester.pump(const Duration(milliseconds: 100));
+            final action = find.byKey(const Key('export-task-action'));
+            await tester.ensureVisible(action);
+            await tester.pump(const Duration(milliseconds: 50));
+
+            final retry = stage == 'export-failed';
+            final expected = locale.languageCode == 'zh'
+                ? '${retry ? '重试' : '导出'}完整 ${entry.value}'
+                : '${retry ? 'Retry' : 'Export'} full ${entry.value}';
+            expect(
+              find.descendant(of: action, matching: find.text(expected)),
+              findsOneWidget,
+            );
+            if (locale.languageCode == 'en') {
+              final remainingChinese = _visibleChinese(tester);
+              expect(
+                remainingChinese,
+                isEmpty,
+                reason: remainingChinese.join('\n'),
+              );
+            }
+          }
+        }
+      }
+    },
+  );
 
   testWidgets('English batch queue has no untranslated Chinese copy', (
     tester,

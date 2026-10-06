@@ -28,35 +28,111 @@ import 'services/task_repository.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'l10n/stitch_localizations.dart';
 import 'l10n/localized_text.dart';
+import 'models/app_settings.dart';
+import 'services/settings_controller.dart';
+import 'settings_page.dart';
+import 'models/stitch_timeline.dart';
+import 'widgets/stitching_log.dart';
 
 void main() => runApp(const LumiaStitchApp());
 
-class LumiaStitchApp extends StatelessWidget {
-  const LumiaStitchApp({super.key, this.locale, this.home});
+class LumiaStitchApp extends StatefulWidget {
+  const LumiaStitchApp({
+    super.key,
+    this.locale,
+    this.home,
+    this.settingsController,
+  });
   final Locale? locale;
   final Widget? home;
+  final SettingsController? settingsController;
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'PocketGigaScan',
-    locale: locale,
-    supportedLocales: StitchLocalizations.supportedLocales,
-    localizationsDelegates: const [
-      StitchLocalizations.delegate,
-      GlobalMaterialLocalizations.delegate,
-      GlobalWidgetsLocalizations.delegate,
-      GlobalCupertinoLocalizations.delegate,
-    ],
-    localeResolutionCallback: (deviceLocale, supportedLocales) {
-      if (deviceLocale?.languageCode.toLowerCase() == 'zh') {
-        return const Locale('zh');
-      }
-      return const Locale('en');
+  State<LumiaStitchApp> createState() => _LumiaStitchAppState();
+}
+
+class _LumiaStitchAppState extends State<LumiaStitchApp> {
+  late final SettingsController _settings =
+      widget.settingsController ??
+      SettingsController(
+        initial: widget.home != null
+            ? AppSettings.defaults(
+                mobile: Platform.isAndroid || Platform.isIOS,
+                android: Platform.isAndroid,
+              )
+            : null,
+        defaults: AppSettings.defaults(
+          mobile: Platform.isAndroid || Platform.isIOS,
+          android: Platform.isAndroid,
+        ),
+      );
+  @override
+  void dispose() {
+    if (widget.settingsController == null) _settings.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _settings,
+    builder: (context, _) {
+      final s = _settings.settings;
+      final locale =
+          widget.locale ??
+          (s.language == AppLanguage.system ? null : Locale(s.language.name));
+      final brightness = switch (s.themeMode) {
+        AppThemeMode.light => Brightness.light,
+        AppThemeMode.dark => Brightness.dark,
+        _ => null,
+      };
+      final seed = switch (s.accent) {
+        AppAccent.blue => const Color(0xff2868b2),
+        AppAccent.purple => const Color(0xff7651a6),
+        AppAccent.orange => const Color(0xffc66a22),
+        _ => const Color(0xff246b72),
+      };
+      final theme = ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: seed,
+          brightness: brightness ?? Brightness.light,
+        ),
+        brightness: brightness,
+        useMaterial3: true,
+      );
+      return MaterialApp(
+        title: 'PocketGigaScan',
+        locale: locale,
+        themeMode: s.themeMode == AppThemeMode.system
+            ? ThemeMode.system
+            : s.themeMode == AppThemeMode.dark
+            ? ThemeMode.dark
+            : ThemeMode.light,
+        supportedLocales: StitchLocalizations.supportedLocales,
+        localizationsDelegates: const [
+          StitchLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        localeResolutionCallback: (deviceLocale, supportedLocales) {
+          if (widget.locale != null) return widget.locale;
+          if (s.language != AppLanguage.system) return Locale(s.language.name);
+          if (deviceLocale?.languageCode.toLowerCase() == 'zh') {
+            return const Locale('zh');
+          }
+          return const Locale('en');
+        },
+        theme: theme,
+        darkTheme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: seed,
+            brightness: Brightness.dark,
+          ),
+          brightness: Brightness.dark,
+          useMaterial3: true,
+        ),
+        home: widget.home ?? StitchHomePage(settingsController: _settings),
+      );
     },
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff246b72)),
-      useMaterial3: true,
-    ),
-    home: home ?? const StitchHomePage(),
   );
 }
 
@@ -77,6 +153,7 @@ class StitchHomePage extends StatefulWidget {
     this.androidOverride,
     this.mobileStorageService,
     this.mobileRuntimeService,
+    this.settingsController,
   });
   final JobApi? jobApi;
   final PowerGate? powerGate;
@@ -89,6 +166,7 @@ class StitchHomePage extends StatefulWidget {
   final bool? androidOverride;
   final MobileStorageService? mobileStorageService;
   final MobileRuntimeService? mobileRuntimeService;
+  final SettingsController? settingsController;
   @override
   State<StitchHomePage> createState() => _StitchHomePageState();
 }
@@ -178,6 +256,14 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
+  AppSettings get _appSettings =>
+      widget.settingsController?.settings ??
+      AppSettings(
+        exportFormat: _mobile ? ExportFormat.png : ExportFormat.tiff,
+        refineGridNeighbors: _android,
+        seamBlendMode: _mobile ? SeamBlendMode.feather : SeamBlendMode.deghost,
+        performance: _performanceOptions,
+      );
   bool get _hasActiveJob =>
       _task?.nativeJobId != null &&
       {
@@ -323,6 +409,12 @@ class _StitchHomePageState extends State<StitchHomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.settingsController?.addListener(_applySettingsDefaults);
+    if (widget.settingsController != null) {
+      unawaited(
+        widget.settingsController!.ready.then((_) => _applySettingsDefaults()),
+      );
+    }
     if (_mobile && widget.initialTask == null) {
       _exportFormat = _android ? ExportFormat.tiff : ExportFormat.png;
       _refineGridNeighbors = _android;
@@ -367,6 +459,22 @@ class _StitchHomePageState extends State<StitchHomePage>
       _handleRuntimeTimeout,
     );
     _refreshTasks();
+  }
+
+  void _applySettingsDefaults({bool force = false}) {
+    if (!mounted ||
+        (!force && _task != null) ||
+        widget.settingsController == null) {
+      return;
+    }
+    final s = _appSettings;
+    setState(() {
+      _performanceOptions = s.performance;
+      _exportFormat = s.exportFormat;
+      _refineGridNeighbors = s.refineGridNeighbors;
+      _seamBlendMode = s.seamBlendMode;
+      _localTextureWarp = s.localTextureWarp;
+    });
   }
 
   Future<void> _initializeBatchOwnership(
@@ -797,6 +905,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.settingsController?.removeListener(_applySettingsDefaults);
     unawaited(_runtimeTimeoutSubscription?.cancel());
     if (widget.mobileRuntimeService == null) {
       unawaited(_runtime?.dispose());
@@ -1010,6 +1119,12 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   Future<void> _importPhotos() async {
     if (_busy || !_editable) return;
+    await widget.settingsController?.ready;
+    if (!mounted) return;
+    // When a task is selected, its controls hold the user's current choices.
+    // Keep those as the new task's starting options instead of resetting them
+    // to global defaults during import.
+    _applySettingsDefaults();
     setState(() {
       _busy = true;
       _message = null;
@@ -1053,6 +1168,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         cameraCalibrationOverridden: _cameraCalibrationTouched,
         performanceOptions: _performanceOptions,
         exportFormat: _exportFormat,
+        exportDirectory: _appSettings.outputDirectory,
         autoExportOnCompletion: true,
         refineGridNeighbors: _refineGridNeighbors,
         seamBlendMode: _seamBlendMode,
@@ -1285,6 +1401,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           phase: _phase(response['state']),
           stage: response['stage'] as String? ?? task.stage,
           progress: (response['progress'] as num? ?? task.progress).toDouble(),
+          timeline: _mergeResponseTimeline(active, response, task.nativeJobId!),
           clearError: true,
           clearPauseReason: true,
         );
@@ -1366,6 +1483,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           phase: _phase(response['state']),
           stage: response['stage'] as String? ?? 'queued',
           progress: 0,
+          timeline: _mergeResponseTimeline(active, response, jobId),
         );
       }
       await _persist(active);
@@ -1440,6 +1558,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase: _phase(response['state']),
         pauseReason: reason,
         autoExportOnCompletion: false,
+        timeline: _mergeResponseTimeline(task, response, task.nativeJobId!),
       );
       await _persist(
         updated,
@@ -1449,7 +1568,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       if (!_isCurrentSelection(generation, task.id)) return;
       if (updated.phase == StitchPhase.paused && _android) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       if (updated.phase == StitchPhase.paused) await _lock.disable();
       setState(() => _message = reason);
@@ -1484,10 +1603,11 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase: _phase(response['state']),
         pauseReason: '已请求取消；等待核心确认',
         autoExportOnCompletion: false,
+        timeline: _mergeResponseTimeline(task, response, task.nativeJobId!),
       );
       if (updated.phase == StitchPhase.cancelled && _android) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       await _persist(
         updated,
@@ -1619,12 +1739,18 @@ class _StitchHomePageState extends State<StitchHomePage>
         : await getApplicationDocumentsDirectory();
     final exportDirectory = Directory(p.join(directory.path, 'LumiaStitch'));
     await exportDirectory.create(recursive: true);
-    final destination =
+    final privateDestination =
         exportTask.exportCheckpointPath ??
         p.join(
           exportDirectory.path,
           '${task.id}-${DateTime.now().toUtc().microsecondsSinceEpoch}.${task.exportFormat.extension}',
         );
+    final destination = Platform.isWindows && exportTask.exportDirectory != null
+        ? p.join(exportTask.exportDirectory!, p.basename(privateDestination))
+        : privateDestination;
+    if (Platform.isWindows && exportTask.exportDirectory != null) {
+      await Directory(exportTask.exportDirectory!).create(recursive: true);
+    }
     final exportIntentTask = exportTask.autoExportOnCompletion
         ? exportTask
         : exportTask.copyWith(autoExportOnCompletion: true);
@@ -1633,6 +1759,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _message = null;
     });
     _controlGeneration++;
+    final controlGeneration = _controlGeneration;
     try {
       await _persist(
         exportIntentTask.copyWith(
@@ -1648,15 +1775,29 @@ class _StitchHomePageState extends State<StitchHomePage>
         if (fingerprint == null) {
           throw StateError('核心报告导出完成，但输出文件不存在或为空。');
         }
-        await _persist(
-          exportIntentTask.copyWith(
-            phase: StitchPhase.completed,
-            stage: 'done',
-            autoExportOnCompletion: false,
-            exportPath: destination,
-            exportFingerprint: fingerprint,
-            clearExportCheckpointPath: true,
+        var completed = exportIntentTask.copyWith(
+          phase: StitchPhase.completed,
+          stage: 'done',
+          autoExportOnCompletion: false,
+          exportPath: destination,
+          exportFingerprint: fingerprint,
+          clearExportCheckpointPath: true,
+          timeline: _mergeResponseTimeline(
+            exportIntentTask,
+            response,
+            task.nativeJobId!,
           ),
+        );
+        if (completed.exportDirectory != null) {
+          completed = await _publishExport(
+            completed,
+            expectedGeneration: controlGeneration,
+          );
+        }
+        await _persist(
+          completed,
+          expectedGeneration: controlGeneration,
+          expectedTaskId: task.id,
         );
       } else if (state == 'failed' || state == 'cancelled') {
         await _persist(
@@ -1668,6 +1809,11 @@ class _StitchHomePageState extends State<StitchHomePage>
             error: task.exportPath == null
                 ? '整图导出$state。'
                 : '新整图导出$state；保留了此前成功的导出文件。',
+            timeline: _mergeResponseTimeline(
+              exportIntentTask,
+              response,
+              task.nativeJobId!,
+            ),
           ),
         );
       } else {
@@ -1677,6 +1823,11 @@ class _StitchHomePageState extends State<StitchHomePage>
             stage: 'export',
             exportCheckpointPath: destination,
             clearError: true,
+            timeline: _mergeResponseTimeline(
+              exportIntentTask,
+              response,
+              task.nativeJobId!,
+            ),
           ),
         );
       }
@@ -1912,6 +2063,45 @@ class _StitchHomePageState extends State<StitchHomePage>
     int? expectedGeneration,
     String? expectedTaskId,
   }) async {
+    final previous = _task?.id == updated.id ? _task : null;
+    var mergedTimeline = (previous?.timeline ?? const StitchTimeline()).merge(
+      updated.timeline,
+    );
+    final priorEventIds =
+        previous?.timeline.events.map((event) => event.id).toSet() ??
+        const <String>{};
+    final jobId = updated.nativeJobId ?? previous?.nativeJobId;
+    final nativeTransitionObserved =
+        jobId != null &&
+        mergedTimeline.events.any(
+          (event) =>
+              event.id.startsWith('native:$jobId:') &&
+              !priorEventIds.contains(event.id) &&
+              event.state == updated.phase.name,
+        );
+    if (previous != null &&
+        !nativeTransitionObserved &&
+        (previous.phase != updated.phase || previous.stage != updated.stage)) {
+      final sequence =
+          mergedTimeline.events
+              .where((event) => event.id.startsWith('ui:${updated.id}:'))
+              .length +
+          1;
+      mergedTimeline = mergedTimeline.mergeUiEvent(
+        id: 'ui:${updated.id}:$sequence',
+        kind: 'lifecycle',
+        stage: updated.stage,
+        state: updated.phase.name,
+        operation:
+            updated.phase == StitchPhase.exporting ||
+                previous.phase == StitchPhase.exporting ||
+                updated.stage.contains('export') ||
+                previous.stage.contains('export')
+            ? 'export'
+            : 'render',
+      );
+    }
+    updated = updated.copyWith(timeline: mergedTimeline);
     await _repository.save(updated);
     if (!mounted) return;
     final selectionStillMatches =
@@ -1965,6 +2155,17 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase = StitchPhase.completed;
       }
       final stage = state['stage'] as String? ?? task.stage;
+      var timeline = task.timeline;
+      final rawEvents = state['events'];
+      if (rawEvents is List) {
+        timeline = timeline.mergeNativeBatch(
+          rawEvents
+              .whereType<Map>()
+              .map((event) => Map<String, Object?>.from(event))
+              .toList(),
+          jobId: task.nativeJobId!,
+        );
+      }
       final progress = (state['progress'] as num? ?? task.progress)
           .toDouble()
           .clamp(0, 1);
@@ -2036,6 +2237,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           ? pendingPath
           : task.exportCheckpointPath;
       final updated = task.copyWith(
+        timeline: timeline,
         phase: shouldAutoExport
             ? StitchPhase.exporting
             : reportedSuccessfulExport
@@ -2080,6 +2282,18 @@ class _StitchHomePageState extends State<StitchHomePage>
             : task.resultStats,
         clearError: state['error'] == null && successfulExport,
       );
+      final withPublication =
+          reportedSuccessfulExport &&
+              successfulExport &&
+              task.exportDirectory != null &&
+              (task.publishedExportPath == null ||
+                  task.publishError != null ||
+                  task.phase == StitchPhase.exporting ||
+                  task.stage == 'auto-export' ||
+                  task.stage == 'export' ||
+                  task.exportPath != reportedPath)
+          ? await _publishExport(updated, expectedGeneration: controlGeneration)
+          : updated;
       if (_android &&
           {
             StitchPhase.paused,
@@ -2088,14 +2302,14 @@ class _StitchHomePageState extends State<StitchHomePage>
             StitchPhase.cancelled,
           }.contains(updated.phase)) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       if (!_isCurrentSelection(controlGeneration, task.id) ||
           !identical(task, _task)) {
         return;
       }
       await _persist(
-        updated,
+        withPublication,
         expectedGeneration: controlGeneration,
         expectedTaskId: task.id,
       );
@@ -2125,6 +2339,137 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (shouldAutoExport) await _batchOwnershipReadySignal.future;
     if (shouldAutoExport && _isCurrentSelection(controlGeneration, task.id)) {
       await _export();
+    }
+  }
+
+  Future<StitchTask> _publishExport(
+    StitchTask task, {
+    int? expectedGeneration,
+  }) async {
+    final destination = task.exportDirectory;
+    final source = task.exportPath;
+    if (destination == null || source == null) return task;
+    if (_task?.id == task.id &&
+        !_isCurrentSelection(
+          expectedGeneration ?? _controlGeneration,
+          task.id,
+        )) {
+      return task;
+    }
+    final started = _withPublicationEvent(task, 'running');
+    await _repository.save(started);
+    try {
+      final name = p.basename(source);
+      final mime = switch (task.exportFormat) {
+        ExportFormat.png => 'image/png',
+        ExportFormat.tiff => 'image/tiff',
+        ExportFormat.jpegXl => 'image/jxl',
+      };
+      if (_android) {
+        final published = await _storage.publishExport(
+          source,
+          destinationUri: destination,
+          mimeType: mime,
+          suggestedName: name,
+        );
+        return _withPublicationEvent(
+          started.copyWith(
+            publishedExportPath: published.uri,
+            clearPublishError: true,
+          ),
+          'completed',
+        );
+      }
+      final directory = Directory(destination);
+      await directory.create(recursive: true);
+      if (Platform.isWindows &&
+          p.equals(
+            p.normalize(p.absolute(p.dirname(source))),
+            p.normalize(p.absolute(destination)),
+          )) {
+        return _withPublicationEvent(
+          started.copyWith(
+            publishedExportPath: source,
+            clearPublishError: true,
+          ),
+          'completed',
+        );
+      }
+      final output = await File(source).copy(p.join(directory.path, name));
+      return _withPublicationEvent(
+        started.copyWith(
+          publishedExportPath: output.path,
+          clearPublishError: true,
+        ),
+        'completed',
+      );
+    } catch (error) {
+      return _withPublicationEvent(
+        started.copyWith(publishError: error.toString()),
+        'failed',
+      );
+    }
+  }
+
+  StitchTimeline _mergeResponseTimeline(
+    StitchTask task,
+    Map<String, Object?> response,
+    String jobId,
+  ) {
+    final events = response['events'];
+    if (events is! List) return task.timeline;
+    return task.timeline.mergeNativeBatch(
+      events
+          .whereType<Map>()
+          .map((event) => Map<String, Object?>.from(event))
+          .toList(),
+      jobId: jobId,
+    );
+  }
+
+  StitchTask _withPublicationEvent(StitchTask task, String state) {
+    final prefix = 'ui:${task.id}:';
+    final sequence =
+        task.timeline.events
+            .where((event) => event.id.startsWith(prefix))
+            .length +
+        1;
+    return task.copyWith(
+      timeline: task.timeline.mergeUiEvent(
+        id: '$prefix$sequence',
+        kind: 'publication',
+        stage: switch (state) {
+          'running' => 'publishing',
+          'completed' => 'published',
+          _ => 'publish-failed',
+        },
+        state: state,
+        operation: 'publish',
+      ),
+    );
+  }
+
+  Future<void> _retryPublish(StitchTask task) async {
+    if (_busy || _task?.id != task.id) return;
+    final generation = _controlGeneration;
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      final result = await _publishExport(
+        task.copyWith(clearPublishError: true),
+        expectedGeneration: generation,
+      );
+      if (_isCurrentSelection(generation, task.id)) {
+        await _persist(
+          result,
+          expectedGeneration: generation,
+          expectedTaskId: task.id,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -2374,25 +2719,37 @@ class _StitchHomePageState extends State<StitchHomePage>
         ),
         title: const Text('PocketGigaScan'),
         actions: [
+          if (widget.settingsController != null)
+            IconButton(
+              tooltip: StitchLocalizations.of(context).settingsTitle,
+              icon: const Icon(Icons.settings),
+              onPressed: _openSettings,
+            ),
           IconButton(
             tooltip: StitchLocalizations.of(
               context,
             ).text(_mobile && !_android ? '批处理仅限 Windows 桌面版' : '批处理队列'),
             onPressed: _mobile && !_android
                 ? null
-                : () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => BatchQueuePage(
-                        api: _api,
-                        controller: _batchController,
-                        mobileOverride: _mobile,
-                        androidOverride: _android,
-                        mobileStorageService: _storage,
-                        runtimeService: _runtime,
-                        resourceBudget: _resourceBudget,
+                : () async {
+                    final navigator = Navigator.of(context);
+                    await widget.settingsController?.ready;
+                    if (!mounted) return;
+                    await navigator.push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => BatchQueuePage(
+                          api: _api,
+                          controller: _batchController,
+                          mobileOverride: _mobile,
+                          androidOverride: _android,
+                          mobileStorageService: _storage,
+                          runtimeService: _runtime,
+                          resourceBudget: _resourceBudget,
+                          settingsController: widget.settingsController,
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
             icon: const Icon(Icons.queue),
           ),
           if (_task != null)
@@ -2453,6 +2810,22 @@ class _StitchHomePageState extends State<StitchHomePage>
               label: const Text('导入原片'),
             )
           : null,
+    );
+  }
+
+  Future<void> _openSettings() async {
+    final controller = widget.settingsController;
+    if (controller == null) return;
+    await controller.ready;
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsPage(
+          controller: controller,
+          android: _android,
+          mobileStorageService: _storage,
+        ),
+      ),
     );
   }
 
@@ -2552,6 +2925,27 @@ class _StitchHomePageState extends State<StitchHomePage>
                 task.error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
+            if (task.publishError != null)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    StitchLocalizations.of(
+                      context,
+                    ).outputCopyFailed(task.publishError!),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy ? null : () => _retryPublish(task),
+                    icon: const Icon(Icons.refresh),
+                    label: Text(
+                      StitchLocalizations.of(context).retryOutputCopy,
+                    ),
+                  ),
+                ],
+              ),
             if (task.pauseReason != null && task.phase == StitchPhase.pausing)
               Text(
                 task.pauseReason!,
@@ -2562,7 +2956,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                 'task-diagnostics-${task.id}-$_diagnosticsPanelGeneration',
               ),
               tilePadding: EdgeInsets.zero,
-              title: Text(StitchLocalizations.of(context).compositionInfoLogs),
+              expandedAlignment: Alignment.centerLeft,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              title: Text(StitchLocalizations.of(context).stitchDetails),
               children: [
                 if (_api.isAvailable)
                   Text(
@@ -2571,7 +2967,10 @@ class _StitchHomePageState extends State<StitchHomePage>
                   ),
                 if (task.phase == StitchPhase.completed &&
                     task.stage == 'export-failed')
-                  const ListTile(title: Text('整图导出失败，可重试')),
+                  const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('整图导出失败，可重试'),
+                  ),
                 if ((task.autoExportOnCompletion &&
                         task.phase == StitchPhase.completed) ||
                     (task.phase == StitchPhase.exporting &&
@@ -2582,6 +2981,22 @@ class _StitchHomePageState extends State<StitchHomePage>
                 if (task.resultStats case final stats?)
                   ..._performanceStatsLines(stats),
                 const Text('水平参考：以网格中心照片为准'),
+              ],
+            ),
+            ExpansionTile(
+              key: ValueKey(
+                'task-stitch-log-${task.id}-$_diagnosticsPanelGeneration',
+              ),
+              tilePadding: EdgeInsets.zero,
+              expandedAlignment: Alignment.centerLeft,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              title: Text(StitchLocalizations.of(context).stitchingLog),
+              children: [
+                StitchingLog(
+                  timeline: task.timeline,
+                  eventLabel: _timelineEventLabel,
+                  totalLabel: _timelineTotal(task),
+                ),
               ],
             ),
             Wrap(
@@ -2791,6 +3206,62 @@ class _StitchHomePageState extends State<StitchHomePage>
     'done' => '完成',
     _ => stage,
   };
+
+  String _timelineEventLabel(StitchTimelineEvent event) {
+    final l = StitchLocalizations.of(context);
+    final subject = event.stage != null
+        ? l.timelineStage(event.stage!)
+        : event.kind;
+    if (event.state != null) {
+      final state = event.operation == 'export' && event.state == 'running'
+          ? 'exporting'
+          : event.state!;
+      return l.timelineTransition(subject, l.phaseLabel(state));
+    }
+    return l.text(switch (event.kind) {
+      'started' => '合成已开始',
+      'finished' => '合成已完成',
+      'export-started' => '整图导出已开始',
+      'export-finished' => '整图导出已完成',
+      _ => subject,
+    });
+  }
+
+  String _timelineTotal(StitchTask task) {
+    final summary = task.timeline.summary(
+      autoExportExpected: task.autoExportOnCompletion,
+    );
+    final duration = summary.wallClockDuration;
+    final l = StitchLocalizations.of(context);
+    final started = summary.startedAtUtc == null
+        ? l.timelineTimeUnknown
+        : _timelineDate(summary.startedAtUtc!);
+    final finished = summary.finishedAtUtc == null
+        ? (summary.isInProgress ? l.timelineInProgress : l.timelineTimeUnknown)
+        : _timelineDate(summary.finishedAtUtc!);
+    if (duration == null) {
+      return l.timelineBounds(started, finished, l.timelineDurationUnknown);
+    }
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    final seconds = duration.inSeconds % 60;
+    String two(int value) => value.toString().padLeft(2, '0');
+    final elapsed = '${two(hours)}:${two(minutes)}:${two(seconds)}';
+    return l.timelineBounds(
+      started,
+      finished,
+      l.timelineTotal(
+        elapsed,
+        pausedIncluded: task.timeline.events.any((e) => e.state == 'paused'),
+      ),
+    );
+  }
+
+  String _timelineDate(DateTime value) {
+    final local = value.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+  }
 
   List<Widget> _performanceStatsLines(Map<String, Object?> stats) {
     final lines = <Widget>[];
