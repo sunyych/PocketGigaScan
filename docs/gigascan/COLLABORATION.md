@@ -2,6 +2,14 @@
 
 ## PG-051 blurred-photo alignment and overlap repair
 
+Final coordinator qualification: source commit `2deabdc` passes pinned Rust
+formatting and 169 native tests (two historical real-data tests ignored),
+Flutter analysis and 177 tests, Windows builder contracts, 14 independent
+seam-checker tests, and the standard Windows source Release/package checks.
+Version `1.2.2+13` is delivered as the complete ZIP documented in
+[the evidence report](evidence/BLUR-REPAIR-2026-10-06.md). Original-photo visual
+acceptance remains pending; synthetic evidence does not establish its repair.
+
 The user approved the algorithm proposal and requested implementation on
 2026-10-06. Luna registration coder owns spherical alignment and neighboring
 matching; Luna renderer coder owns local sharpness selection and rendered

@@ -24,7 +24,7 @@ been provided in this request.
   Include synthetic blurred-texture and coverage regressions; account new maps.
 - [x] Luna Flutter coder: localized settings explanations and regression tests.
   Reuse neighboring refinement/deghost options; preserve old task defaults.
-- [ ] Coordinator: independently review numerical/coverage/memory behavior;
+- [x] Coordinator: independently review numerical/coverage/memory behavior;
   run Rust formatting/tests, Flutter analysis/tests, builder contracts and the
   standard Windows source Release builder. Record evidence and limitations in
   collaboration, roadmap and qualification documents.
