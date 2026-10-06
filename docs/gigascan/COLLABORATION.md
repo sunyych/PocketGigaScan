@@ -164,3 +164,11 @@ for real filesystem operations and wait for the final destination receipt.
 Reviewed screenshot changes cover the settings action and separate collapsed
 panels. SDK checks and Windows/Android Release qualification are run serially by
 the coordinator; results are recorded in the PG-053 evidence document.
+
+Final review also required proof of an original render start: legacy recovery
+or a later export cannot fabricate the old task's total duration. The final
+shared source is a2b7045. All 208 Flutter tests and 172 native tests pass (two
+real-photo fixture tests intentionally ignored). Seven Android Kotlin tests pass;
+lint has zero errors and nine existing warnings. Normal Windows x64 ZIP and
+Android ARM64 Release APK packages pass their integrity/license checks. ADB lists
+no devices. See [PG-053 evidence](evidence/SETTINGS-TIMELINE-2026-10-06.md).
