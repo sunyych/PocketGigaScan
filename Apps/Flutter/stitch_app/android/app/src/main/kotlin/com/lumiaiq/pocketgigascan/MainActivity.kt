@@ -361,7 +361,17 @@ class MainActivity : FlutterActivity() {
                 )) {
                 throw SecurityException("The selected folder did not grant persistent write access")
             }
-            contentResolver.takePersistableUriPermission(treeUri, accessFlags)
+            if ((accessFlags and Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0) {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            } else {
+                contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
         } catch (error: Exception) {
             pendingStorageResult = null
             result.error("OUTPUT_FOLDER_INVALID", error.message ?: "Choose a writable folder", null)

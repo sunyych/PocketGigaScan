@@ -43,6 +43,7 @@ class MobilePlatformPolicyTest {
 
     @Test
     fun outputFolderRequiresPersistableWriteGrantAndTreeUri() {
+        // A provider may grant persistent write access without read access.
         assertTrue(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x42))
         assertFalse(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x40))
         assertFalse(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x02))
