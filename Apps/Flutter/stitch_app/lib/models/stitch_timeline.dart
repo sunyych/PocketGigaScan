@@ -193,10 +193,7 @@ class StitchTimeline {
     final startCandidates = events.where(
       (event) =>
           event.kind == 'started' ||
-          event.state == 'queued' ||
-          event.state == 'running' ||
-          event.state == 'pausing' ||
-          event.state == 'paused',
+          (event.operation == 'render' && event.state == 'queued'),
     );
     final started = startCandidates.isEmpty
         ? null

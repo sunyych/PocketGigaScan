@@ -115,7 +115,7 @@ void main() {
   test('duration includes pause and resume as elapsed wall clock', () {
     final timeline = StitchTimeline(
       events: [
-        event('1', 0, 'running', 'render', stage: 'validate'),
+        event('1', 0, 'queued', 'render', stage: 'validate'),
         event('1b', 4, 'running', 'render', stage: 'register'),
         event('1c', 9, 'running', 'render', stage: 'render-level-0'),
         event('2', 10, 'paused', 'render'),
@@ -137,7 +137,7 @@ void main() {
     () {
       final rendered = StitchTimeline(
         events: [
-          event('1', 0, 'running', 'render'),
+          event('1', 0, 'queued', 'render'),
           event('2', 20, 'completed', 'render'),
         ],
       );
@@ -192,6 +192,56 @@ void main() {
       expect(retried.finishedAtUtc, DateTime.utc(2026, 1, 1, 0, 1, 45));
       expect(retried.wallClockDuration, const Duration(seconds: 105));
       expect(retried.latestOperationDuration, const Duration(seconds: 5));
+    },
+  );
+
+  test('legacy recovery and manual export do not invent original start', () {
+    final recovered = StitchTimeline(
+      events: [
+        event('recovered-paused', 0, 'paused', 'render'),
+        event('resumed', 10, 'running', 'render'),
+        event('finished', 20, 'completed', 'render'),
+      ],
+    ).summary();
+    expect(recovered.hasKnownStart, isFalse);
+    expect(recovered.startedAtUtc, isNull);
+    expect(recovered.finishedAtUtc, DateTime.utc(2026, 1, 1, 0, 0, 20));
+    expect(recovered.wallClockDuration, isNull);
+    expect(recovered.latestOperationDuration, const Duration(seconds: 20));
+
+    final legacyExport = StitchTimeline(
+      events: [
+        event('export-start', 100, 'running', 'export'),
+        event('export-finish', 105, 'completed', 'export'),
+      ],
+    ).summary();
+    expect(legacyExport.hasKnownStart, isFalse);
+    expect(legacyExport.startedAtUtc, isNull);
+    expect(legacyExport.finishedAtUtc, DateTime.utc(2026, 1, 1, 0, 1, 45));
+    expect(legacyExport.wallClockDuration, isNull);
+    expect(legacyExport.latestOperationDuration, const Duration(seconds: 5));
+  });
+
+  test(
+    'modern queued origin remains known across pause, resume and export',
+    () {
+      final timeline = StitchTimeline(
+        events: [
+          event('queued', 0, 'queued', 'render'),
+          event('running', 1, 'running', 'render'),
+          event('paused', 10, 'paused', 'render'),
+          event('resumed', 20, 'running', 'render'),
+          event('rendered', 30, 'completed', 'render'),
+          event('exporting', 31, 'running', 'export'),
+          event('exported', 40, 'completed', 'export'),
+        ],
+      );
+      final summary = timeline.summary();
+      expect(summary.hasKnownStart, isTrue);
+      expect(summary.startedAtUtc, DateTime.utc(2026, 1, 1));
+      expect(summary.finishedAtUtc, DateTime.utc(2026, 1, 1, 0, 0, 40));
+      expect(summary.wallClockDuration, const Duration(seconds: 40));
+      expect(summary.latestOperationDuration, const Duration(seconds: 9));
     },
   );
 
