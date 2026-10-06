@@ -31,6 +31,12 @@ constexpr size_t kMaxDimension = 131072u;
 
 using CheckpointFn = int (*)(void*);
 
+#if defined(_WIN32)
+using NativePathChar = wchar_t;
+#else
+using NativePathChar = char;
+#endif
+
 void set_error(char* output, size_t capacity, const char* message) noexcept {
   if (output == nullptr || capacity == 0) return;
   std::snprintf(output, capacity, "%s", message == nullptr ? "libjxl error" : message);
@@ -331,7 +337,7 @@ extern "C" int lumia_jxl_test_chunk_budget_probe(uint64_t* peak_bytes,
 }
 
 extern "C" int lumia_jxl_test_read_rgba_pixel(
-    const wchar_t* input_path, uint32_t width, uint32_t height, uint32_t x,
+    const NativePathChar* input_path, uint32_t width, uint32_t height, uint32_t x,
     uint32_t y, uint8_t* rgba) noexcept {
   try {
     if (input_path == nullptr || rgba == nullptr || width == 0 || height == 0 ||
@@ -376,7 +382,7 @@ extern "C" int lumia_jxl_test_read_rgba_pixel(
 #endif
 
 extern "C" int lumia_jxl_encode_rgba_spool(
-    const wchar_t* input_path, const wchar_t* output_path, uint32_t width,
+    const NativePathChar* input_path, const NativePathChar* output_path, uint32_t width,
     uint32_t height, uint64_t /*memory_budget_mib*/, CheckpointFn checkpoint,
     void* checkpoint_opaque, char* error_message, size_t error_capacity,
     uint64_t* peak_chunk_bytes) noexcept {

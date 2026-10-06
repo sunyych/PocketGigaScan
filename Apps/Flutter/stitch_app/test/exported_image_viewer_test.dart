@@ -3,8 +3,10 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/models/export_fingerprint.dart';
+import 'package:stitch_app/services/mobile_storage_service.dart';
 import 'package:stitch_app/widgets/exported_image_viewer.dart';
 import 'support/chinese_test_app.dart';
 
@@ -90,6 +92,143 @@ void main() {
       expect(find.byTooltip('收起输出信息'), findsNothing);
       expect(find.byType(SelectableText), findsNothing);
       await tester.binding.setSurfaceSize(null);
+    });
+
+    testWidgets('narrow mobile layout supports maximum pyramid dimensions', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      await _fileIo(tester, () => _writeMaximumPyramid(root));
+      await tester.pumpWidget(_viewer());
+      await _pumpViewer(tester);
+      await _pumpTileImages(tester);
+
+      expect(find.text('131072 × 131072 px'), findsOneWidget);
+      expect(find.byTooltip('查看输出信息'), findsOneWidget);
+      expect(find.byType(SelectableText), findsNothing);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/128-128.png')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-0.png')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/255-255.png')),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('100%'));
+      await _pumpViewer(tester);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/128-128.png')),
+        findsOneWidget,
+        reason: 'zooming into a 131072-square panorama retains center tiles',
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-0.png')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/255-255.png')),
+        findsNothing,
+      );
+
+      final viewer = find.byType(InteractiveViewer);
+      var edgePan = await tester.startGesture(
+        tester.getCenter(viewer),
+        pointer: 81,
+      );
+      await edgePan.moveBy(const Offset(100000, 100000));
+      await edgePan.up();
+      await _pumpViewer(tester);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-0.png')),
+        findsOneWidget,
+        reason: 'panning to the image origin reveals its corner tile',
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/128-128.png')),
+        findsNothing,
+        reason: 'the previous center tile leaves the instantiated tile cache',
+      );
+
+      edgePan = await tester.startGesture(
+        tester.getCenter(viewer),
+        pointer: 82,
+      );
+      await edgePan.moveBy(const Offset(-200000, -200000));
+      await edgePan.up();
+      await _pumpViewer(tester);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/255-255.png')),
+        findsOneWidget,
+        reason: 'panning to the opposite image boundary reveals the far tile',
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-0.png')),
+        findsNothing,
+      );
+      expect(tester.takeException(), isNull);
+      await tester.binding.setSurfaceSize(null);
+    });
+
+    testWidgets('mobile save and share forward PNG TIFF and JXL MIME types', (
+      tester,
+    ) async {
+      const channel = MethodChannel('test/exported-image-storage');
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      final calls = <MethodCall>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        return true;
+      });
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      const formats = <(String, String)>[
+        ('.png', 'image/png'),
+        ('.tif', 'image/tiff'),
+        ('.jxl', 'image/jxl'),
+      ];
+
+      for (final (extension, mimeType) in formats) {
+        final formatOutput = File('${root.path}/mobile$extension');
+        await _fileIo(tester, () => formatOutput.writeAsBytes([1, 2, 3]));
+        await tester.pumpWidget(
+          ChineseTestApp(
+            home: ExportedImageViewer(
+              exportFilePath: formatOutput.path,
+              pyramidDirectory: root.path,
+              expectedExportFingerprint: null,
+              legacyTaskAssociationPresent: true,
+              legacyTaskBindingVerified: true,
+              mobileStorageService: const MobileStorageService(
+                channel: channel,
+              ),
+              exportMimeType: mimeType,
+            ),
+          ),
+        );
+        await _pumpViewer(tester);
+        expect(find.textContaining('输出文件：'), findsNothing);
+        expect(find.byType(SelectableText), findsNothing);
+        await tester.tap(find.byTooltip('保存整图'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('分享整图'));
+        await tester.pumpAndSettle();
+      }
+
+      expect(calls.map((call) => call.arguments['mimeType']), [
+        'image/png',
+        'image/png',
+        'image/tiff',
+        'image/tiff',
+        'image/jxl',
+        'image/jxl',
+      ]);
     });
 
     testWidgets('rejects a missing output file', (tester) async {
@@ -295,9 +434,53 @@ void main() {
       await tester.binding.setSurfaceSize(null);
     });
 
+    testWidgets('touch pinch zooms and one-finger drag pans', (tester) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.binding.setSurfaceSize(const Size(900, 700));
+      final fingerprint = (await _fileIo(tester, () => _fingerprint(output)))!;
+      await tester.pumpWidget(_viewer(fingerprint: fingerprint));
+      await _pumpViewer(tester);
+      await tester.tap(find.text('100%'));
+      await _pumpViewer(tester);
+
+      final viewer = find.byType(InteractiveViewer);
+      final controller = tester
+          .widget<InteractiveViewer>(viewer)
+          .transformationController!;
+      final center = tester.getCenter(viewer);
+      final initialScale = controller.value.getMaxScaleOnAxis();
+      final firstStart = center - const Offset(40, 0);
+      final secondStart = center + const Offset(40, 0);
+      final first = await tester.startGesture(firstStart, pointer: 71);
+      final second = await tester.startGesture(secondStart, pointer: 72);
+      await first.moveTo(center - const Offset(90, 0));
+      await second.moveTo(center + const Offset(90, 0));
+      await tester.pump();
+      await first.up();
+      await second.up();
+      await _pumpViewer(tester);
+      expect(
+        controller.value.getMaxScaleOnAxis(),
+        greaterThan(initialScale),
+        reason: 'two touch pointers spread apart should zoom the pyramid',
+      );
+
+      final beforePan = controller.value.clone();
+      final pan = await tester.startGesture(center, pointer: 73);
+      await pan.moveBy(const Offset(-70, -45));
+      await pan.up();
+      await _pumpViewer(tester);
+      expect(controller.value.entry(0, 3), isNot(beforePan.entry(0, 3)));
+      expect(controller.value.entry(1, 3), isNot(beforePan.entry(1, 3)));
+      await tester.binding.setSurfaceSize(null);
+    });
+
     testWidgets('only visible pyramid tiles become image widgets', (
       tester,
     ) async {
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetDevicePixelRatio);
       await tester.binding.setSurfaceSize(const Size(900, 700));
       final fingerprint = (await _fileIo(tester, () => _fingerprint(output)))!;
       await tester.pumpWidget(_viewer(fingerprint: fingerprint));
@@ -309,17 +492,28 @@ void main() {
       expect(find.byType(Image).evaluate().length, lessThanOrEqualTo(32));
       await tester.tap(find.text('100%'));
       await _pumpViewer(tester);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-7.png')),
+        findsNothing,
+        reason: 'center zoom must not instantiate the far-right corner tile',
+      );
       final viewer = find.byType(InteractiveViewer);
       final center = tester.getCenter(viewer);
-      tester.binding.handlePointerEvent(
-        PointerScrollEvent(
-          position: center,
-          scrollDelta: const Offset(0, -480),
-          device: 17,
-        ),
-      );
+      final pan = await tester.startGesture(center, pointer: 74);
+      await pan.moveBy(const Offset(1000, 500));
+      await pan.up();
       await _pumpViewer(tester);
       await _pumpTileImages(tester);
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-0.png')),
+        findsOneWidget,
+        reason: 'panning toward the upper-left reveals its edge tile',
+      );
+      expect(
+        find.byKey(const ValueKey('viewer-tile-level-0/0-4.png')),
+        findsNothing,
+        reason: 'tiles from the old center viewport leave the visible cache',
+      );
       expect(
         find.byType(Image).evaluate().length,
         lessThan(32),
@@ -513,6 +707,40 @@ Map<String, Object?> _tile(
   'height': height,
   'path': path,
 };
+
+Future<void> _writeMaximumPyramid(Directory root) async {
+  const maximumDimension = 131072;
+  const paths = [
+    'level-0/0-0.png',
+    'level-0/128-128.png',
+    'level-0/255-255.png',
+  ];
+  for (final path in paths) {
+    await File('${root.path}/$path').writeAsBytes(_png);
+  }
+  await File('${root.path}/manifest.json').writeAsString(
+    jsonEncode({
+      'complete': true,
+      'schemaVersion': 1,
+      'projection': 'spherical',
+      'tileSize': 512,
+      'width': maximumDimension,
+      'height': maximumDimension,
+      'levels': [
+        {
+          'level': 0,
+          'width': maximumDimension,
+          'height': maximumDimension,
+          'occupied': [
+            _tile(0, 0, 512, 512, paths[0]),
+            _tile(128, 128, 512, 512, paths[1]),
+            _tile(255, 255, 512, 512, paths[2]),
+          ],
+        },
+      ],
+    }),
+  );
+}
 
 Future<void> _pumpViewer(WidgetTester tester) async {
   // Viewer source validation and tile lookup use real filesystem futures.

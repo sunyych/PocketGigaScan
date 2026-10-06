@@ -1,7 +1,7 @@
 # PocketGigaScan stitching verification
 
-Run SDK commands serially. The current distribution target is Windows x64;
-the modern Flutter Android runner is retained for future stitching work.
+Run SDK commands serially. The published distribution is Windows x64; the
+Android implementation has its own packaging and connected-device evidence.
 Windows tests do not qualify an Android package or a physical camera.
 
 | Behavior | Reproducible coverage |
@@ -16,6 +16,22 @@ Windows tests do not qualify an Android package or a physical camera.
 | Viewer wheel/drag, visible tiles and collapsed status | Viewer widget/gesture/file-binding tests and current screenshot baselines |
 | English/Chinese system locale and storage compatibility | Localization and legacy-support-directory tests |
 | Build ownership, dependency pins and archive integrity | PowerShell builder contracts, actual nested ZIP positive/negative fixtures |
+| Android large-grid confirmation and unrestricted import | Approval scope/controller/widget tests; >1024 import and >128-axis native tests |
+| Android scoped files, background guard and resource budgets | Dart bridge/policy tests, Kotlin policies and connected-device integration |
+
+Android native checks use `scripts/build-stitch-android-core.ps1 -BuildTests`.
+The opt-in `integration_test/android_parity_test.dart` accepts
+`TEST_ANDROID_PARITY_SOURCE_DIR`, an app-readable real DWARF 2×2 JPEG fixture
+directory. It runs actual FFI processing/three-format exports and viewer checks.
+The device fixture must be staged in app-private storage or imported through
+SAF; a public Downloads path alone does not grant scoped-storage access.
+The `test_driver/android_parity_test.dart` integration driver saves captured
+screenshots to `INTEGRATION_SCREENSHOT_DIR` for coordinator review. From the
+Flutter package, run it with `flutter drive --driver=test_driver/android_parity_test.dart
+--target=integration_test/android_parity_test.dart -d DEVICE_SERIAL
+--dart-define=TEST_ANDROID_PARITY_SOURCE_DIR=APP_PRIVATE_FIXTURE_DIRECTORY`.
+Host policy mocks and synthetic giant-canvas tests are distinct from actual
+Android exports, physical background behavior and multi-gigabyte file evidence.
 
 From `Apps/Flutter/stitch_app`:
 

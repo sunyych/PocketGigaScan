@@ -169,7 +169,7 @@ void main() {
   );
 
   test(
-    'refuses an existing input folder without deleting its contents and rejects more than 1024',
+    'refuses an existing input folder without deleting its contents and accepts more than 1024 photos',
     () async {
       final temp = await Directory.systemTemp.createTemp(
         'stitch-import-owned-',
@@ -186,13 +186,23 @@ void main() {
         throwsA(isA<ImportFailure>()),
       );
       expect(await marker.readAsString(), 'preserve');
-      await expectLater(
-        PhotoImporter().copyIntoTask(
-          List.filled(1025, PlatformFile(name: 'x.jpg', size: 0)),
-          '${temp.path}/other',
-        ),
-        throwsA(isA<ImportFailure>()),
+      final source = File('${temp.path}/source.jpg')
+        ..writeAsBytesSync(const [
+          0xff, 0xd8, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00,
+          0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+        ]);
+      final imported = await PhotoImporter().copyIntoTask(
+        [
+          for (var index = 0; index < 1025; index++)
+            PlatformFile(
+              name: 'photo$index.jpg',
+              size: source.lengthSync(),
+              path: source.path,
+            ),
+        ],
+        '${temp.path}/other',
       );
+      expect(imported.photos, hasLength(1025));
     },
   );
 }

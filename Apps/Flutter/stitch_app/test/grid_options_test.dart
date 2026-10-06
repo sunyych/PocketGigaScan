@@ -65,6 +65,31 @@ void main() {
     });
   });
 
+  test('6x6, 7x6, and 7x1 complete grids pass without axis or photo caps', () {
+    for (final (rows, columns) in [(6, 6), (7, 6), (7, 1), (1, 1025)]) {
+      final count = rows * columns;
+      final photos = [for (var i = 0; i < count; i++) photo('image$i.jpg', i)];
+      final mapping = GridMapping.sequence(
+        photos,
+        GridOptions(mode: GridMode.sequence, rows: rows, columns: columns),
+      );
+      expect(mapping.isValid, isTrue, reason: '$rows×$columns');
+      expect(mapping.cells, hasLength(count));
+    }
+  });
+
+  test('positive dimensions reject zero and product overflow safely', () {
+    expect(
+      const GridOptions(rows: 0, columns: 1).validationError,
+      contains('正整数'),
+    );
+    expect(
+      const GridOptions(rows: 0x7fffffffffffffff, columns: 2)
+          .validationError,
+      contains('乘积'),
+    );
+  });
+
   test('a forced photo follows its identity when traversal order changes', () {
     final photos = [for (var i = 0; i < 6; i++) photo('photo$i.jpg', i)];
     const rowMajor = GridOptions(mode: GridMode.sequence, rows: 2, columns: 3);

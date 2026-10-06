@@ -3,6 +3,7 @@ import 'stitch_quality.dart';
 enum BatchItemState {
   pending,
   needsSettings,
+  needsApproval,
   skipped,
   ready,
   running,
@@ -20,6 +21,7 @@ class BatchQueueItem {
     required this.sourceDirectory,
     required this.state,
     this.taskId,
+    this.durableInputDirectory,
     this.message,
     this.estimatedLayout = false,
     this.pauseRequested = false,
@@ -36,6 +38,9 @@ class BatchQueueItem {
   final String sourceDirectory;
   final BatchItemState state;
   final String? taskId;
+
+  /// Task-owned input copy used to recover after temporary SAF staging is freed.
+  final String? durableInputDirectory;
   final String? message;
   final bool estimatedLayout;
   final bool pauseRequested;
@@ -47,8 +52,11 @@ class BatchQueueItem {
   final List<ProgressSample> progressSamples;
 
   BatchQueueItem copyWith({
+    String? sourceDirectory,
     BatchItemState? state,
     String? taskId,
+    String? durableInputDirectory,
+    bool clearDurableInputDirectory = false,
     String? message,
     bool clearMessage = false,
     bool? estimatedLayout,
@@ -64,9 +72,12 @@ class BatchQueueItem {
   }) => BatchQueueItem(
     id: id,
     name: name,
-    sourceDirectory: sourceDirectory,
+    sourceDirectory: sourceDirectory ?? this.sourceDirectory,
     state: state ?? this.state,
     taskId: taskId ?? this.taskId,
+    durableInputDirectory: clearDurableInputDirectory
+        ? null
+        : durableInputDirectory ?? this.durableInputDirectory,
     message: clearMessage ? null : message ?? this.message,
     estimatedLayout: estimatedLayout ?? this.estimatedLayout,
     pauseRequested: pauseRequested ?? this.pauseRequested,
@@ -84,6 +95,7 @@ class BatchQueueItem {
     'sourceDirectory': sourceDirectory,
     'state': state.name,
     'taskId': taskId,
+    'durableInputDirectory': durableInputDirectory,
     'message': message,
     'estimatedLayout': estimatedLayout,
     'pauseRequested': pauseRequested,
@@ -106,6 +118,7 @@ class BatchQueueItem {
       orElse: () => BatchItemState.failed,
     ),
     taskId: json['taskId'] as String?,
+    durableInputDirectory: json['durableInputDirectory'] as String?,
     message: json['message'] as String?,
     estimatedLayout: json['estimatedLayout'] as bool? ?? false,
     pauseRequested: json['pauseRequested'] as bool? ?? false,
@@ -144,7 +157,7 @@ class BatchQueue {
     required this.parentDirectory,
     required this.outputDirectory,
     required this.items,
-    this.outputFormat = ExportFormat.png,
+    this.outputFormat = ExportFormat.tiff,
   });
 
   final String id;

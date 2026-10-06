@@ -49,6 +49,81 @@ void main() {
     expect(restored.cameraCalibrationOverridden, isTrue);
   });
 
+  test('large-job approval persists and is invalidated by job, grid, or photo changes', () {
+    final large = fixture().copyWith(
+      grid: const GridOptions(mode: GridMode.sequence, rows: 7, columns: 1),
+      photos: [
+        for (var index = 0; index < 7; index++)
+          ImportedPhoto(
+            originalName: 'image$index.jpg',
+            storedPath: 'image$index.jpg',
+            sha256: 'hash$index',
+            width: 3840,
+            height: 2160,
+            originalOrder: index,
+          ),
+      ],
+    );
+    expect(large.needsLargeJobConfirmation, isTrue);
+    expect(large.hasCurrentLargeJobApproval, isFalse);
+    final approved = large.copyWith(
+      largeJobApprovalScope: large.currentLargeJobApprovalScope,
+    );
+    final restored = StitchTask.fromJson(approved.toJson());
+    expect(restored.hasCurrentLargeJobApproval, isTrue);
+    expect(
+      restored.copyWith(grid: restored.grid.copyWith(serpentine: true))
+          .hasCurrentLargeJobApproval,
+      isFalse,
+    );
+    expect(
+      StitchTask.fromJson({...restored.toJson(), 'id': 'another-job'})
+          .hasCurrentLargeJobApproval,
+      isFalse,
+    );
+    expect(
+      restored.copyWith(
+        photos: [
+          ...restored.photos,
+          const ImportedPhoto(
+            originalName: 'extra.jpg',
+            storedPath: 'extra.jpg',
+            sha256: 'extra',
+            width: 3840,
+            height: 2160,
+            originalOrder: 7,
+          ),
+        ],
+      ).hasCurrentLargeJobApproval,
+      isFalse,
+    );
+  });
+
+  test('large-job threshold is strictly above 6x6 and includes 7x6 and 7x1', () {
+    StitchTask withGrid(int rows, int columns) => fixture().copyWith(
+      grid: GridOptions(
+        mode: GridMode.sequence,
+        rows: rows,
+        columns: columns,
+      ),
+      photos: [
+        for (var index = 0; index < rows * columns; index++)
+          ImportedPhoto(
+            originalName: 'image$index.jpg',
+            storedPath: 'image$index.jpg',
+            sha256: 'hash$index',
+            width: 3840,
+            height: 2160,
+            originalOrder: index,
+          ),
+      ],
+    );
+
+    expect(withGrid(6, 6).needsLargeJobConfirmation, isFalse);
+    expect(withGrid(7, 6).needsLargeJobConfirmation, isTrue);
+    expect(withGrid(7, 1).needsLargeJobConfirmation, isTrue);
+  });
+
   test(
     'quality choices persist and legacy tasks retain PNG and old blending',
     () {
@@ -96,7 +171,7 @@ void main() {
     expect(restored.exportFingerprint?.modifiedAtMicros, 4567);
     expect(ExportFormat.fromPath('PANORAMA.JXL'), ExportFormat.jpegXl);
     expect(ExportFormat.jpegXl.extension, 'jxl');
-    expect(ExportFormat.jpegXl.supportedOnMobile, isFalse);
+    expect(ExportFormat.jpegXl.supportedOnMobile, isTrue);
     expect(ExportFormat.fromSavedValue('unexpected'), ExportFormat.png);
   });
 

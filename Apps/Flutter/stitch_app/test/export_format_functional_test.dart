@@ -16,6 +16,7 @@ import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
 import 'package:stitch_app/services/power_service.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/services/mobile_runtime_service.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
 
@@ -198,6 +199,71 @@ class _AutoExportApi extends _FormatApi {
   }
 }
 
+class _ResourcePolicyApi extends _AutoExportApi {
+  _ResourcePolicyApi() : super(jpegXlAvailable: true);
+
+  int configureCalls = 0;
+  int? configuredWorkers;
+  int? configuredMemory;
+  int? configuredJobs;
+  int? startedWorkers;
+  int? startedMemory;
+
+  @override
+  Future<Map<String, Object?>> configureResources({
+    required int totalCpuWorkers,
+    required int totalMemoryBudgetMiB,
+    required int maxConcurrentJobs,
+  }) async {
+    configureCalls++;
+    configuredWorkers = totalCpuWorkers;
+    configuredMemory = totalMemoryBudgetMiB;
+    configuredJobs = maxConcurrentJobs;
+    return await capabilities();
+  }
+
+  @override
+  Future<Map<String, Object?>> start(
+    Map<String, Object?> request,
+    String outputDirectory, {
+    required int memoryBudgetMiB,
+    required int workers,
+  }) async {
+    startedMemory = memoryBudgetMiB;
+    startedWorkers = workers;
+    return super.start(
+      request,
+      outputDirectory,
+      memoryBudgetMiB: memoryBudgetMiB,
+      workers: workers,
+    );
+  }
+}
+
+class _ResourceOrderController extends EmptyBatchQueueController {
+  _ResourceOrderController({
+    required super.api,
+    required super.taskRepository,
+    required this.resourceApi,
+  });
+
+  final _ResourcePolicyApi resourceApi;
+  bool configuredBeforeInitialize = false;
+
+  @override
+  Future<void> initialize() async {
+    configuredBeforeInitialize = resourceApi.configureCalls == 1;
+  }
+}
+
+Map<String, Object?> _resourceReadings(String thermalStatus) => {
+  'totalMemoryMiB': 4096,
+  'availableMemoryMiB': 1500,
+  'cpuCount': 8,
+  'availableStorageMiB': 2048,
+  'thermalStatus': thermalStatus,
+};
+
 class _BatchQueueSlotsOccupiedApi extends _AutoExportApi {
   _BatchQueueSlotsOccupiedApi() : super(jpegXlAvailable: true);
 
@@ -231,6 +297,19 @@ Future<void> _pumpUntil(
     await tester.pump();
   }
   expect(condition(), isTrue, reason: '$reason (5 second deadline)');
+}
+
+Future<void> _pumpUntilStartEnabled(WidgetTester tester) async {
+  const label = '开始合成';
+  await _pumpUntil(
+    tester,
+    () {
+      final start = find.widgetWithText(FilledButton, label);
+      return start.evaluate().isNotEmpty &&
+          tester.widget<FilledButton>(start).onPressed != null;
+    },
+    'Single-task start stayed locked before queue ownership initialization',
+  );
 }
 
 Future<void> _pumpUntilExportPersisted(
@@ -272,6 +351,15 @@ void _deleteTempDirectory(WidgetTester tester, Directory directory) {
   });
 }
 
+Future<void> _disposeOwnedQueueFixture(
+  WidgetTester tester,
+  BatchQueueController controller,
+) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  controller.dispose();
+  await tester.pump();
+}
+
 class _ExternalPower implements PowerGate {
   @override
   Future<PowerState> readState() async => PowerState.externalPower;
@@ -287,11 +375,12 @@ class _NoopForegroundLock implements ForegroundWorkLock {
 StitchTask _task({
   StitchPhase phase = StitchPhase.imported,
   String id = 'format-functional-task',
+  String outputDirectory = 'output',
 }) => StitchTask(
   id: id,
   createdAt: DateTime.utc(2026, 10, 4),
   sourceDirectory: 'source',
-  outputDirectory: 'output',
+  outputDirectory: outputDirectory,
   photos: const [
     ImportedPhoto(
       originalName: '00_00.jpg',
@@ -729,6 +818,7 @@ void main() {
     expect(api.resumes, 0);
     expect(api.pauses, 0);
     expect(api.cancels, 0);
+    await _disposeOwnedQueueFixture(tester, queueController);
   });
 
   testWidgets('cold start unlocks unowned controls after queue load', (
@@ -785,6 +875,7 @@ void main() {
       'Unowned controls did not unlock after queue initialization',
     );
     expect(api.starts, 0);
+    await _disposeOwnedQueueFixture(tester, queueController);
   });
 
   testWidgets('ready batch owned task locks format and quality settings', (
@@ -857,7 +948,6 @@ void main() {
           .onChanged,
       isNull,
     );
-
     final qualityExpansion = find.byKey(const Key('stitch-quality-expansion'));
     await tester.ensureVisible(qualityExpansion);
     await tester.pump(const Duration(milliseconds: 350));
@@ -876,6 +966,7 @@ void main() {
     );
     expect(api.starts, 0);
     expect(api.exports, 0);
+    await _disposeOwnedQueueFixture(tester, queueController);
   });
 
   testWidgets(
@@ -1051,6 +1142,7 @@ void main() {
             .onPressed,
         isNull,
       );
+      await _disposeOwnedQueueFixture(tester, queueController);
       expect(api.resumes, 0);
       expect(api.starts, 0);
       expect(api.pauses, 0);
@@ -1214,6 +1306,257 @@ void main() {
     expect(find.byKey(const Key('export-format-option')), findsNothing);
     expect(find.byKey(const Key('stitch-quality-expansion')), findsNothing);
   });
+
+  testWidgets('Android resource budget configures core before queue startup', (
+    tester,
+  ) async {
+    final temporary = await _createTempDirectory(
+      tester,
+      'android-resource-budget-',
+    );
+    _deleteTempDirectory(tester, temporary);
+    const runtimeChannel = MethodChannel('test/android-resource-budget');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(runtimeChannel, (call) async {
+          if (call.method == 'readResourceBudget') {
+            return _resourceReadings('normal');
+          }
+          if (call.method == 'setProcessingActive') return true;
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(runtimeChannel, null),
+    );
+
+    final api = _ResourcePolicyApi();
+    final task = _task(
+      outputDirectory: '${temporary.path}/render',
+    ).copyWith(memoryBudgetMiB: 1024);
+    final repository = _RecordingRepository(task);
+    final controller = _ResourceOrderController(
+      api: api,
+      taskRepository: repository,
+      resourceApi: api,
+    );
+    final runtime = MobileRuntimeService(channel: runtimeChannel);
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          jobApi: api,
+          repository: repository,
+          batchQueueController: controller,
+          foregroundWorkLock: _NoopForegroundLock(),
+          initialTask: task,
+          mobileOverride: true,
+          androidOverride: true,
+          mobileRuntimeService: runtime,
+        ),
+      ),
+    );
+    await _pumpUntil(
+      tester,
+      () => controller.configuredBeforeInitialize,
+      'Core resources were not configured before queue initialization',
+    );
+    expect(api.configuredMemory, 500);
+    expect(api.configuredWorkers, 4);
+    expect(api.configuredJobs, 3);
+
+    final start = find.text('开始合成');
+    await tester.ensureVisible(start);
+    await _pumpUntilStartEnabled(tester);
+    await tester.tap(start);
+    await tester.pump();
+    await _pumpUntil(
+      tester,
+      () => api.starts == 1,
+      'Android start API not called',
+    );
+    expect(api.startedMemory, 500);
+    expect(api.startedWorkers, 1);
+    expect(repository.saved.last.memoryBudgetMiB, 1024);
+    expect(repository.saved.last.workers, 4);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    await runtime.dispose();
+    await tester.pump();
+  });
+
+  testWidgets('Android defers new starts at moderate thermal status', (
+    tester,
+  ) async {
+    final temporary = await _createTempDirectory(
+      tester,
+      'android-thermal-deferral-',
+    );
+    _deleteTempDirectory(tester, temporary);
+    const runtimeChannel = MethodChannel('test/android-thermal-budget');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(runtimeChannel, (call) async {
+          if (call.method == 'readResourceBudget') {
+            return _resourceReadings('moderate');
+          }
+          if (call.method == 'setProcessingActive') return true;
+          return null;
+        });
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(runtimeChannel, null),
+    );
+
+    final api = _ResourcePolicyApi();
+    final task = _task(outputDirectory: '${temporary.path}/render');
+    final repository = _RecordingRepository(task);
+    final controller = _ResourceOrderController(
+      api: api,
+      taskRepository: repository,
+      resourceApi: api,
+    );
+    final runtime = MobileRuntimeService(channel: runtimeChannel);
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          jobApi: api,
+          repository: repository,
+          batchQueueController: controller,
+          foregroundWorkLock: _NoopForegroundLock(),
+          initialTask: task,
+          mobileOverride: true,
+          androidOverride: true,
+          mobileRuntimeService: runtime,
+        ),
+      ),
+    );
+    await _pumpUntil(
+      tester,
+      () => controller.configuredBeforeInitialize,
+      'Core resources were not configured before queue initialization',
+    );
+    final start = find.text('开始合成');
+    await tester.ensureVisible(start);
+    await _pumpUntilStartEnabled(tester);
+    await tester.tap(start);
+    await tester.pump();
+    expect(api.starts, 0);
+    expect(find.text('设备温度较高，待温度降低后再启动新任务。'), findsOneWidget);
+    expect(Directory(task.outputDirectory).existsSync(), isFalse);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    controller.dispose();
+    await runtime.dispose();
+    await tester.pump();
+  });
+
+  for (final accept in [false, true]) {
+    testWidgets(
+      'Android large-job confirmation ${accept ? 'starts only after approval' : 'cancel starts no native work'}',
+      (tester) async {
+        final temporary = await _createTempDirectory(
+          tester,
+          'android-large-approval-',
+        );
+        _deleteTempDirectory(tester, temporary);
+        const runtimeChannel = MethodChannel('test/mobile-runtime');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(runtimeChannel, (call) async {
+              switch (call.method) {
+                case 'readResourceBudget':
+                  return <String, Object?>{
+                    'totalMemoryMiB': 4096,
+                    'availableMemoryMiB': 2048,
+                    'cpuCount': 8,
+                    'availableStorageMiB': 4096,
+                    'thermalStatus': 'none',
+                  };
+                case 'readPendingTimeoutJobs':
+                  return <String>[];
+                case 'setProcessingActive':
+                  return true;
+              }
+              return null;
+            });
+        addTearDown(
+          () => TestDefaultBinaryMessengerBinding
+              .instance
+              .defaultBinaryMessenger
+              .setMockMethodCallHandler(runtimeChannel, null),
+        );
+        final task = _task(outputDirectory: '${temporary.path}/render')
+            .copyWith(
+              grid: const GridOptions(
+                mode: GridMode.sequence,
+                rows: 7,
+                columns: 1,
+              ),
+              photos: [
+                for (var index = 0; index < 7; index++)
+                  ImportedPhoto(
+                    originalName: 'photo$index.jpg',
+                    storedPath: '${temporary.path}/photo$index.jpg',
+                    sha256: 'photo-$index',
+                    width: 3840,
+                    height: 2160,
+                    originalOrder: index,
+                  ),
+              ],
+            );
+        final api = _AutoExportApi(jpegXlAvailable: true);
+        final repository = _RecordingRepository(task);
+        final runtime = MobileRuntimeService(channel: runtimeChannel);
+        await tester.pumpWidget(
+          ChineseTestApp(
+            home: StitchHomePage(
+              jobApi: api,
+              repository: repository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: repository,
+              ),
+              powerGate: _ExternalPower(),
+              foregroundWorkLock: _NoopForegroundLock(),
+              initialTask: task,
+              mobileOverride: true,
+              androidOverride: true,
+              mobileRuntimeService: runtime,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        final start = find.text('开始合成');
+        await tester.ensureVisible(start);
+        await _pumpUntilStartEnabled(tester);
+        await tester.tap(start);
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 400));
+        expect(find.text('确认大型合成任务'), findsOneWidget);
+        if (accept) {
+          await tester.tap(find.text('继续'));
+          await tester.pump();
+          await _pumpUntil(
+            tester,
+            () => api.starts == 1,
+            'Accepted large task did not reach the native start API',
+          );
+          expect(api.starts, 1);
+          expect(repository.saved.last.hasCurrentLargeJobApproval, isTrue);
+          expect(Directory(task.outputDirectory).existsSync(), isTrue);
+        } else {
+          await tester.tap(
+            find.descendant(
+              of: find.byType(AlertDialog),
+              matching: find.text('取消'),
+            ),
+          );
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(api.starts, 0);
+          expect(Directory(task.outputDirectory).existsSync(), isFalse);
+        }
+      },
+    );
+  }
 
   testWidgets('paused desktop task locks output format changes', (
     tester,

@@ -99,9 +99,6 @@ class BatchFolderImporter {
     String taskDirectory,
   ) async {
     if (snapshot.files.isEmpty) throw ImportFailure(snapshot.error ?? '没有原片');
-    if (snapshot.files.length > GridOptions.maxCells) {
-      throw ImportFailure('单个子目录最多支持 ${GridOptions.maxCells} 张 JPEG 原片');
-    }
     final taskDir = Directory(taskDirectory);
     await taskDir.create(recursive: true);
     final lock = File(p.join(taskDirectory, '.input-import.lock'));
@@ -198,9 +195,7 @@ class BatchFolderImporter {
 
   GridOptions? _squareLayout(int count) {
     final side = math.sqrt(count).round();
-    if (side * side != count ||
-        side > GridOptions.maxAxis ||
-        count > GridOptions.maxCells) {
+    if (side * side != count) {
       return null;
     }
     return GridOptions(mode: GridMode.sequence, rows: side, columns: side);
@@ -253,10 +248,8 @@ class BatchFolderImporter {
         coordinates.map((item) => item.$1 - baseRow).reduce(math.max) + 1;
     final columns =
         coordinates.map((item) => item.$2 - baseColumn).reduce(math.max) + 1;
-    if (rows > GridOptions.maxAxis ||
-        columns > GridOptions.maxAxis ||
-        rows * columns != photos.length ||
-        rows * columns > GridOptions.maxCells) {
+    if (!GridOptions.productFits(rows, columns) ||
+        rows * columns != photos.length) {
       return null;
     }
     return GridOptions(mode: GridMode.filename, rows: rows, columns: columns);

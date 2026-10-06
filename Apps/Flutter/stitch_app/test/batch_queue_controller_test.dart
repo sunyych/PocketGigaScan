@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/services.dart';
 import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
@@ -11,6 +12,8 @@ import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/services/mobile_runtime_service.dart';
+import 'package:stitch_app/services/mobile_storage_service.dart';
 
 const _jpeg = <int>[
   0xff,
@@ -119,9 +122,12 @@ class _FakeApi implements JobApi {
   final int memory;
   final int slots;
   final Map<String, _Job> jobs = {};
+  int starts = 0;
+  int exports = 0;
   int maxActive = 0;
   int resumeCalls = 0;
   bool failCancel = false;
+  bool failPause = false;
   bool completeExportWithoutOutput = false;
   int get active => jobs.values
       .where((job) => job.state == 'running' || job.state == 'queued')
@@ -170,6 +176,7 @@ class _FakeApi implements JobApi {
     required int memoryBudgetMiB,
     required int workers,
   }) async {
+    starts++;
     final tiles = request['tiles']! as List<Object?>;
     if (workers > tiles.length) throw StateError('workers exceed tile count');
     if (active >= slots ||
@@ -214,8 +221,10 @@ class _FakeApi implements JobApi {
 
   @override
   Future<Map<String, Object?>> pause(String jobId) async {
-    jobs[jobId]!.state = 'paused';
-    return {'ok': true, 'jobId': jobId, 'state': 'paused'};
+    if (failPause) throw const NativeJobException('pause failed');
+    final job = jobs[jobId]!;
+    if (job.state != 'completed') job.state = 'paused';
+    return {'ok': true, 'jobId': jobId, 'state': job.state};
   }
 
   @override
@@ -237,6 +246,7 @@ class _FakeApi implements JobApi {
 
   @override
   Future<Map<String, Object?>> export(String jobId, String destination) async {
+    exports++;
     final job = jobs[jobId]!;
     job.operation = 'export';
     job.destination = destination;
@@ -349,6 +359,7 @@ Future<void> _waitUntil(bool Function() condition, [String? reason]) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory temporary;
   late Directory parent;
   late _MemoryTasks tasks;
@@ -714,6 +725,688 @@ void main() {
   );
 
   test(
+    'large batch item waits for scoped approval before any native start',
+    () async {
+      controller.requireLargeJobApproval = true;
+      await _makeFolder(parent, 'large-1x7', 7);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 7,
+        columns: 1,
+        horizontalFovDegrees: 45,
+      );
+
+      await _waitUntil(
+        () =>
+            controller.queues.single.items.single.state ==
+            BatchItemState.needsApproval,
+      );
+      expect(
+        api.jobs,
+        isEmpty,
+        reason: 'Approval must precede the FFI start call.',
+      );
+      final imported = (await tasks.loadById(item.id))!;
+      expect(imported.hasCurrentLargeJobApproval, isFalse);
+      expect(Directory(imported.outputDirectory).existsSync(), isFalse);
+
+      await controller.approveLargeJob(queue.id, item.id);
+      await _waitUntil(() => api.jobs.length == 1);
+      final approved = (await tasks.loadById(item.id))!;
+      expect(approved.hasCurrentLargeJobApproval, isTrue);
+    },
+  );
+
+  test(
+    'completed large render resumes pending export after approval only',
+    () async {
+      const channel = MethodChannel('test.batch-completed-approval-export');
+      final runtimeEvents = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'readResourceBudget') {
+              return <String, Object?>{
+                'totalMemoryMiB': 4096,
+                'availableMemoryMiB': 2048,
+                'cpuCount': 8,
+                'availableStorageMiB': 4096,
+                'thermalStatus': 'none',
+              };
+            }
+            if (call.method == 'setProcessingActive') {
+              final args = call.arguments as Map<Object?, Object?>;
+              runtimeEvents.add(args['active'] == true ? 'start' : 'stop');
+              return true;
+            }
+            return null;
+          });
+      final runtime = MobileRuntimeService(channel: channel);
+      var guardedController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        requireLargeJobApproval: true,
+        runtimeService: runtime,
+      );
+      addTearDown(() async {
+        guardedController.dispose();
+        await guardedController.drain();
+        await runtime.dispose();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+      await guardedController.initialize();
+      await _makeFolder(parent, 'approval-export-pending', 7);
+      await guardedController.addParent(parent.path);
+      final queue = guardedController.queues.single;
+      final item = queue.items.single;
+      await guardedController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 7,
+        columns: 1,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.state ==
+            BatchItemState.needsApproval,
+      );
+      await guardedController.approveLargeJob(queue.id, item.id);
+      await _waitUntil(() => api.starts == 1);
+      final job = api.jobs.values.single;
+      await api.finishRender(job.id);
+      guardedController.dispose();
+      await guardedController.drain();
+      await tasks.save(
+        (await tasks.loadById(
+          item.id,
+        ))!.copyWith(clearLargeJobApprovalScope: true),
+      );
+      guardedController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        requireLargeJobApproval: true,
+        runtimeService: runtime,
+      );
+      await guardedController.initialize();
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.state ==
+            BatchItemState.needsApproval,
+      );
+      var pending = (await tasks.loadById(item.id))!;
+      expect(pending.phase, StitchPhase.completed);
+      expect(pending.stage, 'export-pending');
+      expect(api.starts, 1);
+      expect(api.exports, 0);
+      expect(runtimeEvents.last, 'stop');
+
+      await guardedController.approveLargeJob(queue.id, item.id);
+      await _waitUntil(() => api.exports == 1);
+      expect(api.starts, 1, reason: 'Approval must resume export, not render.');
+      expect(job.operation, 'export');
+      await api.finishExport(job.id);
+      await guardedController.tick();
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.state ==
+            BatchItemState.completed,
+      );
+      pending = (await tasks.loadById(item.id))!;
+      expect(pending.phase, StitchPhase.completed);
+      expect(api.exports, 1);
+      expect(runtimeEvents.last, 'stop');
+    },
+  );
+
+  test(
+    'completed render resumes pending export after thermal deferral',
+    () async {
+      const channel = MethodChannel('test.batch-completed-thermal-export');
+      var thermalStatus = 'none';
+      final runtimeEvents = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'readResourceBudget') {
+              return <String, Object?>{
+                'totalMemoryMiB': 4096,
+                'availableMemoryMiB': 2048,
+                'cpuCount': 8,
+                'availableStorageMiB': 4096,
+                'thermalStatus': thermalStatus,
+              };
+            }
+            if (call.method == 'setProcessingActive') {
+              final args = call.arguments as Map<Object?, Object?>;
+              runtimeEvents.add(args['active'] == true ? 'start' : 'stop');
+              return true;
+            }
+            return null;
+          });
+      final runtime = MobileRuntimeService(channel: channel);
+      final guardedController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        requireLargeJobApproval: true,
+        runtimeService: runtime,
+      );
+      addTearDown(() async {
+        guardedController.dispose();
+        await guardedController.drain();
+        await runtime.dispose();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+      await guardedController.initialize();
+      await _makeFolder(parent, 'thermal-export-pending', 4);
+      await guardedController.addParent(parent.path);
+      final queue = guardedController.queues.single;
+      final item = queue.items.single;
+      await guardedController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1);
+      final job = api.jobs.values.single;
+      thermalStatus = 'moderate';
+      await api.finishRender(job.id);
+      await guardedController.tick();
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.state ==
+            BatchItemState.ready,
+      );
+      var pending = (await tasks.loadById(item.id))!;
+      expect(pending.phase, StitchPhase.completed);
+      expect(pending.stage, 'export-pending');
+      expect(api.starts, 1);
+      expect(api.exports, 0);
+      expect(runtimeEvents.last, 'stop');
+
+      thermalStatus = 'none';
+      await guardedController.tick();
+      await _waitUntil(() => api.exports == 1);
+      expect(api.starts, 1, reason: 'Cooling must resume export, not render.');
+      expect(job.operation, 'export');
+      await api.finishExport(job.id);
+      await guardedController.tick();
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.state ==
+            BatchItemState.completed,
+      );
+      pending = (await tasks.loadById(item.id))!;
+      expect(pending.phase, StitchPhase.completed);
+      expect(api.exports, 1);
+      expect(runtimeEvents.last, 'stop');
+    },
+  );
+
+  test(
+    'Android runtime guard failure defers a batch start without creating output',
+    () async {
+      const channel = MethodChannel('test.batch-runtime-guard');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'readResourceBudget') {
+              return <String, Object?>{
+                'totalMemoryMiB': 4096,
+                'availableMemoryMiB': 2048,
+                'cpuCount': 8,
+                'availableStorageMiB': 4096,
+                'thermalStatus': 'none',
+              };
+            }
+            if (call.method == 'setProcessingActive') return false;
+            return null;
+          });
+      final runtime = MobileRuntimeService(channel: channel);
+      final guardedController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        requireLargeJobApproval: true,
+        runtimeService: runtime,
+      );
+      addTearDown(() async {
+        guardedController.dispose();
+        await guardedController.drain();
+        await runtime.dispose();
+      });
+      await guardedController.initialize();
+      await _makeFolder(parent, 'guarded-small', 4);
+      await guardedController.addParent(parent.path);
+      final queue = guardedController.queues.single;
+      final item = queue.items.single;
+      await guardedController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(
+        () =>
+            guardedController.queues.single.items.single.message?.contains(
+              '核心任务尚未启动',
+            ) ??
+            false,
+      );
+      expect(api.jobs, isEmpty);
+      final imported = (await tasks.loadById(item.id))!;
+      expect(Directory(imported.outputDirectory).existsSync(), isFalse);
+      expect(
+        guardedController.queues.single.items.single.state,
+        BatchItemState.ready,
+      );
+    },
+  );
+
+  test(
+    'Android guard failure does not persist paused while native job stays running',
+    () async {
+      const channel = MethodChannel('test.batch-runtime-pause-failure');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'setProcessingActive') return false;
+            return null;
+          });
+      final runtime = MobileRuntimeService(channel: channel);
+      api.failPause = true;
+      final taskId = '202610050001-abcdef12';
+      final jobId = 'native-running-guard-failure';
+      final sourceDirectory = '${parent.path}${Platform.pathSeparator}running';
+      final task = StitchTask(
+        id: taskId,
+        createdAt: DateTime.utc(2026, 10, 5),
+        sourceDirectory: sourceDirectory,
+        outputDirectory: '${parent.path}${Platform.pathSeparator}render',
+        photos: [
+          for (var index = 0; index < 4; index++)
+            ImportedPhoto(
+              originalName: 'photo$index.jpg',
+              storedPath:
+                  '${parent.path}${Platform.pathSeparator}photo$index.jpg',
+              sha256: 'a' * 64,
+              width: 1,
+              height: 1,
+              originalOrder: index,
+            ),
+        ],
+        grid: const GridOptions(mode: GridMode.sequence, rows: 2, columns: 2),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.running,
+        nativeJobId: jobId,
+      );
+      await tasks.save(task);
+      final itemId = '202610050002-abcdef12';
+      final queue = BatchQueue(
+        id: '202610050003-abcdef12',
+        createdAt: DateTime.utc(2026, 10, 5),
+        parentDirectory: parent.path,
+        outputDirectory:
+            '${temporary.path}${Platform.pathSeparator}source_stitched',
+        items: [
+          BatchQueueItem(
+            id: itemId,
+            taskId: taskId,
+            name: 'running',
+            sourceDirectory: sourceDirectory,
+            state: BatchItemState.running,
+          ),
+        ],
+      );
+      await queues.save(queue);
+      api.jobs[jobId] = _Job(jobId, 1, 128);
+      final guardedController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        requireLargeJobApproval: true,
+        runtimeService: runtime,
+      );
+      addTearDown(() async {
+        guardedController.dispose();
+        await guardedController.drain();
+        await runtime.dispose();
+      });
+
+      await guardedController.initialize();
+
+      final current = guardedController.queues.single.items.single;
+      expect(current.state, BatchItemState.running);
+      expect(current.pauseRequested, isTrue);
+      expect((await tasks.loadById(taskId))!.phase, StitchPhase.running);
+      expect((await api.status(jobId))['state'], 'running');
+    },
+  );
+
+  test(
+    'cold-start runtime timeout does not resume a job when pause is unconfirmed',
+    () async {
+      api.failPause = true;
+      final taskId = '202610050101-abcdef12';
+      final itemId = '202610050102-abcdef12';
+      final jobId = 'native-timeout-running';
+      final sourceDirectory =
+          '${parent.path}${Platform.pathSeparator}timeout-child';
+      final task = StitchTask(
+        id: taskId,
+        createdAt: DateTime.utc(2026, 10, 5),
+        sourceDirectory: sourceDirectory,
+        outputDirectory:
+            '${temporary.path}${Platform.pathSeparator}timeout-child_stitched',
+        photos: [
+          for (var index = 0; index < 4; index++)
+            ImportedPhoto(
+              originalName: 'photo$index.jpg',
+              storedPath:
+                  '$sourceDirectory${Platform.pathSeparator}photo$index.jpg',
+              sha256: 'a' * 64,
+              width: 1,
+              height: 1,
+              originalOrder: index,
+            ),
+        ],
+        grid: const GridOptions(mode: GridMode.sequence, rows: 2, columns: 2),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.running,
+        nativeJobId: jobId,
+      );
+      await tasks.save(task);
+      await queues.save(
+        BatchQueue(
+          id: '202610050103-abcdef12',
+          createdAt: DateTime.utc(2026, 10, 5),
+          parentDirectory: parent.path,
+          outputDirectory:
+              '${temporary.path}${Platform.pathSeparator}source_stitched',
+          items: [
+            BatchQueueItem(
+              id: itemId,
+              taskId: taskId,
+              name: 'timeout-child',
+              sourceDirectory: sourceDirectory,
+              state: BatchItemState.running,
+            ),
+          ],
+        ),
+      );
+      api.jobs[jobId] = _Job(jobId, 1, 128);
+      final recovering = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+      );
+      recovering.pendingRuntimePauseJobIds.add(jobId);
+      addTearDown(() async {
+        recovering.dispose();
+        await recovering.drain();
+      });
+
+      await recovering.initialize();
+
+      final item = recovering.queues.single.items.single;
+      expect(item.state, BatchItemState.running);
+      expect(item.pauseRequested, isTrue);
+      expect(recovering.pendingRuntimePauseJobIds, contains(jobId));
+      expect((await tasks.loadById(taskId))!.phase, StitchPhase.running);
+      expect((await api.status(jobId))['state'], 'running');
+      expect(api.resumeCalls, 0);
+      expect(await recovering.pauseJobByNativeId(jobId), isFalse);
+      expect((await tasks.loadById(taskId))!.phase, StitchPhase.running);
+    },
+  );
+
+  test(
+    'cold-start timeout holds completed render until explicit retry',
+    () async {
+      final taskId = '202610050201-abcdef12';
+      final itemId = '202610050202-abcdef12';
+      final jobId = 'native-timeout-completed-render';
+      final sourceDirectory =
+          '${parent.path}${Platform.pathSeparator}completed-child';
+      final task = StitchTask(
+        id: taskId,
+        createdAt: DateTime.utc(2026, 10, 5),
+        sourceDirectory: sourceDirectory,
+        outputDirectory:
+            '${temporary.path}${Platform.pathSeparator}completed-child_stitched',
+        photos: [
+          for (var index = 0; index < 4; index++)
+            ImportedPhoto(
+              originalName: 'photo$index.jpg',
+              storedPath:
+                  '$sourceDirectory${Platform.pathSeparator}photo$index.jpg',
+              sha256: 'a' * 64,
+              width: 1,
+              height: 1,
+              originalOrder: index,
+            ),
+        ],
+        grid: const GridOptions(mode: GridMode.sequence, rows: 2, columns: 2),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.completed,
+        nativeJobId: jobId,
+        autoExportOnCompletion: true,
+      );
+      await tasks.save(task);
+      await queues.save(
+        BatchQueue(
+          id: '202610050203-abcdef12',
+          createdAt: DateTime.utc(2026, 10, 5),
+          parentDirectory: parent.path,
+          outputDirectory:
+              '${temporary.path}${Platform.pathSeparator}source_stitched',
+          items: [
+            BatchQueueItem(
+              id: itemId,
+              taskId: taskId,
+              name: 'completed-child',
+              sourceDirectory: sourceDirectory,
+              state: BatchItemState.running,
+            ),
+          ],
+        ),
+      );
+      api.jobs[jobId] = _Job(jobId, 1, 128)..state = 'completed';
+      final recovering = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+      );
+      recovering.pendingRuntimePauseJobIds.add(jobId);
+      addTearDown(() async {
+        recovering.dispose();
+        await recovering.drain();
+      });
+
+      await recovering.initialize();
+
+      expect(
+        recovering.queues.single.items.single.state,
+        BatchItemState.paused,
+      );
+      expect(recovering.queues.single.items.single.pauseRequested, isTrue);
+      expect(recovering.pendingRuntimePauseJobIds, isEmpty);
+      expect((await tasks.loadById(taskId))!.phase, StitchPhase.completed);
+      expect((await tasks.loadById(taskId))!.stage, 'export-pending');
+      expect((await tasks.loadById(taskId))!.autoExportOnCompletion, isFalse);
+      expect(api.exports, 0);
+      expect(api.starts, 0);
+
+      await recovering.retry(recovering.queues.single.id, itemId);
+      await _waitUntil(() => api.exports == 1);
+      expect(api.starts, 0);
+      expect(
+        recovering.queues.single.items.single.state,
+        BatchItemState.exporting,
+      );
+    },
+  );
+
+  test(
+    'Android SAF staging is released only after every child was imported',
+    () async {
+      const channel = MethodChannel('test.batch-staging-release');
+      final releasedPaths = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'releaseBatchParent') {
+              releasedPaths.add(
+                (call.arguments as Map<Object?, Object?>)['path'] as String,
+              );
+              return true;
+            }
+            return null;
+          });
+      final storage = MobileStorageService(channel: channel);
+      final storageController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        storageService: storage,
+      );
+      var storageControllerDisposed = false;
+      addTearDown(() async {
+        if (!storageControllerDisposed) {
+          storageController.dispose();
+          await storageController.drain();
+        }
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+      await storageController.initialize();
+      await _makeFolder(parent, 'copyable', 4);
+      await storageController.addParent(parent.path);
+      expect(releasedPaths, [parent.path]);
+      expect(
+        storageController.queues.single.items.every(
+          (item) => item.taskId != null,
+        ),
+        isTrue,
+      );
+      final importedItem = storageController.queues.single.items.single;
+      final importedTask = (await tasks.loadById(importedItem.taskId!))!;
+      expect(
+        importedItem.sourceDirectory,
+        '${parent.path}${Platform.pathSeparator}copyable',
+      );
+      expect(importedItem.durableInputDirectory, importedTask.sourceDirectory);
+      expect(await queues.loadAll(), hasLength(1));
+      storageController.dispose();
+      await storageController.drain();
+      storageControllerDisposed = true;
+      await parent.delete(recursive: true);
+
+      final reopened = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+      );
+      await reopened.initialize();
+      final restoredItem = reopened.queues.single.items.single;
+      expect(restoredItem.sourceDirectory, importedItem.sourceDirectory);
+      expect(
+        restoredItem.durableInputDirectory,
+        importedItem.durableInputDirectory,
+      );
+      expect(
+        (await reopened.taskForItem(restoredItem))?.sourceDirectory,
+        importedTask.sourceDirectory,
+      );
+      reopened.dispose();
+      await reopened.drain();
+    },
+  );
+
+  test(
+    'Android SAF staging is retained when a child cannot be imported',
+    () async {
+      const channel = MethodChannel('test.batch-staging-retained');
+      var releases = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            if (call.method == 'releaseBatchParent') {
+              releases++;
+              return true;
+            }
+            return null;
+          });
+      final storage = MobileStorageService(channel: channel);
+      final storageController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        storageService: storage,
+      );
+      addTearDown(() async {
+        storageController.dispose();
+        await storageController.drain();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+      await storageController.initialize();
+      await _makeFolder(parent, 'copyable', 4);
+      Directory('${parent.path}${Platform.pathSeparator}empty').createSync();
+      await storageController.addParent(parent.path);
+      expect(releases, 0);
+      expect(
+        storageController.queues.single.items.any(
+          (item) => item.taskId == null,
+        ),
+        isTrue,
+      );
+      expect(
+        Directory('${parent.path}${Platform.pathSeparator}empty').existsSync(),
+        isTrue,
+      );
+      final recoveredSource = Directory(
+        '${parent.path}${Platform.pathSeparator}empty',
+      );
+      for (var index = 0; index < 4; index++) {
+        await File(
+          '${recoveredSource.path}${Platform.pathSeparator}image${index + 1}.jpg',
+        ).writeAsBytes(_jpeg);
+      }
+      final queue = storageController.queues.single;
+      final failed = queue.items.singleWhere((item) => item.taskId == null);
+      await storageController.retry(queue.id, failed.id);
+      expect(releases, 1);
+      final retried = storageController.queues.single.items.singleWhere(
+        (item) => item.id == failed.id,
+      );
+      expect(retried.taskId, isNotNull);
+      final task = (await tasks.loadById(retried.taskId!))!;
+      expect(task.sourceDirectory, isNot(contains(parent.path)));
+      expect(
+        task.photos.every((photo) => !photo.storedPath.contains(parent.path)),
+        isTrue,
+      );
+      expect(
+        Directory('${parent.path}${Platform.pathSeparator}empty').existsSync(),
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'native completed export without a file is not recorded as success',
     () async {
       api.completeExportWithoutOutput = true;
@@ -856,17 +1549,19 @@ void main() {
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
       final item = queue.items.single;
-      await controller.setSettings(
+      final pendingStart = controller.setSettings(
         queueId: queue.id,
         itemId: item.id,
         rows: 2,
         columns: 2,
         horizontalFovDegrees: 45,
       );
-      final pendingStart = controller.tick();
-      await gated.entered.future;
-      await controller.cancel(queue.id, item.id);
-      gated.release.complete();
+      try {
+        await gated.entered.future.timeout(const Duration(seconds: 10));
+        await controller.cancel(queue.id, item.id);
+      } finally {
+        if (!gated.release.isCompleted) gated.release.complete();
+      }
       await pendingStart;
       await _waitUntil(() => gated.completed);
       await _waitUntil(
@@ -896,17 +1591,19 @@ void main() {
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
       final item = queue.items.single;
-      await controller.setSettings(
+      final pendingStart = controller.setSettings(
         queueId: queue.id,
         itemId: item.id,
         rows: 2,
         columns: 2,
         horizontalFovDegrees: 45,
       );
-      final pendingStart = controller.tick();
-      await gated.entered.future;
-      await controller.cancel(queue.id, item.id);
-      gated.release.complete();
+      try {
+        await gated.entered.future.timeout(const Duration(seconds: 10));
+        await controller.cancel(queue.id, item.id);
+      } finally {
+        if (!gated.release.isCompleted) gated.release.complete();
+      }
       await pendingStart;
       await _waitUntil(() => gated.completed);
       expect(

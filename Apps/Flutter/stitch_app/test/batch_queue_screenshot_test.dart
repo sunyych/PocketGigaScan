@@ -173,20 +173,20 @@ void main() {
     );
   });
 
-  testWidgets('mobile batch queue explains its disabled entry', (tester) async {
+  testWidgets('mobile batch queue exposes folder import and settings', (tester) async {
     _setSize(tester, const Size(390, 844));
     await tester.pumpWidget(_mobilePage());
     await tester.pump();
 
-    expect(find.text('批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。'), findsOneWidget);
+    expect(find.text('批处理队列'), findsOneWidget);
     final buttons = tester.widgetList<IconButton>(find.byType(IconButton));
     expect(
       buttons.singleWhere((button) => button.tooltip == '批处理资源设置').onPressed,
-      isNull,
+      isNotNull,
     );
     expect(
       buttons.singleWhere((button) => button.tooltip == '选择母目录').onPressed,
-      isNull,
+      isNotNull,
     );
     expect(tester.takeException(), isNull);
     await expectLater(
@@ -212,6 +212,7 @@ Widget _mobilePage() {
       api: _ScreenshotApi(),
       controller: controller,
       mobileOverride: true,
+      androidOverride: true,
     ),
   );
 }

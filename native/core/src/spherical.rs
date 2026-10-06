@@ -13,8 +13,7 @@ use std::{collections::VecDeque, path::PathBuf};
 
 const SPHERICAL_FEATURE_THREAD_LIMIT: i32 = 2;
 const SPHERICAL_RETRY_CONTRAST_THRESHOLD: f64 = 0.004;
-const SPHERICAL_MAX_AXIS: usize = 128;
-const SPHERICAL_MAX_TILES: usize = 1024;
+const DENSE_NORMAL_MAX_DIMENSION: usize = 1200;
 const MAX_PIXEL_REFINEMENT_ITERATIONS: usize = 30;
 const MAX_GRID_COMPONENT_POSE_ITERATIONS: usize = 30;
 const GRID_COMPONENT_HUBER_ANGLE_RAD: f64 = 0.01;
@@ -764,13 +763,21 @@ fn assemble_component_normal_equations(
     corrections: &[Mat],
     constraints: &[Constraint],
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
-) -> std::result::Result<(Vec<f64>, Vec<f64>, f64), Error> {
+) -> std::result::Result<(NormalMatrix, Vec<f64>, f64), Error> {
     // Component zero is the fixed gauge anchor. The remaining components each
     // have three left-multiplicative rotation parameters.
     let variable_count = corrections.len().saturating_sub(1);
-    let dimension = variable_count * 3;
-    let mut normal = vec![0.0; dimension * dimension];
-    let mut rhs = vec![0.0; dimension];
+    let dimension = variable_count.checked_mul(3).ok_or_else(|| {
+        Error::Registration("component normal equation dimensions overflow".into())
+    })?;
+    let mut normal = NormalMatrix::new(dimension)?;
+    let mut rhs = Vec::new();
+    rhs.try_reserve_exact(dimension).map_err(|_| {
+        Error::Registration(format!(
+            "could not allocate component normal right-hand side with {dimension} values"
+        ))
+    })?;
+    rhs.resize(dimension, 0.0);
     let epsilon = 1e-6;
     for (edge_index, edge) in constraints.iter().enumerate() {
         if edge_index % 64 == 0 {
@@ -850,7 +857,7 @@ fn assemble_component_normal_equations(
                             })
                             .sum::<f64>()
                             * robust_weight;
-                        normal[lhs_scalar * dimension + rhs_scalar] += hessian;
+                        normal.add(lhs_scalar, rhs_scalar, hessian)?;
                     }
                 }
             }
@@ -859,7 +866,7 @@ fn assemble_component_normal_equations(
     // A vanishingly small LM diagonal stabilizes near-singular, weakly bridged
     // groups without materially changing their weighted least-squares target.
     for index in 0..dimension {
-        normal[index * dimension + index] += 1e-12;
+        normal.add(index, index, 1e-12)?;
     }
     // The gradient is the accumulated node gradient. Summing squared
     // per-edge contributions would miss the cancellation at a true optimum.
@@ -1601,11 +1608,189 @@ fn prune_visual_edges_with_joint_leave_one_out(
 /// Refine each visual component with a joint symmetric-pixel bundle solve.
 /// One camera in each component stays fixed; weak grid bridges continue to
 /// place components relative to one another without distorting their interiors.
+#[derive(Debug)]
 struct PcgResult {
     delta: Option<Vec<f64>>,
     iterations: usize,
     relative_residual: f64,
     converged: bool,
+}
+
+type NormalBlock = [[f64; 3]; 3];
+
+/// Neighbor graph normal equations stay dense for familiar small cases and
+/// switch to sparse 3x3 blocks before quadratic storage becomes material.
+enum NormalMatrix {
+    Dense {
+        dimension: usize,
+        values: Vec<f64>,
+    },
+    SparseBlocks {
+        dimension: usize,
+        rows: Vec<Vec<(usize, NormalBlock)>>,
+    },
+}
+
+impl NormalMatrix {
+    fn new(dimension: usize) -> std::result::Result<Self, Error> {
+        if dimension % 3 != 0 {
+            return Err(Error::Registration(
+                "normal matrix dimension is not a multiple of three".into(),
+            ));
+        }
+        if dimension <= DENSE_NORMAL_MAX_DIMENSION {
+            let cells = dimension.checked_mul(dimension).ok_or_else(|| {
+                Error::Registration("normal matrix dimensions overflow addressable storage".into())
+            })?;
+            let mut values = Vec::new();
+            values.try_reserve_exact(cells).map_err(|_| {
+                Error::Registration(format!(
+                    "could not allocate dense normal matrix with {cells} values"
+                ))
+            })?;
+            values.resize(cells, 0.0);
+            Ok(Self::Dense { dimension, values })
+        } else {
+            let block_rows = dimension / 3;
+            let mut rows = Vec::new();
+            rows.try_reserve_exact(block_rows).map_err(|_| {
+                Error::Registration(format!(
+                    "could not allocate {block_rows} sparse normal rows"
+                ))
+            })?;
+            rows.resize_with(block_rows, Vec::new);
+            Ok(Self::SparseBlocks { dimension, rows })
+        }
+    }
+
+    fn dimension(&self) -> usize {
+        match self {
+            Self::Dense { dimension, .. } | Self::SparseBlocks { dimension, .. } => *dimension,
+        }
+    }
+
+    fn dense(&self) -> Option<&[f64]> {
+        match self {
+            Self::Dense { values, .. } => Some(values),
+            Self::SparseBlocks { .. } => None,
+        }
+    }
+
+    fn add(&mut self, row: usize, column: usize, value: f64) -> std::result::Result<(), Error> {
+        let dimension = self.dimension();
+        if row >= dimension || column >= dimension || !value.is_finite() {
+            return Err(Error::Registration("invalid normal matrix entry".into()));
+        }
+        if value == 0.0 {
+            return Ok(());
+        }
+        match self {
+            Self::Dense { values, .. } => values[row * dimension + column] += value,
+            Self::SparseBlocks { rows, .. } => {
+                let block_row = row / 3;
+                let block_column = column / 3;
+                let entries = &mut rows[block_row];
+                if let Some((_, block)) =
+                    entries.iter_mut().find(|(index, _)| *index == block_column)
+                {
+                    block[row % 3][column % 3] += value;
+                } else {
+                    entries.try_reserve(1).map_err(|_| Error::Registration(format!(
+                        "could not allocate sparse normal block row {block_row} for edge graph storage"
+                    )))?;
+                    let mut block = [[0.0; 3]; 3];
+                    block[row % 3][column % 3] = value;
+                    entries.push((block_column, block));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn get(&self, row: usize, column: usize) -> f64 {
+        match self {
+            Self::Dense { dimension, values } => values[row * dimension + column],
+            Self::SparseBlocks { rows, .. } => rows[row / 3]
+                .iter()
+                .find(|(index, _)| *index == column / 3)
+                .map_or(0.0, |(_, block)| block[row % 3][column % 3]),
+        }
+    }
+
+    fn all_finite(&self) -> bool {
+        match self {
+            Self::Dense { values, .. } => values.iter().all(|value| value.is_finite()),
+            Self::SparseBlocks { rows, .. } => rows
+                .iter()
+                .flat_map(|row| row.iter())
+                .flat_map(|(_, block)| block.iter().flat_map(|line| line.iter()))
+                .all(|value| value.is_finite()),
+        }
+    }
+
+    fn apply(&self, input: &[f64]) -> std::result::Result<Vec<f64>, Error> {
+        let dimension = self.dimension();
+        let mut output = allocate_f64(dimension, "normal multiply result")?;
+        match self {
+            Self::Dense { values, .. } => {
+                for row in 0..dimension {
+                    let offset = row * dimension;
+                    output[row] = values[offset..offset + dimension]
+                        .iter()
+                        .zip(input)
+                        .map(|(a, b)| a * b)
+                        .sum();
+                }
+            }
+            Self::SparseBlocks { rows, .. } => {
+                for (block_row, entries) in rows.iter().enumerate() {
+                    for (block_column, block) in entries {
+                        for row in 0..3 {
+                            for column in 0..3 {
+                                output[block_row * 3 + row] +=
+                                    block[row][column] * input[*block_column * 3 + column];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(output)
+    }
+
+    fn solve_diagonal_block(&self, block: usize, input: &[f64]) -> Option<[f64; 3]> {
+        let mut diagonal = [[0.0; 3]; 3];
+        for row in 0..3 {
+            for column in 0..3 {
+                diagonal[row][column] = self.get(block * 3 + row, block * 3 + column);
+            }
+        }
+        solve_3x3(
+            diagonal,
+            [input[block * 3], input[block * 3 + 1], input[block * 3 + 2]],
+        )
+    }
+}
+
+fn allocate_f64(count: usize, what: &str) -> std::result::Result<Vec<f64>, Error> {
+    let mut values = Vec::new();
+    values.try_reserve_exact(count).map_err(|_| {
+        Error::Registration(format!("could not allocate {what} with {count} values"))
+    })?;
+    values.resize(count, 0.0);
+    Ok(values)
+}
+
+fn copy_f64(values: &[f64], what: &str) -> std::result::Result<Vec<f64>, Error> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(values.len()).map_err(|_| {
+        Error::Registration(format!(
+            "could not allocate {what} with {} values",
+            values.len()
+        ))
+    })?;
+    copy.extend_from_slice(values);
+    Ok(copy)
 }
 
 struct DenseSolveResult {
@@ -1625,7 +1810,7 @@ fn dense_cholesky_solve(
             relative_residual: f64::INFINITY,
         });
     }
-    let mut lower = vec![0.0; matrix.len()];
+    let mut lower = allocate_f64(matrix.len(), "dense Cholesky factor")?;
     for row in 0..dimension {
         if row % 16 == 0 {
             checkpoint("pixel-bundle-cholesky").map_err(|_| Error::Cancelled)?;
@@ -1699,12 +1884,12 @@ fn dense_cholesky_solve(
 }
 
 fn solve_pcg(
-    matrix: &[f64],
+    matrix: &NormalMatrix,
     rhs: &[f64],
     dimension: usize,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<PcgResult, Error> {
-    if matrix.len() != dimension.saturating_mul(dimension) || rhs.len() != dimension {
+    if matrix.dimension() != dimension || rhs.len() != dimension {
         return Ok(PcgResult {
             delta: None,
             iterations: 0,
@@ -1712,35 +1897,19 @@ fn solve_pcg(
             converged: false,
         });
     }
-    // Keep dense normal assembly for simple block accumulation, then retain
-    // only exact nonzero entries for every PCG multiply on the sparse graph.
-    let sparse_rows = (0..dimension)
-        .map(|row| {
-            let start = row * dimension;
-            matrix[start..start + dimension]
-                .iter()
-                .enumerate()
-                .filter_map(|(column, value)| (*value != 0.0).then_some((column, *value)))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let apply_preconditioner = |input: &[f64]| -> Option<Vec<f64>> {
-        let mut output = vec![0.0; dimension];
+    let apply_preconditioner = |input: &[f64]| -> std::result::Result<Option<Vec<f64>>, Error> {
+        let mut output = allocate_f64(dimension, "PCG preconditioned vector")?;
         for block in (0..dimension).step_by(3) {
-            let mut diagonal = [[0.0; 3]; 3];
-            for row in 0..3 {
-                for column in 0..3 {
-                    diagonal[row][column] = matrix[(block + row) * dimension + block + column];
-                }
-            }
-            let solved = solve_3x3(diagonal, [input[block], input[block + 1], input[block + 2]])?;
+            let Some(solved) = matrix.solve_diagonal_block(block / 3, input) else {
+                return Ok(None);
+            };
             output[block..block + 3].copy_from_slice(&solved);
         }
-        Some(output)
+        Ok(Some(output))
     };
-    let mut x = vec![0.0; dimension];
-    let mut residual = rhs.to_vec();
-    let Some(mut z) = apply_preconditioner(&residual) else {
+    let mut x = allocate_f64(dimension, "PCG solution vector")?;
+    let mut residual = copy_f64(rhs, "PCG residual vector")?;
+    let Some(mut z) = apply_preconditioner(&residual)? else {
         return Ok(PcgResult {
             delta: None,
             iterations: 0,
@@ -1748,7 +1917,7 @@ fn solve_pcg(
             converged: false,
         });
     };
-    let mut direction = z.clone();
+    let mut direction = copy_f64(&z, "PCG direction vector")?;
     let mut rz = residual.iter().zip(&z).map(|(a, b)| a * b).sum::<f64>();
     let rhs_norm = rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
     let rhs_scale = rhs_norm.max(1e-12);
@@ -1764,13 +1933,7 @@ fn solve_pcg(
     let mut iterations = 0;
     for iteration in 0..(dimension.saturating_mul(4)).clamp(64, 4096) {
         checkpoint("pixel-bundle-pcg").map_err(|_| Error::Cancelled)?;
-        let mut product = vec![0.0; dimension];
-        for row in 0..dimension {
-            product[row] = sparse_rows[row]
-                .iter()
-                .map(|(column, value)| value * direction[*column])
-                .sum();
-        }
+        let product = matrix.apply(&direction)?;
         let denominator = direction
             .iter()
             .zip(&product)
@@ -1800,7 +1963,7 @@ fn solve_pcg(
             converged = true;
             break;
         }
-        let Some(next_z) = apply_preconditioner(&residual) else {
+        let Some(next_z) = apply_preconditioner(&residual)? else {
             return Ok(PcgResult {
                 delta: None,
                 iterations,
@@ -1817,13 +1980,7 @@ fn solve_pcg(
         rz = next_rz;
     }
     let relative_residual = {
-        let mut product = vec![0.0; dimension];
-        for row in 0..dimension {
-            product[row] = sparse_rows[row]
-                .iter()
-                .map(|(column, value)| value * x[*column])
-                .sum();
-        }
+        let product = matrix.apply(&x)?;
         (0..dimension)
             .map(|i| (rhs[i] - product[i]).powi(2))
             .sum::<f64>()
@@ -1847,11 +2004,19 @@ fn assemble_pixel_normal_equations(
     variable_by_tile: &[Option<usize>],
     damping: f64,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
-) -> std::result::Result<(Vec<f64>, Vec<f64>), Error> {
+) -> std::result::Result<(NormalMatrix, Vec<f64>), Error> {
     let variable_count = variable_by_tile.iter().flatten().count();
-    let dimension = variable_count * 3;
-    let mut normal = vec![0.0; dimension * dimension];
-    let mut rhs = vec![0.0; dimension];
+    let dimension = variable_count.checked_mul(3).ok_or_else(|| {
+        Error::Registration("pixel bundle normal equation dimensions overflow".into())
+    })?;
+    let mut normal = NormalMatrix::new(dimension)?;
+    let mut rhs = Vec::new();
+    rhs.try_reserve_exact(dimension).map_err(|_| {
+        Error::Registration(format!(
+            "could not allocate pixel bundle normal right-hand side with {dimension} values"
+        ))
+    })?;
+    rhs.resize(dimension, 0.0);
     let epsilon = 1e-7;
     for (edge_index, edge) in edges.iter().enumerate() {
         for (point_index, point) in edge.points.iter().enumerate() {
@@ -1909,8 +2074,11 @@ fn assemble_pixel_normal_equations(
                                 let rhs_scalar = rhs_variable * 3 + rhs_axis;
                                 let jb0 = jacobians[rhs_side][rhs_axis][pair_start];
                                 let jb1 = jacobians[rhs_side][rhs_axis][pair_start + 1];
-                                normal[lhs_scalar * dimension + rhs_scalar] +=
-                                    robust_weight * (ja0 * jb0 + ja1 * jb1);
+                                normal.add(
+                                    lhs_scalar,
+                                    rhs_scalar,
+                                    robust_weight * (ja0 * jb0 + ja1 * jb1),
+                                )?;
                             }
                         }
                     }
@@ -1919,8 +2087,8 @@ fn assemble_pixel_normal_equations(
         }
     }
     for index in 0..dimension {
-        let diagonal = normal[index * dimension + index].max(1e-9);
-        normal[index * dimension + index] += damping * diagonal;
+        let diagonal = normal.get(index, index).max(1e-9);
+        normal.add(index, index, damping * diagonal)?;
     }
     Ok((normal, rhs))
 }
@@ -2064,7 +2232,9 @@ fn refine_visual_component_pixels_mode(
     for (variable, &tile) in active_tiles.iter().enumerate() {
         variable_by_tile[tile] = Some(variable);
     }
-    let dimension = active_tiles.len() * 3;
+    let dimension = active_tiles.len().checked_mul(3).ok_or_else(|| {
+        Error::Registration("pixel bundle normal equation dimensions overflow".into())
+    })?;
     let mut completed_sweeps = 0;
     let mut converged = false;
     let mut damping = 1e-4;
@@ -2091,9 +2261,7 @@ fn refine_visual_component_pixels_mode(
             damping,
             checkpoint,
         )?;
-        if normal.len() != dimension.saturating_mul(dimension)
-            || normal.iter().any(|v| !v.is_finite())
-        {
+        if normal.dimension() != dimension || !normal.all_finite() {
             return Err(Error::Registration(
                 "pixel bundle produced invalid normal equations".into(),
             ));
@@ -2113,8 +2281,13 @@ fn refine_visual_component_pixels_mode(
         } else {
             // Never line-search an inexact direction with a large true residual.
             // The damped normal matrix is SPD; use a deterministic direct fallback.
+            let Some(dense) = normal.dense() else {
+                pcg_failed_attempts += 1;
+                damping = (damping * 10.0).min(1e8);
+                continue;
+            };
             dense_cholesky_fallback_count += 1;
-            let direct = dense_cholesky_solve(&normal, &rhs, dimension, checkpoint)?;
+            let direct = dense_cholesky_solve(dense, &rhs, dimension, checkpoint)?;
             if direct.relative_residual <= 1e-3 {
                 if let Some(delta) = direct.delta {
                     (delta, direct.relative_residual)
@@ -2337,8 +2510,8 @@ pub fn reorient_layout_to_grid_center(layout: &mut Value) -> std::result::Result
         .as_array()
         .cloned()
         .ok_or("layout has no tiles array")?;
-    if !(2..=SPHERICAL_MAX_TILES).contains(&tiles.len()) {
-        return Err("layout must contain 2..=1024 tiles".into());
+    if tiles.len() < 2 {
+        return Err("layout must contain at least two tiles".into());
     }
     let report_object = layout["report"]
         .as_object()
@@ -2372,11 +2545,11 @@ pub fn reorient_layout_to_grid_center(layout: &mut Value) -> std::result::Result
         .unwrap()
         .checked_add(1)
         .ok_or("tile column is out of range")?;
-    if rows > SPHERICAL_MAX_AXIS
-        || columns > SPHERICAL_MAX_AXIS
-        || rows.checked_mul(columns) != Some(tiles.len())
-    {
-        return Err("layout grid exceeds 128 per axis or 1024 cells".into());
+    let Some(cell_count) = rows.checked_mul(columns) else {
+        return Err("layout grid dimensions overflow addressable storage".into());
+    };
+    if cell_count != tiles.len() {
+        return Err("layout grid must contain every cell exactly once".into());
     }
     let mut ordered = vec![None; tiles.len()];
     for (tile_index, _) in tiles.iter().enumerate() {
@@ -3540,16 +3713,14 @@ fn validate(req: &Request) -> Result<()> {
             "ORB descriptors require the BF matcher".into(),
         ));
     }
-    if req.tiles.len() < 2
-        || req.rows == 0
-        || req.columns == 0
-        || req.rows > SPHERICAL_MAX_AXIS
-        || req.columns > SPHERICAL_MAX_AXIS
-        || req.rows.checked_mul(req.columns) != Some(req.tiles.len())
-        || req.tiles.len() > SPHERICAL_MAX_TILES
-    {
+    if req.tiles.len() < 2 || req.rows == 0 || req.columns == 0 {
         return Err(Error::Invalid(
-            "spherical alignment requires 2..=1024 tiles in a complete grid with at most 128 rows and columns".into(),
+            "spherical alignment requires at least two tiles and positive grid dimensions".into(),
+        ));
+    }
+    if req.rows.checked_mul(req.columns) != Some(req.tiles.len()) {
+        return Err(Error::Invalid(
+            "spherical tile count must match the complete grid dimensions without overflow".into(),
         ));
     }
     if req.source_width == 0
@@ -5943,10 +6114,19 @@ mod tests {
     }
 
     #[test]
-    fn accepts_24_by_16_grid_and_rejects_more_than_1024_tiles() {
+    fn accepts_large_grids_without_arbitrary_axis_or_photo_caps() {
         assert!(validate(&grid_request(16, 24)).is_ok());
         assert!(validate(&grid_request(32, 32)).is_ok());
-        assert!(validate(&grid_request(32, 33)).is_err());
+        assert!(validate(&grid_request(33, 33)).is_ok());
+        assert!(validate(&grid_request(129, 2)).is_ok());
+    }
+
+    #[test]
+    fn spherical_grid_dimension_overflow_is_rejected() {
+        let mut request = grid_request(1, 2);
+        request.rows = usize::MAX;
+        request.columns = 2;
+        assert!(validate(&request).is_err());
     }
 
     #[test]
@@ -5980,8 +6160,8 @@ mod tests {
     }
 
     #[test]
-    fn spherical_grid_keeps_128_cell_axis_limit() {
-        assert!(validate(&grid_request(1, 129)).is_err());
+    fn spherical_grid_accepts_axis_lengths_above_128() {
+        assert!(validate(&grid_request(1, 129)).is_ok());
     }
 
     #[test]
@@ -6525,10 +6705,7 @@ mod tests {
         assert_eq!(dimension, 6);
         for row in 0..dimension {
             for column in 0..dimension {
-                assert!(
-                    (matrix[row * dimension + column] - matrix[column * dimension + row]).abs()
-                        < 1e-10
-                );
+                assert!((matrix.get(row, column) - matrix.get(column, row)).abs() < 1e-10);
             }
         }
         let probe = [0.2, -0.4, 0.1, -0.3, 0.15, 0.25];
@@ -6536,7 +6713,7 @@ mod tests {
             .map(|row| {
                 probe[row]
                     * (0..dimension)
-                        .map(|column| matrix[row * dimension + column] * probe[column])
+                        .map(|column| matrix.get(row, column) * probe[column])
                         .sum::<f64>()
             })
             .sum::<f64>();
@@ -6549,13 +6726,11 @@ mod tests {
         assert!(solved.converged);
         assert!(solved.relative_residual <= 1e-8);
         let delta = solved.delta.unwrap();
-        let true_residual = (0..dimension)
-            .map(|row| {
-                let predicted = (0..dimension)
-                    .map(|column| matrix[row * dimension + column] * delta[column])
-                    .sum::<f64>();
-                (rhs[row] - predicted).powi(2)
-            })
+        let predicted = matrix.apply(&delta).unwrap();
+        let true_residual = rhs
+            .iter()
+            .zip(predicted)
+            .map(|(value, predicted)| (value - predicted).powi(2))
             .sum::<f64>()
             .sqrt()
             / rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
@@ -6566,15 +6741,79 @@ mod tests {
     }
 
     #[test]
-    fn component_normal_storage_stays_bounded_at_the_1024_tile_limit() {
-        let max_components = 1024usize;
-        let dimension = (max_components - 1) * 3;
-        let matrix_bytes = dimension * dimension * std::mem::size_of::<f64>();
-        assert_eq!(dimension, 3069);
-        assert!(matrix_bytes < 76 * 1024 * 1024);
-        assert_eq!(matrix_bytes, 75_350_088);
-        let normal_384_tile_case = (383 * 3usize).pow(2) * std::mem::size_of::<f64>();
-        assert_eq!(normal_384_tile_case, 10_561_608);
+    fn large_normal_storage_tracks_actual_neighbor_blocks() {
+        let node_count = 2048usize;
+        let mut matrix = NormalMatrix::new(node_count * 3).unwrap();
+        assert!(matrix.dense().is_none());
+        for node in 0..node_count {
+            for axis in 0..3 {
+                matrix.add(node * 3 + axis, node * 3 + axis, 1.0).unwrap();
+            }
+            if node + 1 < node_count {
+                matrix.add(node * 3, (node + 1) * 3, -0.25).unwrap();
+                matrix.add((node + 1) * 3, node * 3, -0.25).unwrap();
+            }
+        }
+        let stored_blocks = match &matrix {
+            NormalMatrix::SparseBlocks { rows, .. } => rows.iter().map(Vec::len).sum::<usize>(),
+            NormalMatrix::Dense { .. } => unreachable!(),
+        };
+        assert!(stored_blocks <= node_count * 3);
+        assert!(
+            stored_blocks * (std::mem::size_of::<NormalBlock>() + std::mem::size_of::<usize>())
+                < node_count * node_count * 9 * std::mem::size_of::<f64>() / 100
+        );
+    }
+
+    #[test]
+    fn sparse_block_pcg_recomputes_true_residual_on_large_neighbor_graph() {
+        let node_count = 450usize;
+        let dimension = node_count * 3;
+        let mut matrix = NormalMatrix::new(dimension).unwrap();
+        assert!(matrix.dense().is_none());
+        for node in 0..node_count {
+            for axis in 0..3 {
+                matrix.add(node * 3 + axis, node * 3 + axis, 4.0).unwrap();
+                if node + 1 < node_count {
+                    matrix
+                        .add(node * 3 + axis, (node + 1) * 3 + axis, -0.25)
+                        .unwrap();
+                    matrix
+                        .add((node + 1) * 3 + axis, node * 3 + axis, -0.25)
+                        .unwrap();
+                }
+            }
+        }
+        let truth = (0..dimension)
+            .map(|index| (index as f64 * 0.013).sin())
+            .collect::<Vec<_>>();
+        let rhs = matrix.apply(&truth).unwrap();
+        let mut no_cancel = |_phase: &str| -> std::result::Result<(), String> { Ok(()) };
+        let solved = solve_pcg(&matrix, &rhs, dimension, &mut no_cancel).unwrap();
+        assert!(solved.converged, "sparse PCG did not converge: {solved:?}");
+        let delta = solved.delta.unwrap();
+        let actual = matrix.apply(&delta).unwrap();
+        let rhs_norm = rhs.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let residual = rhs
+            .iter()
+            .zip(actual)
+            .map(|(expected, actual)| (expected - actual).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            / rhs_norm;
+        assert!(residual <= 1e-8, "sparse PCG true residual {residual:e}");
+        assert!(solved.relative_residual <= 1e-8);
+    }
+
+    #[test]
+    fn pcg_does_not_claim_convergence_when_block_preconditioner_is_singular() {
+        let matrix = NormalMatrix::new(3).unwrap();
+        let rhs = [1.0, 0.0, 0.0];
+        let mut no_cancel = |_phase: &str| -> std::result::Result<(), String> { Ok(()) };
+        let result = solve_pcg(&matrix, &rhs, 3, &mut no_cancel).unwrap();
+        assert!(!result.converged);
+        assert!(result.delta.is_none());
+        assert!(!result.relative_residual.is_finite());
     }
 
     #[test]

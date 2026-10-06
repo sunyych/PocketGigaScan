@@ -1,3 +1,7 @@
+import 'dart:convert';
+
+import 'package:crypto/crypto.dart';
+
 import 'grid_options.dart';
 import 'imported_photo.dart';
 import 'performance_options.dart';
@@ -51,6 +55,7 @@ class StitchTask {
     this.resultStats,
     this.exportFingerprint,
     this.exportCheckpointPath,
+    this.largeJobApprovalScope,
   });
 
   final String id;
@@ -85,6 +90,39 @@ class StitchTask {
   final Map<String, Object?>? resultStats;
   final ExportFileFingerprint? exportFingerprint;
   final String? exportCheckpointPath;
+  /// Approval is bound to this task identity, the current grid and photo bytes.
+  final String? largeJobApprovalScope;
+
+  bool get needsLargeJobConfirmation =>
+      grid.rows > 6 || grid.columns > 6 || photos.length > 36;
+
+  String get currentLargeJobApprovalScope {
+    final forced = grid.forceGridCells.toList()
+      ..sort((a, b) => a.row != b.row ? a.row.compareTo(b.row) : a.column.compareTo(b.column));
+    final canonical = jsonEncode({
+      'taskId': id,
+      'jobPath': outputDirectory,
+      'rows': grid.rows,
+      'columns': grid.columns,
+      'mode': grid.mode.name,
+      'axis': grid.axis.name,
+      'startCorner': grid.startCorner.name,
+      'serpentine': grid.serpentine,
+      'forced': forced.map((cell) => [cell.row, cell.column]).toList(),
+      'photos': photos.map((photo) => {
+        'path': photo.storedPath,
+        'sha256': photo.sha256,
+        'width': photo.width,
+        'height': photo.height,
+        'order': photo.originalOrder,
+      }).toList(),
+    });
+    return sha256.convert(utf8.encode(canonical)).toString();
+  }
+
+  bool get hasCurrentLargeJobApproval =>
+      !needsLargeJobConfirmation ||
+      largeJobApprovalScope == currentLargeJobApprovalScope;
 
   StitchTask copyWith({
     List<ImportedPhoto>? photos,
@@ -122,6 +160,8 @@ class StitchTask {
     bool clearExportFingerprint = false,
     String? exportCheckpointPath,
     bool clearExportCheckpointPath = false,
+    String? largeJobApprovalScope,
+    bool clearLargeJobApprovalScope = false,
   }) => StitchTask(
     id: id,
     createdAt: createdAt,
@@ -165,6 +205,9 @@ class StitchTask {
     exportCheckpointPath: clearExportCheckpointPath
         ? null
         : exportCheckpointPath ?? this.exportCheckpointPath,
+    largeJobApprovalScope: clearLargeJobApprovalScope
+        ? null
+        : largeJobApprovalScope ?? this.largeJobApprovalScope,
   );
 
   Map<String, Object?> toJson() => {
@@ -203,6 +246,7 @@ class StitchTask {
     'resultStats': resultStats,
     'exportFingerprint': exportFingerprint?.toJson(),
     'exportCheckpointPath': exportCheckpointPath,
+    'largeJobApprovalScope': largeJobApprovalScope,
   };
 
   factory StitchTask.fromJson(Map<String, Object?> json) {
@@ -301,6 +345,7 @@ class StitchTask {
             )
           : null,
       exportCheckpointPath: legacyExportCheckpoint,
+      largeJobApprovalScope: json['largeJobApprovalScope'] as String?,
     );
   }
 }

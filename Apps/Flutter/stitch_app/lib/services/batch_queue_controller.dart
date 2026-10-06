@@ -14,6 +14,8 @@ import '../models/stitch_quality.dart';
 import 'batch_folder_importer.dart';
 import 'batch_queue_repository.dart';
 import 'native_job_api.dart';
+import 'mobile_runtime_service.dart';
+import 'mobile_storage_service.dart';
 import 'spherical_request.dart';
 import 'task_repository.dart';
 
@@ -24,6 +26,9 @@ class BatchQueueController extends ChangeNotifier {
     TaskRepository? taskRepository,
     BatchFolderImporter? importer,
     DateTime Function()? clock,
+    this.requireLargeJobApproval = false,
+    this.runtimeService,
+    this.storageService,
   }) : _queueRepository = queueRepository ?? BatchQueueRepository(),
        _taskRepository = taskRepository ?? TaskRepository(),
        _importer = importer ?? BatchFolderImporter(),
@@ -35,8 +40,18 @@ class BatchQueueController extends ChangeNotifier {
   final TaskRepository _taskRepository;
   final BatchFolderImporter _importer;
   final DateTime Function() _clock;
+  bool requireLargeJobApproval;
+  final MobileRuntimeService? runtimeService;
+  final MobileStorageService? storageService;
+  MobileResourceBudget? resourceBudget;
+  bool resourceConfigurationReady = true;
+
+  /// Native jobs whose Android foreground-service timeout still needs a
+  /// quiescent checkpoint. Populate this before [initialize].
+  final Set<String> pendingRuntimePauseJobIds = {};
   final List<BatchQueue> _queues = [];
   final Set<String> _inFlight = {};
+  final Set<String> _runtimeGuardUnavailableJobs = {};
   final Set<String> _deletingTaskIds = {};
   final Map<String, StitchTask> _taskCache = {};
   final Map<String, int> _generations = {};
@@ -66,6 +81,67 @@ class BatchQueueController extends ChangeNotifier {
       }
     }
     return fallback;
+  }
+
+  StitchPhase _phaseForNative(Object? state) => switch (state) {
+    'queued' => StitchPhase.queued,
+    'running' => StitchPhase.running,
+    'pausing' => StitchPhase.pausing,
+    'paused' => StitchPhase.paused,
+    'completed' => StitchPhase.completed,
+    'failed' => StitchPhase.failed,
+    'cancelled' => StitchPhase.cancelled,
+    _ => StitchPhase.interrupted,
+  };
+
+  Future<Map<String, Object?>> _requestPauseAndInspect(String jobId) async {
+    try {
+      await _api.pause(jobId);
+    } on Object {
+      // The subsequent status read is authoritative even if pause threw.
+    }
+    try {
+      return await _api.status(jobId);
+    } on Object {
+      return const {'state': 'unknown'};
+    }
+  }
+
+  bool _pathIsWithin(String root, String path) {
+    final normalizedRoot = p.normalize(p.absolute(root));
+    final normalizedPath = p.normalize(p.absolute(path));
+    return p.equals(normalizedRoot, normalizedPath) ||
+        p.isWithin(normalizedRoot, normalizedPath);
+  }
+
+  Future<BatchFolderSnapshot?> _snapshotDirectFolder(String path) async {
+    final directory = Directory(path);
+    if (!await directory.exists()) return null;
+    final files = <File>[];
+    try {
+      await for (final entity in directory.list(followLinks: false)) {
+        if (entity is File &&
+            const {
+              '.jpg',
+              '.jpeg',
+            }.contains(p.extension(entity.path).toLowerCase())) {
+          files.add(entity);
+        }
+      }
+    } on Object {
+      return null;
+    }
+    files.sort(
+      (a, b) => p
+          .basename(a.path)
+          .toLowerCase()
+          .compareTo(p.basename(b.path).toLowerCase()),
+    );
+    if (files.isEmpty) return null;
+    return BatchFolderSnapshot(
+      directory: directory.path,
+      files: List.unmodifiable(files),
+    );
   }
 
   Future<void> _saveTask(
@@ -100,15 +176,26 @@ class BatchQueueController extends ChangeNotifier {
         final queue = _queues[index];
         final items = <BatchQueueItem>[];
         for (final item in queue.items) {
+          StitchTask? preloadedTask;
           if ((item.state != BatchItemState.running &&
                   item.state != BatchItemState.exporting &&
                   !item.pauseRequested) ||
               item.taskId == null) {
-            items.add(item);
-            continue;
+            if (pendingRuntimePauseJobIds.isEmpty || item.taskId == null) {
+              items.add(item);
+              continue;
+            }
+            preloadedTask = await _loadTask(item);
+            if (preloadedTask?.nativeJobId == null ||
+                !pendingRuntimePauseJobIds.contains(
+                  preloadedTask!.nativeJobId,
+                )) {
+              items.add(item);
+              continue;
+            }
           }
           try {
-            final task = await _loadTask(item);
+            final task = preloadedTask ?? await _loadTask(item);
             if (task?.nativeJobId == null) {
               items.add(
                 item.copyWith(
@@ -118,7 +205,142 @@ class BatchQueueController extends ChangeNotifier {
               );
               continue;
             }
-            final status = await _api.status(task!.nativeJobId!);
+            if (pendingRuntimePauseJobIds.contains(task!.nativeJobId)) {
+              final inspected = await _requestPauseAndInspect(
+                task.nativeJobId!,
+              );
+              final nativeState = inspected['state'] as String? ?? 'unknown';
+              final operation = inspected['operation'] as String? ?? 'render';
+              final isQuiescent = const {
+                'paused',
+                'completed',
+                'failed',
+                'cancelled',
+              }.contains(nativeState);
+              if (isQuiescent) {
+                pendingRuntimePauseJobIds.remove(task.nativeJobId);
+              } else {
+                _inFlight.add(item.id);
+              }
+              final phase = _phaseForNative(nativeState);
+              await _saveTask(
+                task.copyWith(
+                  phase: phase,
+                  stage: nativeState == 'completed' && operation != 'export'
+                      ? 'export-pending'
+                      : task.stage,
+                  autoExportOnCompletion:
+                      nativeState == 'completed' && operation != 'export'
+                      ? false
+                      : task.autoExportOnCompletion,
+                  clearExportCheckpointPath:
+                      nativeState == 'completed' && operation != 'export',
+                  pauseReason: isQuiescent
+                      ? 'Android 后台运行时限已到；核心状态已确认'
+                      : 'Android 后台运行时限已到；正在核对暂停状态',
+                ),
+              );
+              final nextState = switch (nativeState) {
+                'paused' => BatchItemState.paused,
+                'failed' => BatchItemState.failed,
+                'cancelled' => BatchItemState.cancelled,
+                'completed' when operation == 'export' =>
+                  BatchItemState.exporting,
+                'completed' => BatchItemState.paused,
+                _ when operation == 'export' => BatchItemState.exporting,
+                _ => BatchItemState.running,
+              };
+              items.add(
+                item.copyWith(
+                  state: nextState,
+                  pauseRequested:
+                      !isQuiescent ||
+                      nativeState == 'paused' ||
+                      (nativeState == 'completed' && operation != 'export'),
+                  message: isQuiescent
+                      ? nativeState == 'paused'
+                            ? '已安全暂停'
+                            : '核心作业已结束'
+                      : '正在安全暂停；等待核心确认',
+                  lastTickAt: isQuiescent ? null : _clock(),
+                  clearLastTickAt: isQuiescent,
+                  clearEtaSeconds: isQuiescent,
+                ),
+              );
+              continue;
+            }
+            if (requireLargeJobApproval &&
+                task.needsLargeJobConfirmation &&
+                !task.hasCurrentLargeJobApproval) {
+              final status = await _api.status(task.nativeJobId!);
+              var nativeState = status['state'] as String? ?? 'unknown';
+              final nativeOperation =
+                  status['operation'] as String? ?? 'render';
+              if (nativeState == 'completed' && nativeOperation != 'export') {
+                await runtimeService?.setProcessingActive(
+                  false,
+                  jobId: task.nativeJobId!,
+                );
+                await _saveTask(
+                  task.copyWith(
+                    phase: StitchPhase.completed,
+                    stage: 'export-pending',
+                    clearExportCheckpointPath: true,
+                    pauseReason: '大型任务需要重新确认后才能导出',
+                  ),
+                );
+                items.add(
+                  item.copyWith(
+                    state: BatchItemState.needsApproval,
+                    pauseRequested: false,
+                    clearLastTickAt: true,
+                    clearEtaSeconds: true,
+                    message: '大型任务需要确认后才会导出',
+                  ),
+                );
+                continue;
+              }
+              if (const {
+                'queued',
+                'running',
+                'pausing',
+                'exporting',
+              }.contains(nativeState)) {
+                await _api.pause(task.nativeJobId!);
+                for (var attempt = 0; attempt < 40; attempt++) {
+                  await Future<void>.delayed(const Duration(milliseconds: 250));
+                  nativeState = await _nativeState(task.nativeJobId!);
+                  if (nativeState == 'paused' ||
+                      !_isNativeActive(nativeState)) {
+                    break;
+                  }
+                }
+              }
+              await _saveTask(
+                task.copyWith(
+                  phase: nativeState == 'paused'
+                      ? StitchPhase.paused
+                      : StitchPhase.pausing,
+                  pauseReason: '大型任务需要重新确认',
+                ),
+              );
+              items.add(
+                item.copyWith(
+                  state: BatchItemState.needsApproval,
+                  pauseRequested: nativeState != 'paused',
+                  message: nativeState == 'paused'
+                      ? '大型任务需要重新确认'
+                      : '正在安全暂停大型任务；确认后才能继续',
+                  clearLastTickAt: true,
+                  clearEtaSeconds: true,
+                ),
+              );
+              if (nativeState != 'paused' && _isNativeActive(nativeState)) {
+                _inFlight.add(item.id);
+              }
+              continue;
+            }
+            final status = await _api.status(task.nativeJobId!);
             final state = status['state'] as String? ?? 'paused';
             final operation = status['operation'] as String? ?? 'render';
             final savedDestination =
@@ -227,11 +449,79 @@ class BatchQueueController extends ChangeNotifier {
               continue;
             }
             final shouldResume = state == 'paused' || state == 'interrupted';
+            if (requireLargeJobApproval && runtimeService != null) {
+              final protected = await runtimeService!.setProcessingActive(
+                true,
+                jobId: task.nativeJobId!,
+              );
+              if (!protected) {
+                final inspected = state == 'paused' || state == 'interrupted'
+                    ? status
+                    : await _requestPauseAndInspect(task.nativeJobId!);
+                final actualState = inspected['state'] as String? ?? 'unknown';
+                await runtimeService!.setProcessingActive(
+                  false,
+                  jobId: task.nativeJobId!,
+                );
+                await _saveTask(
+                  task.copyWith(
+                    phase: _phaseForNative(actualState),
+                    pauseReason: actualState == 'paused'
+                        ? 'Android 无法启动后台运行保护，任务已安全暂停'
+                        : 'Android 无法启动后台运行保护，正在核对暂停状态',
+                  ),
+                );
+                if (actualState != 'paused' &&
+                    actualState != 'completed' &&
+                    actualState != 'failed' &&
+                    actualState != 'cancelled') {
+                  _inFlight.add(item.id);
+                }
+                items.add(
+                  item.copyWith(
+                    state: actualState == 'paused'
+                        ? BatchItemState.paused
+                        : actualState == 'failed'
+                        ? BatchItemState.failed
+                        : actualState == 'cancelled'
+                        ? BatchItemState.cancelled
+                        : actualState == 'completed'
+                        ? BatchItemState.exporting
+                        : operation == 'export'
+                        ? BatchItemState.exporting
+                        : BatchItemState.running,
+                    pauseRequested:
+                        actualState != 'paused' &&
+                        actualState != 'completed' &&
+                        actualState != 'failed' &&
+                        actualState != 'cancelled',
+                    clearLastTickAt:
+                        actualState == 'paused' ||
+                        actualState == 'failed' ||
+                        actualState == 'cancelled',
+                    lastTickAt:
+                        actualState == 'paused' ||
+                            actualState == 'failed' ||
+                            actualState == 'cancelled'
+                        ? null
+                        : _clock(),
+                    message: actualState == 'paused'
+                        ? '无法启动后台运行保护；任务已安全暂停'
+                        : '无法启动后台运行保护；正在核对核心暂停状态',
+                  ),
+                );
+                continue;
+              }
+            }
             if (shouldResume) {
               try {
                 await _api.resume(task.nativeJobId!);
               } on NativeJobException catch (exception) {
                 if (exception.code == 'RESOURCE_BUSY') {
+                  await runtimeService?.setProcessingActive(
+                    false,
+                    jobId: task.nativeJobId!,
+                  );
                   items.add(
                     item.copyWith(
                       state: BatchItemState.ready,
@@ -335,7 +625,7 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> addParent(
     String parentPath, {
-    ExportFormat outputFormat = ExportFormat.png,
+    ExportFormat outputFormat = ExportFormat.tiff,
   }) async {
     if (_importing) return;
     if (outputFormat == ExportFormat.jpegXl) {
@@ -394,6 +684,7 @@ class BatchQueueController extends ChangeNotifier {
           await _importSnapshot(queue, item, snapshot);
         }
       }
+      await _releaseStagingIfFullyImported(queue.id, parentPath);
       error = null;
     } on Object catch (exception) {
       error = '导入批次失败：$exception';
@@ -404,18 +695,48 @@ class BatchQueueController extends ChangeNotifier {
     unawaited(tick());
   }
 
+  Future<void> _releaseStagingIfFullyImported(
+    String queueId,
+    String parentPath,
+  ) async {
+    if (storageService == null) return;
+    BatchQueue? queue;
+    for (final candidate in _queues) {
+      if (candidate.id == queueId) {
+        queue = candidate;
+        break;
+      }
+    }
+    if (queue == null || queue.items.isEmpty) return;
+    for (final item in queue.items) {
+      final taskId = item.taskId;
+      if (taskId == null) return;
+      final task = await _taskRepository.loadById(taskId);
+      if (task == null ||
+          _pathIsWithin(parentPath, task.sourceDirectory) ||
+          task.photos.any(
+            (photo) => _pathIsWithin(parentPath, photo.storedPath),
+          )) {
+        return;
+      }
+    }
+    await storageService!.releaseBatchParent(parentPath);
+  }
+
   Future<void> _importSnapshot(
     BatchQueue queue,
     BatchQueueItem baseItem,
-    BatchFolderSnapshot snapshot,
-  ) async {
+    BatchFolderSnapshot snapshot, {
+    String? taskId,
+  }) async {
     try {
+      final importedTaskId = taskId ?? baseItem.id;
       final taskDirectory = (await _taskRepository.directoryFor(
-        baseItem.id,
+        importedTaskId,
       )).path;
       final imported = await _importer.importFolder(snapshot, taskDirectory);
       final task = StitchTask(
-        id: baseItem.id,
+        id: importedTaskId,
         createdAt: _clock(),
         sourceDirectory: imported.inputDirectory,
         outputDirectory: p.join(taskDirectory, 'render'),
@@ -446,7 +767,8 @@ class BatchQueueController extends ChangeNotifier {
       await _replaceItem(
         found.index,
         baseItem.copyWith(
-          taskId: baseItem.id,
+          taskId: importedTaskId,
+          durableInputDirectory: imported.inputDirectory,
           state: needsSettings
               ? BatchItemState.needsSettings
               : BatchItemState.ready,
@@ -478,9 +800,11 @@ class BatchQueueController extends ChangeNotifier {
   }) async {
     final found = _find(queueId, itemId);
     if (found == null) return;
+    final settingsTask = await _loadTask(found.item);
     if (rows < 1 ||
         columns < 1 ||
-        rows * columns != (await _loadTask(found.item))?.photos.length) {
+        !GridOptions.productFits(rows, columns) ||
+        rows * columns != settingsTask?.photos.length) {
       throw const FormatException('行列数必须与原片数量一致');
     }
     if (!horizontalFovDegrees.isFinite ||
@@ -512,7 +836,71 @@ class BatchQueueController extends ChangeNotifier {
           : '已确认 $rows×$columns 顺序排列与相机视角',
     );
     await _replaceItem(found.index, item);
-    unawaited(tick());
+    await _tickAfterCurrent();
+  }
+
+  Future<void> approveLargeJob(String queueId, String itemId) async {
+    final found = _find(queueId, itemId);
+    if (found == null || found.item.state != BatchItemState.needsApproval) {
+      return;
+    }
+    final task = await _loadTask(found.item);
+    if (task == null) throw const FileSystemException('找不到该队列任务');
+    if (!requireLargeJobApproval || !task.needsLargeJobConfirmation) {
+      throw StateError('此队列项目不需要大型任务确认');
+    }
+    if (task.nativeJobId != null) {
+      _runtimeGuardUnavailableJobs.remove(task.nativeJobId);
+      var state = await _nativeState(task.nativeJobId!);
+      if (_isNativeActive(state)) {
+        await _api.pause(task.nativeJobId!);
+        for (var attempt = 0; attempt < 40; attempt++) {
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+          state = await _nativeState(task.nativeJobId!);
+          if (!_isNativeActive(state)) break;
+        }
+        if (_isNativeActive(state)) {
+          throw StateError('大型任务尚未安全暂停，确认后不能继续');
+        }
+      }
+    }
+    await _saveTask(
+      task.copyWith(largeJobApprovalScope: task.currentLargeJobApprovalScope),
+    );
+    final current = _find(queueId, itemId);
+    if (current == null || current.item.state != BatchItemState.needsApproval) {
+      return;
+    }
+    await _replaceItem(
+      current.index,
+      current.item.copyWith(
+        state: BatchItemState.ready,
+        clearMessage: true,
+        pauseRequested: false,
+      ),
+    );
+    await _tickAfterCurrent();
+  }
+
+  Future<bool> pauseJobByNativeId(String jobId) async {
+    for (final queue in _queues) {
+      for (final item in queue.items) {
+        if (item.taskId == null) continue;
+        final task = await _loadTask(item);
+        if (task?.nativeJobId != jobId) continue;
+        await pause(queue.id, item.id);
+        final state = await _nativeState(jobId);
+        final quiescent = const {
+          'paused',
+          'completed',
+          'failed',
+          'cancelled',
+        }.contains(state);
+        if (quiescent) pendingRuntimePauseJobIds.remove(jobId);
+        return quiescent;
+      }
+    }
+    return false;
   }
 
   Future<(int, int, double)> settingsFor(String queueId, String itemId) async {
@@ -550,41 +938,95 @@ class BatchQueueController extends ChangeNotifier {
       );
       return;
     }
-    try {
-      final response = await _api.pause(task!.nativeJobId!);
-      final state = response['state'] as String?;
-      await _replaceItem(
-        found.index,
-        found.item.copyWith(
-          state: state == 'paused'
-              ? BatchItemState.paused
-              : BatchItemState.running,
-          pauseRequested: true,
-          message: state == 'paused' ? '已暂停' : '已提交暂停请求',
-          elapsedSeconds: state == 'paused'
-              ? _elapsed(found.item)
-              : found.item.elapsedSeconds,
-          lastTickAt: state == 'paused' ? null : found.item.lastTickAt,
-          clearLastTickAt: state == 'paused',
-          progressSamples: state == 'paused'
-              ? const []
-              : found.item.progressSamples,
-          etaSeconds: state == 'paused' ? null : found.item.etaSeconds,
-          clearEtaSeconds: state == 'paused',
-        ),
-      );
-      if (state == 'paused') _inFlight.remove(found.item.id);
+    final inspected = await _requestPauseAndInspect(task!.nativeJobId!);
+    final state = inspected['state'] as String? ?? 'unknown';
+    final operation = inspected['operation'] as String? ?? 'render';
+    final completedRenderTimeout =
+        pendingRuntimePauseJobIds.contains(task.nativeJobId) &&
+        state == 'completed' &&
+        operation != 'export';
+    if (completedRenderTimeout) {
+      _inFlight.remove(found.item.id);
       await _saveTask(
         task.copyWith(
-          phase: state == 'paused' ? StitchPhase.paused : StitchPhase.pausing,
+          phase: StitchPhase.completed,
+          stage: 'export-pending',
+          autoExportOnCompletion: false,
+          clearExportCheckpointPath: true,
+          pauseReason: 'Android 后台运行时限已到；等待手动恢复导出',
         ),
         guardItem: found.item.id,
         generation: generation,
       );
-    } on Object catch (exception) {
-      error = '暂停失败：$exception';
-      notifyListeners();
+      await runtimeService?.setProcessingActive(
+        false,
+        jobId: task.nativeJobId!,
+      );
+      final current = _find(queueId, itemId);
+      if (current != null && generation == _generation(itemId)) {
+        await _replaceItem(
+          current.index,
+          current.item.copyWith(
+            state: BatchItemState.paused,
+            pauseRequested: true,
+            message: '后台时间到；整图导出已暂停，点击恢复继续',
+            clearLastTickAt: true,
+            clearEtaSeconds: true,
+          ),
+        );
+      }
+      return;
     }
+    final isPaused = state == 'paused';
+    final isTerminal = const {
+      'completed',
+      'failed',
+      'cancelled',
+    }.contains(state);
+    if (isPaused || isTerminal) {
+      _inFlight.remove(found.item.id);
+    } else {
+      _inFlight.add(found.item.id);
+    }
+    await _saveTask(
+      task.copyWith(
+        phase: _phaseForNative(state),
+        pauseReason: isPaused ? '已暂停' : '已请求暂停，等待核心确认',
+      ),
+      guardItem: found.item.id,
+      generation: generation,
+    );
+    final current = _find(queueId, itemId);
+    if (current == null || generation != _generation(itemId)) return;
+    final nextState = isPaused
+        ? BatchItemState.paused
+        : state == 'failed'
+        ? BatchItemState.failed
+        : state == 'cancelled'
+        ? BatchItemState.cancelled
+        : state == 'completed'
+        ? operation == 'export'
+              ? BatchItemState.completed
+              : BatchItemState.exporting
+        : operation == 'export'
+        ? BatchItemState.exporting
+        : BatchItemState.running;
+    await _replaceItem(
+      current.index,
+      current.item.copyWith(
+        state: nextState,
+        pauseRequested: !isPaused && !isTerminal,
+        message: isPaused ? '已暂停' : '已请求暂停，等待核心确认',
+        elapsedSeconds: isPaused
+            ? _elapsed(current.item)
+            : current.item.elapsedSeconds,
+        lastTickAt: isPaused || isTerminal ? null : _clock(),
+        clearLastTickAt: isPaused || isTerminal,
+        progressSamples: isPaused ? const [] : current.item.progressSamples,
+        etaSeconds: isPaused ? null : current.item.etaSeconds,
+        clearEtaSeconds: isPaused,
+      ),
+    );
   }
 
   Future<void> cancel(String queueId, String itemId) async {
@@ -739,15 +1181,42 @@ class BatchQueueController extends ChangeNotifier {
     final found = _find(queueId, itemId);
     if (found == null) return;
     var task = await _loadTask(found.item);
+    if (task?.nativeJobId != null) {
+      _runtimeGuardUnavailableJobs.remove(task!.nativeJobId);
+    }
     if (task == null) {
       final queue = _queues.firstWhere((value) => value.id == queueId);
-      final snapshots = await _importer.snapshot(queue.parentDirectory);
-      BatchFolderSnapshot? snapshot;
-      for (final candidate in snapshots) {
-        if (p.normalize(candidate.directory) ==
-            p.normalize(found.item.sourceDirectory)) {
-          snapshot = candidate;
-          break;
+      BatchFolderSnapshot? snapshot = await _snapshotDirectFolder(
+        found.item.sourceDirectory,
+      );
+      final oldTaskId = found.item.taskId;
+      if (snapshot == null && oldTaskId != null) {
+        final oldTask = await _taskRepository.loadById(oldTaskId);
+        if (oldTask != null &&
+            found.item.durableInputDirectory != null &&
+            p.normalize(found.item.durableInputDirectory!) ==
+                p.normalize(oldTask.sourceDirectory)) {
+          snapshot = await _snapshotDirectFolder(oldTask.sourceDirectory);
+        }
+      }
+      if (snapshot == null && oldTaskId != null) {
+        final oldTaskDirectory = await _taskRepository.directoryFor(oldTaskId);
+        snapshot = await _snapshotDirectFolder(
+          p.join(oldTaskDirectory.path, 'input'),
+        );
+      }
+      if (snapshot == null) {
+        try {
+          final snapshots = await _importer.snapshot(queue.parentDirectory);
+          for (final candidate in snapshots) {
+            if (p.normalize(candidate.directory) ==
+                p.normalize(found.item.sourceDirectory)) {
+              snapshot = candidate;
+              break;
+            }
+          }
+        } on Object {
+          // The durable per-task input copy is preferred when staging was released.
         }
       }
       if (snapshot == null) {
@@ -760,12 +1229,16 @@ class BatchQueueController extends ChangeNotifier {
         );
         return;
       }
+      final taskId = _taskRepository.createId();
       final pending = found.item.copyWith(
+        taskId: taskId,
+        clearDurableInputDirectory: true,
         state: BatchItemState.pending,
         clearMessage: true,
       );
       await _replaceItem(found.index, pending);
-      await _importSnapshot(queue, pending, snapshot);
+      await _importSnapshot(queue, pending, snapshot, taskId: taskId);
+      await _releaseStagingIfFullyImported(queue.id, queue.parentDirectory);
       unawaited(tick());
       return;
     }
@@ -774,6 +1247,7 @@ class BatchQueueController extends ChangeNotifier {
         found.index,
         found.item.copyWith(
           state: BatchItemState.exporting,
+          pauseRequested: false,
           progress: 0.85,
           etaSeconds: null,
           clearEtaSeconds: true,
@@ -815,6 +1289,11 @@ class BatchQueueController extends ChangeNotifier {
     return work;
   }
 
+  Future<void> _tickAfterCurrent() async {
+    if (_ticking) await _tickWork;
+    await tick();
+  }
+
   Future<void> _runTick() async {
     await _pollRunning();
     if (_disposed) return;
@@ -841,7 +1320,11 @@ class BatchQueueController extends ChangeNotifier {
         }
         final generation = _generation(item.id);
         try {
-          final status = await _api.status(task!.nativeJobId!);
+          var status = await _api.status(task!.nativeJobId!);
+          if (pendingRuntimePauseJobIds.contains(task.nativeJobId) &&
+              _isNativeActive(status['state'] as String? ?? 'unknown')) {
+            status = await _requestPauseAndInspect(task.nativeJobId!);
+          }
           final current = _find(queue.id, item.id);
           if (current == null ||
               generation != _generation(item.id) ||
@@ -919,6 +1402,10 @@ class BatchQueueController extends ChangeNotifier {
             continue;
           }
           if (state == 'completed' && operation == 'export') {
+            await runtimeService?.setProcessingActive(
+              false,
+              jobId: task.nativeJobId!,
+            );
             _inFlight.remove(item.id);
             final path =
                 exportDestination ??
@@ -996,16 +1483,33 @@ class BatchQueueController extends ChangeNotifier {
           } else if (state == 'failed' ||
               state == 'cancelled' ||
               state == 'paused') {
+            pendingRuntimePauseJobIds.remove(task.nativeJobId);
+            if (state == 'paused' ||
+                state == 'failed' ||
+                state == 'cancelled') {
+              await runtimeService?.setProcessingActive(
+                false,
+                jobId: task.nativeJobId!,
+              );
+              _runtimeGuardUnavailableJobs.remove(task.nativeJobId);
+            }
             _inFlight.remove(item.id);
             final latest = _find(queue.id, item.id);
             if (latest == null || generation != _generation(item.id)) continue;
+            final needsApproval =
+                state == 'paused' &&
+                requireLargeJobApproval &&
+                updatedTask.needsLargeJobConfirmation &&
+                !updatedTask.hasCurrentLargeJobApproval;
             await _replaceItem(
               latest.index,
               latest.item.copyWith(
                 state: state == 'failed'
                     ? BatchItemState.failed
                     : state == 'paused'
-                    ? BatchItemState.paused
+                    ? needsApproval
+                          ? BatchItemState.needsApproval
+                          : BatchItemState.paused
                     : BatchItemState.cancelled,
                 pauseRequested: state == 'paused'
                     ? latest.item.pauseRequested
@@ -1097,8 +1601,106 @@ class BatchQueueController extends ChangeNotifier {
         initial.item.state == BatchItemState.paused) {
       return;
     }
-    if (item.state == BatchItemState.exporting && _inFlight.contains(item.id)) {
+    if (initial.item.pauseRequested ||
+        (task.nativeJobId != null &&
+            pendingRuntimePauseJobIds.contains(task.nativeJobId))) {
+      _inFlight.remove(item.id);
+      await _saveTask(
+        task.copyWith(
+          phase: StitchPhase.completed,
+          stage: 'export-pending',
+          autoExportOnCompletion: false,
+          clearExportCheckpointPath: true,
+          pauseReason: '后台运行已暂停；等待手动恢复导出',
+        ),
+        guardItem: item.id,
+        generation: generation,
+      );
+      if (task.nativeJobId != null) {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
+      }
+      final current = _find(queue.id, item.id);
+      if (current != null && generation == _generation(item.id)) {
+        await _replaceItem(
+          current.index,
+          current.item.copyWith(
+            state: BatchItemState.paused,
+            pauseRequested: true,
+            message: '整图导出已暂停，点击恢复继续',
+            clearLastTickAt: true,
+            clearEtaSeconds: true,
+          ),
+        );
+      }
       return;
+    }
+    if (task.phase == StitchPhase.exporting && _inFlight.contains(item.id)) {
+      return;
+    }
+    if (requireLargeJobApproval &&
+        task.needsLargeJobConfirmation &&
+        !task.hasCurrentLargeJobApproval) {
+      await _deferCompletedExport(
+        queue,
+        item,
+        task,
+        BatchItemState.needsApproval,
+        '大型任务需要确认后才会开始',
+        generation,
+      );
+      return;
+    }
+    if (requireLargeJobApproval && runtimeService != null) {
+      if (!resourceConfigurationReady) {
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.ready,
+          '无法设置 Android 渲染资源预算，已暂缓启动。',
+          generation,
+        );
+        return;
+      }
+      try {
+        resourceBudget = await runtimeService!.readResourceBudget();
+      } on Object {
+        // Keep the last conservative budget and still require a live thermal check when available.
+      }
+      if (resourceBudget?.shouldDeferNewStarts == true) {
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.ready,
+          '设备温度较高，待温度降低后再启动新任务。',
+          generation,
+        );
+        return;
+      }
+      if (_runtimeGuardUnavailableJobs.contains(task.nativeJobId)) {
+        _inFlight.remove(item.id);
+        return;
+      }
+      final protected = await runtimeService!.setProcessingActive(
+        true,
+        jobId: task.nativeJobId!,
+      );
+      if (!protected) {
+        _runtimeGuardUnavailableJobs.add(task.nativeJobId!);
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.ready,
+          '无法启动 Android 后台运行保护；整图导出尚未启动',
+          generation,
+        );
+        return;
+      }
     }
     _inFlight.add(item.id);
     await _replaceState(
@@ -1152,6 +1754,10 @@ class BatchQueueController extends ChangeNotifier {
           ? await _taskRepository.fingerprintFile(destination.path)
           : null;
       if (state == 'completed' && fingerprint == null) {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
         _inFlight.remove(item.id);
         await _saveTask(
           exportTask.copyWith(
@@ -1186,6 +1792,10 @@ class BatchQueueController extends ChangeNotifier {
         return;
       }
       if (state == 'completed') {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
         _inFlight.remove(item.id);
         await _replaceState(
           queue.id,
@@ -1195,6 +1805,10 @@ class BatchQueueController extends ChangeNotifier {
           message: destination.path,
         );
       } else if (state == 'failed' || state == 'cancelled') {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
         _inFlight.remove(item.id);
         await _replaceState(
           queue.id,
@@ -1246,6 +1860,33 @@ class BatchQueueController extends ChangeNotifier {
     }
   }
 
+  Future<void> _deferCompletedExport(
+    BatchQueue queue,
+    BatchQueueItem item,
+    StitchTask task,
+    BatchItemState state,
+    String message,
+    int generation,
+  ) async {
+    _inFlight.remove(item.id);
+    await _saveTask(
+      task.copyWith(
+        phase: StitchPhase.completed,
+        stage: 'export-pending',
+        clearExportCheckpointPath: true,
+      ),
+      guardItem: item.id,
+      generation: generation,
+    );
+    if (task.nativeJobId != null) {
+      await runtimeService?.setProcessingActive(
+        false,
+        jobId: task.nativeJobId!,
+      );
+    }
+    await _replaceState(queue.id, item.id, state, message: message);
+  }
+
   Future<void> _recoverExport(
     BatchQueue queue,
     BatchQueueItem item,
@@ -1289,6 +1930,10 @@ class BatchQueueController extends ChangeNotifier {
         if (generation != _generation(item.id)) return;
       }
       if (state == 'completed') {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
         final file = destination == null ? null : File(destination);
         if (file != null && await file.exists() && await file.length() > 0) {
           final fingerprint = await _taskRepository.fingerprintFile(
@@ -1346,6 +1991,32 @@ class BatchQueueController extends ChangeNotifier {
           );
         }
       } else if (state == 'paused' || state == 'interrupted') {
+        if (requireLargeJobApproval && runtimeService != null) {
+          final protected = await runtimeService!.setProcessingActive(
+            true,
+            jobId: task.nativeJobId!,
+          );
+          if (!protected) {
+            _runtimeGuardUnavailableJobs.add(task.nativeJobId!);
+            await runtimeService!.setProcessingActive(
+              false,
+              jobId: task.nativeJobId!,
+            );
+            await _saveTask(
+              task.copyWith(
+                phase: _phaseForNative(state),
+                pauseReason: '无法启动 Android 后台运行保护；导出保持暂停',
+              ),
+            );
+            await _replaceState(
+              queue.id,
+              item.id,
+              BatchItemState.paused,
+              message: '无法启动后台运行保护；导出保持暂停',
+            );
+            return;
+          }
+        }
         await _api.resume(task.nativeJobId!);
         if (generation != _generation(item.id)) return;
         _inFlight.add(item.id);
@@ -1357,6 +2028,10 @@ class BatchQueueController extends ChangeNotifier {
           );
         }
       } else if (state == 'failed' || state == 'cancelled') {
+        await runtimeService?.setProcessingActive(
+          false,
+          jobId: task.nativeJobId!,
+        );
         await _replaceState(
           queue.id,
           item.id,
@@ -1364,6 +2039,36 @@ class BatchQueueController extends ChangeNotifier {
           message: _nativeErrorText(status['error'], '整图导出失败'),
         );
       } else {
+        if (requireLargeJobApproval && runtimeService != null) {
+          final protected = await runtimeService!.setProcessingActive(
+            true,
+            jobId: task.nativeJobId!,
+          );
+          if (!protected) {
+            _runtimeGuardUnavailableJobs.add(task.nativeJobId!);
+            final inspected = await _requestPauseAndInspect(task.nativeJobId!);
+            final actualState = inspected['state'] as String? ?? 'unknown';
+            await runtimeService!.setProcessingActive(
+              false,
+              jobId: task.nativeJobId!,
+            );
+            await _saveTask(
+              task.copyWith(
+                phase: _phaseForNative(actualState),
+                pauseReason: '无法启动 Android 后台运行保护；正在核对暂停状态',
+              ),
+            );
+            if (actualState == 'paused') {
+              await _replaceState(
+                queue.id,
+                item.id,
+                BatchItemState.paused,
+                message: '无法启动后台运行保护；任务已安全暂停',
+              );
+              return;
+            }
+          }
+        }
         _inFlight.add(item.id);
         final current = _find(queue.id, item.id);
         if (current != null) {
@@ -1395,6 +2100,15 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> _startReady() async {
     if (_disposed || !_api.isAvailable) return;
+    if (requireLargeJobApproval && !resourceConfigurationReady) return;
+    if (requireLargeJobApproval && runtimeService != null) {
+      try {
+        resourceBudget = await runtimeService!.readResourceBudget();
+      } on Object {
+        // Retain the conservative initialization reading if a refresh fails.
+      }
+      if (resourceBudget?.shouldDeferNewStarts == true) return;
+    }
     Map<String, Object?> caps;
     try {
       final response = await _api.capabilities();
@@ -1441,6 +2155,17 @@ class BatchQueueController extends ChangeNotifier {
         );
         continue;
       }
+      if (requireLargeJobApproval &&
+          task.needsLargeJobConfirmation &&
+          !task.hasCurrentLargeJobApproval) {
+        await _replaceState(
+          queue.id,
+          item.id,
+          BatchItemState.needsApproval,
+          message: '大型任务需要确认后才会开始',
+        );
+        continue;
+      }
       if (task.exportFormat == ExportFormat.jpegXl &&
           caps['jpegXlAvailable'] != true) {
         await _replaceState(
@@ -1448,6 +2173,16 @@ class BatchQueueController extends ChangeNotifier {
           item.id,
           BatchItemState.failed,
           message: '核心未报告可用的 JPEG XL 无损编码器；已阻止启动。',
+        );
+        continue;
+      }
+      if (task.phase == StitchPhase.completed &&
+          task.stage == 'export-pending') {
+        await _exportCompleted(
+          queue,
+          item,
+          task,
+          expectedGeneration: generation,
         );
         continue;
       }
@@ -1573,12 +2308,18 @@ class BatchQueueController extends ChangeNotifier {
           continue;
         }
       }
-      final memory = resuming
+      final requestedMemory = resuming
           ? ((nativeOperationStatus['memoryBudgetMiB'] as num?)?.toInt() ??
                 task.memoryBudgetMiB)
           : task.memoryBudgetMiB.clamp(128, 4096).toInt();
+      final budget = resourceBudget;
+      final memory = requireLargeJobApproval && budget != null
+          ? math
+                .min(requestedMemory, budget.recommendedTotalMemoryBudgetMiB)
+                .toInt()
+          : requestedMemory;
       final availableWorkers = totalWorkers - reservedWorkers;
-      final workers = resuming
+      final requestedWorkers = resuming
           ? ((nativeOperationStatus['operationWorkers'] as num?)?.toInt() ??
                 (nativeOperationStatus['workersEffective'] as num?)?.toInt() ??
                 task.workers)
@@ -1588,7 +2329,46 @@ class BatchQueueController extends ChangeNotifier {
                   availableWorkers,
                 )
                 .toInt();
+      final perJobWorkerLimit = budget == null
+          ? maxWorkers
+          : budget.recommendedTotalCpuWorkers;
+      final conservativeOneWorker =
+          budget != null &&
+          (budget.recommendedTotalMemoryBudgetMiB <= 512 ||
+              budget.isStorageConstrained);
+      final workers = requireLargeJobApproval
+          ? math
+                .min(
+                  requestedWorkers,
+                  conservativeOneWorker ? 1 : perJobWorkerLimit,
+                )
+                .toInt()
+          : requestedWorkers;
       if (workers < 1 || reservedMemory + memory > totalMemory) continue;
+      final anticipatedJobId = task.nativeJobId ?? task.outputDirectory;
+      if (requireLargeJobApproval && runtimeService != null) {
+        if (_runtimeGuardUnavailableJobs.contains(anticipatedJobId)) {
+          continue;
+        }
+        final protected = await runtimeService!.setProcessingActive(
+          true,
+          jobId: anticipatedJobId,
+        );
+        if (!protected) {
+          _runtimeGuardUnavailableJobs.add(anticipatedJobId);
+          await runtimeService!.setProcessingActive(
+            false,
+            jobId: anticipatedJobId,
+          );
+          await _replaceState(
+            queue.id,
+            item.id,
+            BatchItemState.ready,
+            message: '无法启动 Android 后台运行保护；核心任务尚未启动',
+          );
+          continue;
+        }
+      }
       _inFlight.add(item.id);
       reservedWorkers += workers;
       reservedMemory += memory;
@@ -1638,6 +2418,79 @@ class BatchQueueController extends ChangeNotifier {
             response['jobId'] as String? ??
             task.nativeJobId ??
             task.outputDirectory;
+        if (requireLargeJobApproval && runtimeService != null) {
+          if (returnedJobId != anticipatedJobId) {
+            await runtimeService!.setProcessingActive(
+              false,
+              jobId: anticipatedJobId,
+            );
+          }
+          final guarded = await runtimeService!.setProcessingActive(
+            true,
+            jobId: returnedJobId,
+          );
+          if (!guarded) {
+            _runtimeGuardUnavailableJobs.add(returnedJobId);
+            final inspected = await _requestPauseAndInspect(returnedJobId);
+            final actualState = inspected['state'] as String? ?? 'unknown';
+            await runtimeService!.setProcessingActive(
+              false,
+              jobId: returnedJobId,
+            );
+            await _saveTask(
+              task.copyWith(
+                nativeJobId: returnedJobId,
+                phase: _phaseForNative(actualState),
+                pauseReason: actualState == 'paused'
+                    ? 'Android 无法启动后台运行保护，任务已安全暂停'
+                    : 'Android 无法启动后台运行保护，正在核对暂停状态',
+              ),
+              guardItem: item.id,
+              generation: generation,
+            );
+            if (actualState == 'paused' ||
+                actualState == 'completed' ||
+                actualState == 'failed' ||
+                actualState == 'cancelled') {
+              _inFlight.remove(item.id);
+            }
+            await _replaceItem(
+              _find(queue.id, item.id)!.index,
+              _find(queue.id, item.id)!.item.copyWith(
+                state: actualState == 'paused'
+                    ? BatchItemState.paused
+                    : actualState == 'completed'
+                    ? BatchItemState.exporting
+                    : actualState == 'failed'
+                    ? BatchItemState.failed
+                    : actualState == 'cancelled'
+                    ? BatchItemState.cancelled
+                    : BatchItemState.running,
+                pauseRequested:
+                    actualState != 'paused' &&
+                    actualState != 'completed' &&
+                    actualState != 'failed' &&
+                    actualState != 'cancelled',
+                lastTickAt:
+                    actualState == 'paused' ||
+                        actualState == 'completed' ||
+                        actualState == 'failed' ||
+                        actualState == 'cancelled'
+                    ? null
+                    : _clock(),
+                clearLastTickAt:
+                    actualState == 'paused' ||
+                    actualState == 'completed' ||
+                    actualState == 'failed' ||
+                    actualState == 'cancelled',
+                message: actualState == 'paused'
+                    ? '无法启动后台运行保护；任务已安全暂停'
+                    : '无法启动后台运行保护；正在核对核心暂停状态',
+              ),
+            );
+            continue;
+          }
+        }
         if (generation != _generation(item.id)) {
           try {
             final current = _find(queue.id, item.id)?.item;
@@ -1850,9 +2703,23 @@ class BatchQueueController extends ChangeNotifier {
   Future<StitchTask?> _loadTask(BatchQueueItem item) async {
     if (item.taskId == null) return null;
     final cached = _taskCache[item.taskId];
-    if (cached != null) return cached;
+    if (cached != null) {
+      final durableInput = item.durableInputDirectory;
+      if (durableInput != null &&
+          p.normalize(durableInput) != p.normalize(cached.sourceDirectory)) {
+        return null;
+      }
+      return cached;
+    }
     final task = await _taskRepository.loadById(item.taskId!);
-    if (task != null) _taskCache[task.id] = task;
+    if (task != null) {
+      final durableInput = item.durableInputDirectory;
+      if (durableInput != null &&
+          p.normalize(durableInput) != p.normalize(task.sourceDirectory)) {
+        return null;
+      }
+      _taskCache[task.id] = task;
+    }
     return task;
   }
 
