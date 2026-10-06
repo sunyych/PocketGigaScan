@@ -303,10 +303,6 @@ void output_seek(void* opaque, uint64_t position) noexcept {
 
 void output_finalize(void*, uint64_t) noexcept {}
 
-bool status_ok(JxlEncoderStatus status, JxlEncoder* encoder) noexcept {
-  return status == JXL_ENC_SUCCESS && encoder != nullptr &&
-         JxlEncoderGetError(encoder) == JXL_ENC_ERR_OK;
-}
 }  // namespace
 
 #if defined(LUMIA_JXL_TEST_HELPERS)
@@ -455,7 +451,9 @@ extern "C" int lumia_jxl_encode_rgba_spool(
     info.alpha_bits = 8;
     info.alpha_exponent_bits = 0;
     info.alpha_premultiplied = JXL_FALSE;
-    info.uses_original_profile = JXL_TRUE;
+    // VarDCT is the lossy JPEG XL path. The input is still sRGB, described
+    // below with JxlEncoderSetColorEncoding.
+    info.uses_original_profile = JXL_FALSE;
     if (result == 0 && JxlEncoderSetBasicInfo(encoder, &info) != JXL_ENC_SUCCESS)
       fail("could not set JPEG XL image dimensions", 10);
     JxlColorEncoding color;
@@ -490,8 +488,12 @@ extern "C" int lumia_jxl_encode_rgba_spool(
                                          JXL_ENC_FRAME_SETTING_OUTPUT_MODE, 1) !=
             JXL_ENC_SUCCESS)
       fail("could not enable seekable low-memory JXL output", 16);
-    if (result == 0 && JxlEncoderSetFrameLossless(settings, JXL_TRUE) != JXL_ENC_SUCCESS)
-      fail("could not enable lossless JPEG XL encoding", 17);
+    if (result == 0 && JxlEncoderSetFrameLossless(settings, JXL_FALSE) != JXL_ENC_SUCCESS)
+      fail("could not enable lossy JPEG XL encoding", 17);
+    if (result == 0 && JxlEncoderSetFrameDistance(settings, 1.0f) != JXL_ENC_SUCCESS)
+      fail("could not set JPEG XL distance 1.0", 18);
+    if (result == 0 && JxlEncoderSetExtraChannelDistance(settings, 0, 0.0f) != JXL_ENC_SUCCESS)
+      fail("could not keep JPEG XL alpha lossless", 19);
 
     JxlEncoderOutputProcessor output_processor{};
     output_processor.opaque = &context;
@@ -501,7 +503,7 @@ extern "C" int lumia_jxl_encode_rgba_spool(
     output_processor.set_finalized_position = output_finalize;
     if (result == 0 &&
         JxlEncoderSetOutputProcessor(encoder, output_processor) != JXL_ENC_SUCCESS)
-      fail("could not configure seekable JPEG XL output", 18);
+      fail("could not configure seekable JPEG XL output", 20);
 
     JxlChunkedFrameInputSource source{};
     source.opaque = &context;
@@ -512,12 +514,12 @@ extern "C" int lumia_jxl_encode_rgba_spool(
     source.release_buffer = release_pixels;
     if (result == 0 &&
         JxlEncoderAddChunkedFrame(settings, JXL_TRUE, source) != JXL_ENC_SUCCESS)
-      fail("libjxl rejected the chunked RGBA frame", 19);
+      fail("libjxl rejected the chunked RGBA frame", 21);
     while (result == 0) {
       const JxlEncoderStatus status = JxlEncoderFlushInput(encoder);
       if (status == JXL_ENC_SUCCESS) break;
       if (status == JXL_ENC_ERROR) {
-        fail("libjxl failed while streaming JPEG XL output", 20);
+        fail("libjxl failed while streaming JPEG XL output", 22);
         break;
       }
     }

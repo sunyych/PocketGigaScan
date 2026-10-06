@@ -5,9 +5,23 @@ import 'package:stitch_app/services/mobile_storage_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('test/mobile-storage');
+  const productionChannel =
+      MethodChannel('com.lumiaiq.pocketgigascan/storage');
   final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
-  tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+  tearDown(() {
+    messenger.setMockMethodCallHandler(channel, null);
+    messenger.setMockMethodCallHandler(productionChannel, null);
+  });
+
+  test('default service uses the production storage channel', () async {
+    messenger.setMockMethodCallHandler(productionChannel, (call) async {
+      expect(call.method, 'pickBatchParent');
+      return '/private/staged';
+    });
+
+    expect(await const MobileStorageService().pickBatchParent(), '/private/staged');
+  });
 
   test('folder picker returns staged path and preserves cancellation', () async {
     final service = MobileStorageService(channel: channel);

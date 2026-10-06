@@ -1151,71 +1151,50 @@ void main() {
     },
   );
 
-  testWidgets('completed task can change format and manually re-export', (
-    tester,
-  ) async {
-    final documents = await _createTempDirectory(tester, 'stitch-re-export-');
-    _deleteTempDirectory(tester, documents);
-    const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(pathProvider, (_) async => documents.path);
-    addTearDown(
-      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(pathProvider, null),
-    );
+  testWidgets(
+    'completed task keeps prior output actions while format selection is hidden',
+    (tester) async {
+      final documents = await _createTempDirectory(tester, 'stitch-re-export-');
+      _deleteTempDirectory(tester, documents);
+      const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pathProvider, (_) async => documents.path);
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(pathProvider, null),
+      );
 
-    final task = _task(phase: StitchPhase.completed).copyWith(
-      nativeJobId: 'legacy-completed-job',
-      exportPath: r'C:\old-output\previous.tif',
-      exportFormat: ExportFormat.tiff,
-    );
-    final api = _AutoExportApi(jpegXlAvailable: true);
-    final repository = _RecordingRepository(task);
-    await tester.pumpWidget(
-      ChineseTestApp(
-        home: StitchHomePage(
-          jobApi: api,
-          repository: repository,
-          batchQueueController: EmptyBatchQueueController(
-            api: api,
-            taskRepository: repository,
+      final task = _task(phase: StitchPhase.completed).copyWith(
+        nativeJobId: 'legacy-completed-job',
+        exportPath: r'C:\old-output\previous.tif',
+        exportFormat: ExportFormat.tiff,
+      );
+      final api = _AutoExportApi(jpegXlAvailable: true);
+      final repository = _RecordingRepository(task);
+      await tester.pumpWidget(
+        ChineseTestApp(
+          home: StitchHomePage(
+            jobApi: api,
+            repository: repository,
+            batchQueueController: EmptyBatchQueueController(
+              api: api,
+              taskRepository: repository,
+            ),
+            foregroundWorkLock: _NoopForegroundLock(),
+            initialTask: task,
+            mobileOverride: false,
           ),
-          foregroundWorkLock: _NoopForegroundLock(),
-          initialTask: task,
-          mobileOverride: false,
         ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-    final selector = tester.widget<DropdownButtonFormField<ExportFormat>>(
-      find.byKey(const Key('export-format-option')),
-    );
-    expect(selector.onChanged, isNotNull);
-    selector.onChanged!(ExportFormat.png);
-    await tester.pump();
-    expect(repository.saved.last.exportFormat, ExportFormat.png);
-    expect(find.byKey(const Key('export-format-card')), findsOneWidget);
-    expect(find.textContaining('上次成功整图 TIFF'), findsOneWidget);
-
-    await tester.tap(find.text('导出完整 PNG'));
-    await _pumpUntilExportPersisted(tester, api, repository);
-    await tester.pump();
-
-    expect(api.exports, 1);
-    expect(api.destination, endsWith('.png'));
-    expect(repository.saved.last.exportPath, api.destination);
-    expect(
-      repository.saved.any(
-        (saved) =>
-            saved.stage == 'export' &&
-            saved.exportCheckpointPath == api.destination &&
-            saved.autoExportOnCompletion,
-      ),
-      isTrue,
-      reason:
-          'Single-task export intent must be durable before native export starts.',
-    );
-  });
+      );
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.byKey(const Key('export-format-card')), findsNothing);
+      expect(find.byKey(const Key('export-format-option')), findsNothing);
+      expect(find.byKey(const Key('export-task-action')), findsNothing);
+      expect(find.byKey(const Key('open-exported-image')), findsOneWidget);
+      expect(find.byKey(const Key('new-run-copy-action')), findsOneWidget);
+      expect(find.textContaining('上次成功整图 TIFF'), findsOneWidget);
+    },
+  );
 
   testWidgets('desktop JXL is enabled only when the native core reports it', (
     tester,
@@ -1582,10 +1561,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.byKey(const Key('export-format-card')), findsOneWidget);
-    final selector = tester.widget<DropdownButtonFormField<ExportFormat>>(
-      find.byKey(const Key('export-format-option')),
-    );
-    expect(selector.onChanged, isNull);
+    expect(find.byKey(const Key('export-format-card')), findsNothing);
+    expect(find.byKey(const Key('export-format-option')), findsNothing);
   });
 }

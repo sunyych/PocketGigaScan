@@ -26,8 +26,12 @@ as successful texture registration or zero residual.
 
 ## Android adapters
 
-Keep the Flutter application ID `com.lumia.stitch_app` for storage compatibility;
-operator branding is PocketGigaScan. Native core comes from `native/core`, built
+Use application ID `com.lumiaiq.pocketgigascan`, including native bridge channels;
+operator branding is PocketGigaScan. This new package can coexist with the old
+Android package, whose private storage cannot be automatically accessed by it.
+No uninstall or data clearing is part of this identity change. Windows retains
+lookup of legacy task directories after the company identity change.
+Native core comes from `native/core`, built
 for ARM64 with NDK 28.2.13676358 and minimum API 29. Include JPEG XL support from
 fixed official source/dependency archives, not a previous Android binary.
 
@@ -61,6 +65,7 @@ layouts, and collapsed diagnostic status by default.
 ## iOS boundary
 
 Shared models, policy, viewer and core C ABI stay portable. A later iOS adapter
+reserves the same `com.lumiaiq.pocketgigascan` bundle identity and
 will implement document picking/saving, resource and lifecycle APIs and static
 native linkage (`DynamicLibrary.process`). iOS packaging and device execution
 require a Mac/iOS toolchain and separate qualification; they are not claimed here.

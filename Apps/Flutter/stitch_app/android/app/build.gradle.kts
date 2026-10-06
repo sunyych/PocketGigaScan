@@ -221,7 +221,7 @@ require(selectedStitchAbis.isNotEmpty() && selectedStitchAbis.all { it in suppor
 }
 
 android {
-    namespace = "com.lumia.stitch_app"
+    namespace = "com.lumiaiq.pocketgigascan"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "28.2.13676358"
 
@@ -251,7 +251,7 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.lumia.stitch_app"
+        applicationId = "com.lumiaiq.pocketgigascan"
         minSdk = 29
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.

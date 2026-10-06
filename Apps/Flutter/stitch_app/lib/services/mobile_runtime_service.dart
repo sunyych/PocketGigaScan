@@ -85,7 +85,7 @@ class MobileResourceBudget {
 class MobileRuntimeService {
   MobileRuntimeService({MethodChannel? channel})
     : _channel =
-          channel ?? const MethodChannel('com.lumia.stitch_app/runtime') {
+          channel ?? const MethodChannel('com.lumiaiq.pocketgigascan/runtime') {
     attachTimeoutHandler();
   }
 

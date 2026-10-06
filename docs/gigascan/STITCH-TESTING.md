@@ -15,6 +15,9 @@ Windows tests do not qualify an Android package or a physical camera.
 | Persisted task deletion without deleting photos | Repository tombstone/serial-write tests; native task deletion verification |
 | Viewer wheel/drag, visible tiles and collapsed status | Viewer widget/gesture/file-binding tests and current screenshot baselines |
 | English/Chinese system locale and storage compatibility | Localization and legacy-support-directory tests |
+| Completed presentation, pre-render formats and collapsed logs | Windows/Android policy widget tests in both locales, copy/retry regressions and reviewed screenshots |
+| Lossy JPEG XL color and exact alpha | Independent `djxl` decoding, alpha-weighted color error, textured lossy-pixel negative control |
+| Application ID and native channels | Platform channel tests, runner identity contracts and actual APK badging |
 | Build ownership, dependency pins and archive integrity | PowerShell builder contracts, actual nested ZIP positive/negative fixtures |
 | Android large-grid confirmation and unrestricted import | Approval scope/controller/widget tests; >1024 import and >128-axis native tests |
 | Android scoped files, background guard and resource budgets | Dart bridge/policy tests, Kotlin policies and connected-device integration |

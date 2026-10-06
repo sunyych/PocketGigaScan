@@ -1,13 +1,17 @@
 enum ExportFormat {
-  png('PNG', 'png'),
-  tiff('TIFF（大图自动 BigTIFF）', 'tif'),
-  jpegXl('JPEG XL（无损）', 'jxl');
+  png('PNG（无损）', 'png'),
+  tiff('TIFF（无损，大图自动 BigTIFF）', 'tif'),
+  jpegXl('JPEG XL（有损）', 'jxl');
 
   const ExportFormat(this.label, this.extension);
 
   final String label;
   final String extension;
-  String get shortLabel => name.toUpperCase();
+  String get shortLabel => switch (this) {
+    ExportFormat.png => 'PNG',
+    ExportFormat.tiff => 'TIFF',
+    ExportFormat.jpegXl => 'JPEG XL',
+  };
   bool get supportedOnMobile => true;
   bool get supportedOnAndroid => true;
 

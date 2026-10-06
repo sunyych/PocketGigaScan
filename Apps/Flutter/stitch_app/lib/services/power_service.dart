@@ -10,7 +10,8 @@ abstract interface class PowerGate {
 }
 
 class PlatformPowerGate implements PowerGate {
-  static const _channel = MethodChannel('com.lumia.stitch_app/power');
+  static const channelName = 'com.lumiaiq.pocketgigascan/power';
+  static const _channel = MethodChannel(channelName);
 
   @override
   Future<PowerState> readState() async {

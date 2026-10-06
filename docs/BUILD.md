@@ -26,6 +26,9 @@ prints the pinned versions and output paths without building.
 ## Android
 
 The Android application shares Flutter and the vendored native processing engine.
+Its package is `com.lumiaiq.pocketgigascan`; Android bridge channels use the same
+namespace. Windows uses that AppUserModelID; future iOS work reserves the same
+bundle ID. iOS packaging and build/runtime qualification remain future work.
 Install Android SDK platform 36, NDK 28.2.13676358, JDK 21, CMake/Ninja, Flutter
 3.44.2 and Rust 1.88.0 with `aarch64-linux-android`. Native minimum API is 29
 (Android 10). The current default APK selects ARM64; x86_64 is an explicit

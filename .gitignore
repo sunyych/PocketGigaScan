@@ -73,6 +73,7 @@ __pycache__/
 !/docs/gigascan/evidence/TEXTURE-GRID-REPAIR-2026-10-04.md
 !/docs/gigascan/evidence/DWARF-STANDALONE-2026-10-05.md
 !/docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md
+!/docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1

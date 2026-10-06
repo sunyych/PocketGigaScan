@@ -156,7 +156,7 @@ void main() {
     },
   );
 
-  test('JPEG XL is a distinct lossless extension and fingerprint persists', () {
+  test('JPEG XL extension, label, persistence name, and fingerprint persist', () {
     final task = fixture().copyWith(
       exportFormat: ExportFormat.jpegXl,
       exportPath: r'C:\exports\panorama.jxl',
@@ -171,6 +171,13 @@ void main() {
     expect(restored.exportFingerprint?.modifiedAtMicros, 4567);
     expect(ExportFormat.fromPath('PANORAMA.JXL'), ExportFormat.jpegXl);
     expect(ExportFormat.jpegXl.extension, 'jxl');
+    expect(ExportFormat.jpegXl.label, 'JPEG XL（有损）');
+    expect(ExportFormat.jpegXl.shortLabel, 'JPEG XL');
+    expect(ExportFormat.png.label, 'PNG（无损）');
+    expect(ExportFormat.tiff.label, 'TIFF（无损，大图自动 BigTIFF）');
+    expect(task.toJson()['exportFormat'], 'jpegXl');
+    expect(ExportFormat.fromSavedValue('jpegXl'), ExportFormat.jpegXl);
+    expect(ExportFormat.fromSavedValue('tiff'), ExportFormat.tiff);
     expect(ExportFormat.jpegXl.supportedOnMobile, isTrue);
     expect(ExportFormat.fromSavedValue('unexpected'), ExportFormat.png);
   });

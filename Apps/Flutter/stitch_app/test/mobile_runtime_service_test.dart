@@ -5,10 +5,33 @@ import 'package:stitch_app/services/mobile_runtime_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('test/mobile-runtime');
+  const productionChannel =
+      MethodChannel('com.lumiaiq.pocketgigascan/runtime');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
-  tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+  tearDown(() {
+    messenger.setMockMethodCallHandler(channel, null);
+    messenger.setMockMethodCallHandler(productionChannel, null);
+  });
+
+  test('default service uses the production runtime channel', () async {
+    messenger.setMockMethodCallHandler(productionChannel, (call) async {
+      expect(call.method, 'readResourceBudget');
+      return {
+        'totalMemoryMiB': 4096,
+        'availableMemoryMiB': 2048,
+        'cpuCount': 4,
+        'availableStorageMiB': 1024,
+        'thermalStatus': 'none',
+      };
+    });
+    final service = MobileRuntimeService();
+    addTearDown(service.dispose);
+
+    final budget = await service.readResourceBudget();
+    expect(budget.totalMemoryMiB, 4096);
+  });
 
   test('resource budget fields are mapped from the Android platform', () async {
     final service = MobileRuntimeService(channel: channel);

@@ -587,6 +587,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         item.state == BatchItemState.exporting;
     final progress = item.progress.clamp(0, 1).toDouble();
     return Card(
+      key: Key('batch-item-${item.id}'),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
@@ -656,7 +657,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                 ),
               ],
             ),
-            if (active || item.progress > 0) ...[
+            if (active ||
+                (item.state != BatchItemState.completed &&
+                    item.progress > 0)) ...[
               const SizedBox(height: 8),
               LinearProgressIndicator(value: progress.clamp(0, 1)),
               const SizedBox(height: 4),

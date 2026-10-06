@@ -18,6 +18,8 @@ void main() {
   Directory currentRoot() => Directory('${temporary.path}/current-support');
   Directory oldRoot() =>
       Directory('${temporary.path}/Roaming/com.lumia/Lumia Stitch');
+  Directory oldProductionRoot() =>
+      Directory('${temporary.path}/Roaming/com.lumia/PocketGigaScan');
 
   Map<String, String> environment() => {'APPDATA': '${temporary.path}/Roaming'};
 
@@ -104,6 +106,55 @@ void main() {
       expect(await currentRoot().exists(), isFalse);
     },
   );
+
+  test(
+    'preserves tasks from the previous com.lumia PocketGigaScan root',
+    () async {
+      final priorTasks = Directory(
+        '${oldProductionRoot().path}/LumiaStitch/tasks',
+      )..createSync(recursive: true);
+      final priorRecord = File('${priorTasks.path}/older-task/task.json')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{"task":"prior-production-root"}');
+      final currentTasks = Directory('${currentRoot().path}/LumiaStitch/tasks')
+        ..createSync(recursive: true);
+      final currentRecord = File('${currentTasks.path}/new-task/task.json')
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{"task":"new-root"}');
+
+      final selected = await legacyCompatibleSupportDirectory(
+        platformSupportRoot: currentRoot(),
+        dataFolder: 'tasks',
+        isWindows: true,
+        environment: environment(),
+      );
+
+      expect(p.equals(selected.path, priorTasks.path), isTrue);
+      expect(await priorRecord.readAsString(), '{"task":"prior-production-root"}');
+      expect(await currentRecord.readAsString(), '{"task":"new-root"}');
+    },
+  );
+
+  test('keeps the established legacy path priority when both legacy roots exist', () async {
+    final establishedTasks = Directory('${oldRoot().path}/LumiaStitch/tasks')
+      ..createSync(recursive: true);
+    final priorTasks = Directory(
+      '${oldProductionRoot().path}/LumiaStitch/tasks',
+    )..createSync(recursive: true);
+    File('${establishedTasks.path}/existing.json').writeAsStringSync('established');
+    File('${priorTasks.path}/previous.json').writeAsStringSync('previous');
+
+    final selected = await legacyCompatibleSupportDirectory(
+      platformSupportRoot: currentRoot(),
+      dataFolder: 'tasks',
+      isWindows: true,
+      environment: environment(),
+    );
+
+    expect(p.equals(selected.path, establishedTasks.path), isTrue);
+    expect(await File('${establishedTasks.path}/existing.json').readAsString(), 'established');
+    expect(await File('${priorTasks.path}/previous.json').readAsString(), 'previous');
+  });
 
   test('ignores the legacy Windows folder on other platforms', () async {
     final legacyTasks = Directory('${oldRoot().path}/LumiaStitch/tasks')

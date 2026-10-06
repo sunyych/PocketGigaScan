@@ -4,7 +4,7 @@ import 'package:flutter/services.dart';
 /// Folder selections are copied into app-private staging before returning.
 class MobileStorageService {
   const MobileStorageService({MethodChannel? channel})
-    : _channel = channel ?? const MethodChannel('com.lumia.stitch_app/storage');
+    : _channel = channel ?? const MethodChannel('com.lumiaiq.pocketgigascan/storage');
 
   final MethodChannel _channel;
 

@@ -1,4 +1,4 @@
-package com.lumia.stitch_app
+package com.lumiaiq.pocketgigascan
 
 import android.content.Context
 import android.net.Uri

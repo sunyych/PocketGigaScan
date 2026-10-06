@@ -235,14 +235,22 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
-      await tester.ensureVisible(find.byKey(const Key('export-format-card')));
-      await tester.pump(const Duration(milliseconds: 350));
-      await tester.pump();
-      expect(find.byKey(const Key('export-format-card')), findsOneWidget);
-      final format = tester.widget<DropdownButtonFormField<ExportFormat>>(
-        find.byKey(const Key('export-format-option')),
-      );
-      expect(format.initialValue, task.exportFormat);
+      DropdownButtonFormField<ExportFormat>? format;
+      if (paused) {
+        expect(find.byKey(const Key('export-format-card')), findsNothing);
+        expect(find.byKey(const Key('export-format-option')), findsNothing);
+      } else {
+        await tester.ensureVisible(find.byKey(const Key('export-format-card')));
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.pump();
+        expect(find.byKey(const Key('export-format-card')), findsOneWidget);
+        final selectedFormat = tester
+            .widget<DropdownButtonFormField<ExportFormat>>(
+              find.byKey(const Key('export-format-option')),
+            );
+        format = selectedFormat;
+        expect(selectedFormat.initialValue, task.exportFormat);
+      }
 
       await tester.ensureVisible(
         find.byKey(const Key('stitch-quality-expansion')),
@@ -264,10 +272,11 @@ void main() {
       expect(neighbors.value, task.refineGridNeighbors);
       expect(deghost.value, task.seamBlendMode == SeamBlendMode.deghost);
       expect(localTextureWarp.value, task.localTextureWarp);
-      expect(format.onChanged == null, paused);
+      if (!paused) {
+        expect(format!.onChanged, isNotNull);
+      }
       expect(neighbors.onChanged == null, paused);
       expect(deghost.onChanged == null, paused);
-      expect(format.onChanged != null, !paused);
       expect(neighbors.onChanged != null, !paused);
       expect(deghost.onChanged != null, !paused);
       expect(localTextureWarp.onChanged == null, paused);

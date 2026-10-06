@@ -1,4 +1,4 @@
-//! Lossless JPEG XL export using libjxl's chunked-frame API.
+//! High-quality lossy JPEG XL export using libjxl's chunked-frame API.
 //!
 //! Pixels are assembled one row at a time to a private raw RGBA spool on disk.
 //! The C++ bridge serves bounded 2064x2064 chunks from that 64-bit-offset spool
@@ -298,9 +298,12 @@ pub(crate) fn export_level0_jxl(
         "totalOccupiedTileBytes": grid.total_tile_bytes,
         "sourceDecodeMs": assembly.source_decode_ms,
         "exportFormat": "jxl",
-        "compression": "lossless",
+        "compression": "lossy",
+        "jxlDistance": 1.0,
+        "jxlQuality": 90,
+        "jxlAlphaDistance": 0.0,
         "sampleFormat": "RGBA8",
-        "alpha": "preserved-including-invisible-rgb",
+        "alpha": "lossless-alpha",
         "jxlEncoder": "libjxl-c-api-0.12.0",
         "jxlEncoderSource": "statically-linked-chunked-frame",
         "jxlEncoderThreads": encoder_threads.max(1),
@@ -328,6 +331,83 @@ mod tests {
     use super::*;
     use image::{Rgba, RgbaImage};
     use serde_json::json;
+
+    #[cfg(lumia_jxl)]
+    fn assert_lossy_rgb_quality(
+        expected: &RgbaImage,
+        actual: &RgbaImage,
+        mean_limit: f64,
+        require_opaque_rgb_delta: bool,
+    ) {
+        assert_eq!(actual.dimensions(), expected.dimensions());
+        let mut weighted_error_sum = 0u64;
+        let mut alpha_weight_sum = 0u64;
+        let mut opaque_error_sum = 0u64;
+        let mut opaque_channel_count = 0u64;
+        let mut opaque_pixels = 0u64;
+        let mut opaque_changed_pixels = 0u64;
+        for (expected, actual) in expected.pixels().zip(actual.pixels()) {
+            assert_eq!(actual[3], expected[3], "alpha must remain lossless");
+            let alpha_weight = u64::from(expected[3]);
+            let is_opaque = expected[3] == 255;
+            let mut opaque_pixel_changed = false;
+            if is_opaque {
+                opaque_pixels += 1;
+            }
+            for channel in 0..3 {
+                let error = u64::from(expected[channel].abs_diff(actual[channel]));
+                weighted_error_sum += error * alpha_weight;
+                alpha_weight_sum += alpha_weight;
+                if is_opaque {
+                    opaque_error_sum += error;
+                    opaque_channel_count += 1;
+                    opaque_pixel_changed |= error != 0;
+                }
+            }
+            if opaque_pixel_changed {
+                opaque_changed_pixels += 1;
+            }
+        }
+        assert!(alpha_weight_sum > 0, "fixture must contain visible pixels");
+        let mean_error = weighted_error_sum as f64 / alpha_weight_sum as f64;
+        assert!(
+            mean_error <= mean_limit,
+            "alpha-weighted RGB mean absolute error {mean_error:.3} exceeds {mean_limit}"
+        );
+        if require_opaque_rgb_delta {
+            let opaque_mean_error = opaque_error_sum as f64 / opaque_channel_count as f64;
+            assert!(
+                opaque_mean_error > 0.0,
+                "distance 1.0 must alter opaque RGB samples"
+            );
+            assert!(
+                opaque_changed_pixels * 100 >= opaque_pixels,
+                "lossy RGB changes affected fewer than 1% of opaque textured pixels"
+            );
+        }
+    }
+
+    #[cfg(lumia_jxl)]
+    fn independent_djxl() -> Option<std::ffi::OsString> {
+        std::env::var_os("LUMIA_DJXL_PATH").or_else(|| {
+            let candidate = if cfg!(windows) { "djxl.exe" } else { "djxl" };
+            std::env::split_paths(&std::env::var_os("PATH")?).find_map(|dir| {
+                let path = dir.join(candidate);
+                path.is_file().then(|| path.into_os_string())
+            })
+        })
+    }
+
+    #[cfg(lumia_jxl)]
+    fn decode_with_djxl(djxl: &std::ffi::OsStr, encoded: &Path, decoded: &Path) -> RgbaImage {
+        let status = std::process::Command::new(djxl)
+            .arg(encoded)
+            .arg(decoded)
+            .status()
+            .expect("could not launch independent djxl decoder");
+        assert!(status.success(), "independent djxl decode failed");
+        image::open(decoded).unwrap().into_rgba8()
+    }
 
     #[cfg(all(lumia_jxl, lumia_jxl_test_helpers))]
     unsafe extern "C" {
@@ -530,6 +610,11 @@ mod tests {
             "encoding runner must be checkpointed"
         );
         assert_eq!(stats["exportFormat"], "jxl");
+        assert_eq!(stats["compression"], "lossy");
+        assert_eq!(stats["jxlDistance"], 1.0);
+        assert_eq!(stats["jxlQuality"], 90);
+        assert_eq!(stats["jxlAlphaDistance"], 0.0);
+        assert_eq!(stats["alpha"], "lossless-alpha");
         assert_eq!(stats["sampleFormat"], "RGBA8");
         assert_eq!(stats["jxlEncoderThreads"], 1);
         assert!(stats["jxlChunkBytesPeakObserved"].as_u64().unwrap() > 0);
@@ -544,22 +629,13 @@ mod tests {
             header,
             [0, 0, 0, 12, b'J', b'X', b'L', b' ', 13, 10, 135, 10]
         );
-        if let Some(djxl) = std::env::var_os("LUMIA_DJXL_PATH") {
+        if let Some(djxl) = independent_djxl() {
             let decoded = output_dir.join("independent-decode.png");
-            let status = std::process::Command::new(djxl)
-                .arg(&destination)
-                .arg(&decoded)
-                .status()
-                .unwrap();
-            assert!(status.success());
             let expected = image::open(root.join("level-0/0-0.png"))
                 .unwrap()
                 .into_rgba8();
-            let actual = image::open(decoded).unwrap().into_rgba8();
-            assert_eq!(
-                actual, expected,
-                "JXL roundtrip must preserve every RGBA sample"
-            );
+            let actual = decode_with_djxl(&djxl, &destination, &decoded);
+            assert_lossy_rgb_quality(&expected, &actual, 8.0, false);
         }
         assert!(fs::read_dir(&output_dir).unwrap().all(|entry| !entry
             .unwrap()
@@ -644,20 +720,62 @@ mod tests {
         assert_eq!(stats["width"], width);
         assert_eq!(stats["height"], height);
         assert!(stats["jxlChunkBytesPeakObserved"].as_u64().unwrap() <= MAX_JXL_ACTIVE_CHUNK_BYTES);
-        if let Some(djxl) = std::env::var_os("LUMIA_DJXL_PATH") {
+        if let Some(djxl) = independent_djxl() {
             let decoded = root.join("decoded.png");
-            let status = std::process::Command::new(djxl)
-                .arg(&destination)
-                .arg(&decoded)
-                .status()
-                .unwrap();
-            assert!(status.success());
-            assert_eq!(
-                image::open(decoded).unwrap().into_rgba8(),
-                image::open(expected_path).unwrap().into_rgba8(),
-                "chunk callbacks must preserve exact samples across 2048/2056 padding and tile edges"
-            );
+            let expected = image::open(expected_path).unwrap().into_rgba8();
+            let actual = decode_with_djxl(&djxl, &destination, &decoded);
+            assert_lossy_rgb_quality(&expected, &actual, 8.0, false);
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(lumia_jxl)]
+    #[test]
+    fn textured_jxl_export_is_lossy_with_sane_rgb_error_and_exact_alpha() {
+        let Some(djxl) = independent_djxl() else {
+            eprintln!("skipping decoded JPEG XL quality assertion: set LUMIA_DJXL_PATH to the independent djxl executable");
+            return;
+        };
+        let (root, manifest) = fixture("textured", 256, 256);
+        let mut expected = RgbaImage::new(256, 256);
+        for y in 0..256u32 {
+            for x in 0..256u32 {
+                let texture = ((x.wrapping_mul(73) ^ y.wrapping_mul(151) ^ (x * y).rotate_left(3))
+                    & 31) as u8;
+                expected.put_pixel(
+                    x,
+                    y,
+                    Rgba([
+                        ((x * 3 + y / 2) as u8).wrapping_add(texture),
+                        ((y * 2 + x / 3) as u8).wrapping_add(texture / 2),
+                        ((x + y * 2) as u8).wrapping_sub(texture / 3),
+                        match (x + y) % 5 {
+                            0 => 0,
+                            1 => 96,
+                            2 => 160,
+                            _ => 255,
+                        },
+                    ]),
+                );
+            }
+        }
+        expected.save(root.join("level-0/0-0.png")).unwrap();
+        let destination = root.join("textured.jxl");
+        let stats = export_level0_jxl(
+            &root,
+            &manifest,
+            &destination,
+            128,
+            1,
+            &mut |_, _| Ok(()),
+            &mut |_, _| Ok(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(stats["compression"], "lossy");
+        assert_eq!(stats["jxlDistance"], 1.0);
+        let actual = decode_with_djxl(&djxl, &destination, &root.join("textured-decoded.png"));
+        assert_lossy_rgb_quality(&expected, &actual, 8.0, true);
         fs::remove_dir_all(root).unwrap();
     }
 
