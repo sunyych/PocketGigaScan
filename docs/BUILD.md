@@ -23,6 +23,40 @@ pwsh -File scripts/build-dwarf-stitch-windows.ps1 `
 The builder verifies dependency versions/checksums. Its `-PlanOnly` option
 prints the pinned versions and output paths without building.
 
-## Future Android
+## Android
 
-The Flutter Android runner and portable native processing API are retained for a future independent Android stitcher. Current Windows pipeline does not build, publish or qualify Android packages. Retired OpenPocketCine Android/DJI shells are not part of this source tree.
+The Android application shares Flutter and the vendored native processing engine.
+Install Android SDK platform 36, NDK 28.2.13676358, JDK 21, CMake/Ninja, Flutter
+3.44.2 and Rust 1.88.0 with `aarch64-linux-android`. Native minimum API is 29
+(Android 10). The current default APK selects ARM64; x86_64 is an explicit
+optional build target. Retired camera/DJI shells are not used.
+
+```powershell
+rustup target add aarch64-linux-android
+pwsh -File scripts/test-build-stitch-android-core.Tests.ps1
+pwsh -File scripts/build-stitch-android-core.ps1 -AndroidSdkRoot D:/Android/Sdk
+cd Apps/Flutter/stitch_app
+flutter pub get --enforce-lockfile
+flutter analyze
+flutter test --reporter expanded
+flutter build apk --release --target-platform android-arm64
+```
+
+Set `JAVA_HOME` to the installed JDK and `ANDROID_HOME` to the SDK before
+building. The builder downloads the SHA-256-pinned official OpenCV Android SDK
+and libjxl source archives, builds JPEG XL and the source engine, rejects unresolved native dependencies,
+checks both core/runtime ELF architecture and 16 KiB LOAD alignment, and stages
+required notices and hashed provenance. Gradle refuses missing ABI libraries or
+incomplete license assets. Output is
+`Apps/Flutter/stitch_app/build/app/outputs/flutter-apk/app-release.apk`.
+The local release currently uses a development signing key; it is not a Play
+Store release or a guarantee of compatibility with an APK signed elsewhere.
+
+`-BuildTests` additionally builds a native ARM64 test executable outside APK
+assets. `-JxlOnly` builds dependencies only. `just check`, `just android-core`,
+`just android-build` and `just android-check` provide current product recipes
+when `just` is installed. The Windows publishing workflow does not publish or
+physically qualify Android packages.
+
+See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
+[current qualification](gigascan/evidence/ANDROID-STITCH-2026-10-05.md).

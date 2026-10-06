@@ -336,10 +336,12 @@ fn sources(req: &Value) -> Result<Vec<PathBuf>, String> {
     let tiles = req["tiles"]
         .as_array()
         .ok_or("request.tiles must be an array")?;
-    if tiles.is_empty() || tiles.len() > 1024 {
-        return Err("request.tiles must contain 1..=1024 sources".into());
+    if tiles.is_empty() {
+        return Err("request.tiles must contain at least one source".into());
     }
-    let mut out = Vec::with_capacity(tiles.len());
+    let mut out = Vec::new();
+    out.try_reserve_exact(tiles.len())
+        .map_err(|_| format!("could not allocate paths for {} sources", tiles.len()))?;
     for t in tiles {
         let p = t["path"]
             .as_str()
@@ -370,13 +372,14 @@ fn disjoint(root: &Path, src: &[PathBuf]) -> Result<(), String> {
 fn validate_request_shape(r: &Value) -> Result<(), String> {
     let rows = r["rows"].as_u64().ok_or("rows must be an integer")?;
     let cols = r["columns"].as_u64().ok_or("columns must be an integer")?;
-    if rows == 0 || cols == 0 || rows > 128 || cols > 128 || rows * cols > 1024 {
-        return Err(
-            "rows and columns must describe at most 1024 tiles with each axis <=128".into(),
-        );
+    if rows == 0 || cols == 0 {
+        return Err("rows and columns must be positive".into());
     }
     let tiles = r["tiles"].as_array().ok_or("tiles must be an array")?;
-    if tiles.len() as u64 != rows * cols {
+    let cell_count = rows
+        .checked_mul(cols)
+        .ok_or("rows*columns overflows supported dimensions")?;
+    if u64::try_from(tiles.len()).ok() != Some(cell_count) {
         return Err("tile count must match rows*columns".into());
     }
     let w = r["sourceWidth"]
@@ -1479,6 +1482,36 @@ mod tests {
     use super::*;
     use std::sync::MutexGuard;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn grid_shape_request(rows: u64, columns: u64) -> Value {
+        let tiles = if let Some(count) = rows
+            .checked_mul(columns)
+            .and_then(|n| usize::try_from(n).ok())
+        {
+            (0..count).map(|index| json!({"row": index / columns as usize, "column": index % columns as usize})).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        json!({
+            "rows": rows, "columns": columns, "tiles": tiles,
+            "sourceWidth": 100, "sourceHeight": 80,
+            "fx": 75.0, "fy": 75.0, "cx": 49.5, "cy": 39.5
+        })
+    }
+
+    #[test]
+    fn job_shape_accepts_more_than_1024_tiles_and_rejects_dimension_overflow() {
+        assert!(validate_request_shape(&grid_shape_request(33, 33)).is_ok());
+        assert!(validate_request_shape(&grid_shape_request(129, 2)).is_ok());
+        let overflow = json!({
+            "rows": u64::MAX, "columns": 2, "tiles": [],
+            "sourceWidth": 100, "sourceHeight": 80,
+            "fx": 75.0, "fy": 75.0, "cx": 49.5, "cy": 39.5
+        });
+        assert!(validate_request_shape(&overflow)
+            .unwrap_err()
+            .contains("overflow"));
+    }
 
     #[test]
     fn export_format_is_inferred_from_supported_destination_extensions() {

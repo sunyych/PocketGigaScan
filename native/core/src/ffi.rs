@@ -453,12 +453,18 @@ fn run_request(
     if !(1..=32).contains(&request.blend_power) {
         return response_error("INVALID_ARGUMENT", "blendPower must be between 1 and 32");
     }
-    if request.tiles.len() != request.rows.saturating_mul(request.columns) {
+    let Some(expected_tiles) = request.rows.checked_mul(request.columns) else {
+        return response_error(
+            "INVALID_GRID",
+            "rows*columns overflows supported dimensions",
+        );
+    };
+    if request.tiles.len() != expected_tiles {
         return response_error(
             "INVALID_GRID",
             format!(
                 "expected {} tiles, got {}",
-                request.rows.saturating_mul(request.columns),
+                expected_tiles,
                 request.tiles.len()
             ),
         );

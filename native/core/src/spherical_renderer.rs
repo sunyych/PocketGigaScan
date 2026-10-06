@@ -366,9 +366,9 @@ fn dimensions(layout: &Value) -> crate::Result<(u32, u32, [f64; 4], Vec<Source>,
     let tiles = layout["tiles"]
         .as_array()
         .ok_or_else(|| crate::Error::Invalid("layout has no tiles".into()))?;
-    if tiles.is_empty() || tiles.len() > 1024 {
+    if tiles.is_empty() {
         return Err(crate::Error::Invalid(
-            "layout tile count must be 1..=1024".into(),
+            "layout must contain at least one tile".into(),
         ));
     }
     let mut sources = Vec::with_capacity(tiles.len());

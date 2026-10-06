@@ -53,7 +53,6 @@ class PhotoImporter {
     String taskDirectory,
   ) async {
     if (selected.isEmpty) throw const ImportFailure('没有选中照片');
-    if (selected.length > 1024) throw const ImportFailure('一次最多导入 1024 张原片');
     final inputDirectory = Directory(p.join(taskDirectory, 'input'));
     await Directory(taskDirectory).create(recursive: true);
     final lockFile = File(p.join(taskDirectory, '.input-import.lock'));

@@ -41,3 +41,34 @@ already-started native jobs. Gated persistence and gated task-load regressions
 cover both boundaries. Test teardown waits for completion instead of a fixed
 sleep; state polling uses a bounded monotonic deadline. Current rerun and hosted
 publication evidence is recorded in the linked qualification report.
+
+## PG-049 Android shared processing
+
+- Luna native coder: unrestricted structural grid validation, sparse normal
+  matrices with true-residual acceptance, portable JPEG XL paths, pinned Android
+  core builder, ABI/alignment/provenance and license staging.
+- Luna platform coder: streamed SAF storage, app-owned export sharing,
+  foreground-service acknowledgments/timeouts, resource readings and policies,
+  launcher branding and fail-closed Gradle packaging checks.
+- Luna shared UI coder: scoped large-grid confirmation, task/queue parity,
+  resource admission, touch viewer, localization and automated regression and
+  connected-device integration harness.
+- Coordinator: serial SDK execution, real fixture copies with source hashes,
+  independent code/screenshot review, numerical and Windows regressions,
+  Android packaging inspection and device qualification.
+
+Native Windows regression passes 161 tests (two real-data tests ignored).
+ARM64 production core and a separate native test executable build successfully;
+the test executable is excluded from the APK. Gradle validates native hashes,
+ABI metadata and the complete license inventory; an altered core hash was
+independently rejected and the original manifest restored. Phone disconnection
+currently prevents physical qualification. Current application/package results
+and remaining boundaries are recorded in [Android evidence](evidence/ANDROID-STITCH-2026-10-05.md).
+
+Final shared-app analysis is clean and the normal complete Flutter suite passes
+159 tests, including existing desktop screenshot baselines. The normal Gradle
+JVM/lint gate passes 5 tests with zero lint errors (9 warnings). Review repairs
+covered scoped input-copy recovery, export-pending scheduling, timeout-to-export
+races and persisted acknowledgement failure before standalone resume. The
+coordinator records APK inspection independently from these host tests; PG-049
+is not physically complete while ADB reports no connected phone.

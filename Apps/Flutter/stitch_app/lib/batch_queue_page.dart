@@ -8,6 +8,9 @@ import 'models/batch_queue.dart';
 import 'models/stitch_quality.dart';
 import 'services/batch_queue_controller.dart';
 import 'services/native_job_api.dart';
+import 'services/mobile_storage_service.dart';
+import 'services/mobile_runtime_service.dart';
+import 'services/power_service.dart';
 import 'models/stitch_task.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'l10n/localized_text.dart';
@@ -19,10 +22,18 @@ class BatchQueuePage extends StatefulWidget {
     required this.api,
     this.controller,
     this.mobileOverride,
+    this.androidOverride,
+    this.mobileStorageService,
+    this.runtimeService,
+    this.resourceBudget,
   });
   final JobApi api;
   final BatchQueueController? controller;
   final bool? mobileOverride;
+  final bool? androidOverride;
+  final MobileStorageService? mobileStorageService;
+  final MobileRuntimeService? runtimeService;
+  final MobileResourceBudget? resourceBudget;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -34,6 +45,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       widget.controller ?? BatchQueueController(api: widget.api);
   bool _busy = false;
   bool _jxlAvailable = false;
+  late final MobileStorageService _storage =
+      widget.mobileStorageService ?? const MobileStorageService();
+  bool get _android => widget.androidOverride ?? Platform.isAndroid;
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
 
@@ -41,10 +55,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   void initState() {
     super.initState();
     _controller.addListener(_changed);
-    if (!_mobile) {
-      if (_ownsController) _controller.initialize();
-      _refreshFormatCapabilities();
-    }
+    _controller.requireLargeJobApproval = _android;
+    if (_ownsController) _controller.initialize();
+    _refreshFormatCapabilities();
   }
 
   Future<void> _refreshFormatCapabilities() async {
@@ -71,32 +84,64 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   }
 
   Future<void> _selectParent() async {
-    if (_busy || _mobile) return;
-    final path = await FilePicker.platform.getDirectoryPath(
-      dialogTitle: '选择包含多个全景子目录的母目录',
-    );
-    if (path == null || !mounted) return;
+    if (_busy || (_mobile && !_android)) return;
+    final path = _android
+        ? await _storage.pickBatchParent()
+        : await FilePicker.platform.getDirectoryPath(
+            dialogTitle: '选择包含多个全景子目录的母目录',
+          );
+    if (path == null) return;
+    if (!mounted) {
+      if (_android) await _storage.releaseBatchParent(path);
+      return;
+    }
+    var selectedFormat = ExportFormat.tiff;
     final format = await showDialog<ExportFormat>(
       context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('批量整图格式'),
-        children: ExportFormat.values
-            .map(
-              (format) => SimpleDialogOption(
-                onPressed: format == ExportFormat.jpegXl && !_jxlAvailable
-                    ? null
-                    : () => Navigator.pop(context, format),
-                child: Text(
-                  format == ExportFormat.jpegXl && !_jxlAvailable
-                      ? 'JPEG XL（需随程序加载 libjxl）'
-                      : format.label,
-                ),
-              ),
-            )
-            .toList(),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('批量整图格式'),
+          content: RadioGroup<ExportFormat>(
+            groupValue: selectedFormat,
+            onChanged: (value) {
+              if (value != null &&
+                  (value != ExportFormat.jpegXl || _jxlAvailable)) {
+                setDialogState(() => selectedFormat = value);
+              }
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final candidate in ExportFormat.values)
+                  RadioListTile<ExportFormat>(
+                    value: candidate,
+                    enabled: candidate != ExportFormat.jpegXl || _jxlAvailable,
+                    title: Text(
+                      candidate == ExportFormat.jpegXl && !_jxlAvailable
+                          ? 'JPEG XL（需随程序加载 libjxl）'
+                          : candidate.label,
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, selectedFormat),
+              child: const Text('继续'),
+            ),
+          ],
+        ),
       ),
     );
-    if (format == null || !mounted) return;
+    if (format == null || !mounted) {
+      if (_android) await _storage.releaseBatchParent(path);
+      return;
+    }
     setState(() => _busy = true);
     try {
       await _controller.addParent(path, outputFormat: format);
@@ -191,18 +236,29 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
 
   Future<void> _resourceSettings() async {
     try {
+      var budget = widget.resourceBudget;
+      if (_android && widget.runtimeService != null) {
+        try {
+          budget = await widget.runtimeService!.readResourceBudget();
+        } on Object {
+          // Use the last valid reading and the native configured values.
+        }
+      }
       final response = await widget.api.capabilities();
       final caps =
           response['capabilities'] as Map<String, Object?>? ?? const {};
       if (!mounted) return;
       final cpu = TextEditingController(
-        text: '${caps['totalCpuWorkers'] ?? 1}',
+        text:
+            '${budget?.recommendedTotalCpuWorkers ?? caps['totalCpuWorkers'] ?? 1}',
       );
       final memory = TextEditingController(
-        text: '${caps['totalMemoryBudgetMiB'] ?? 1024}',
+        text:
+            '${budget?.recommendedTotalMemoryBudgetMiB ?? caps['totalMemoryBudgetMiB'] ?? (_android ? 128 : 1024)}',
       );
       final jobs = TextEditingController(
-        text: '${caps['maxConcurrentJobs'] ?? 2}',
+        text:
+            '${budget?.recommendedMaxConcurrentJobs ?? caps['maxConcurrentJobs'] ?? (_android ? 1 : 2)}',
       );
       final values = await showDialog<(int, int, int)>(
         context: context,
@@ -259,11 +315,25 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       memory.dispose();
       jobs.dispose();
       if (values == null) return;
+      final safeValues = budget == null
+          ? values
+          : (
+              values.$1.clamp(1, budget.recommendedTotalCpuWorkers).toInt(),
+              values.$2
+                  .clamp(128, budget.recommendedTotalMemoryBudgetMiB)
+                  .toInt(),
+              values.$3.clamp(1, budget.recommendedMaxConcurrentJobs).toInt(),
+            );
       await widget.api.configureResources(
-        totalCpuWorkers: values.$1,
-        totalMemoryBudgetMiB: values.$2,
-        maxConcurrentJobs: values.$3,
+        totalCpuWorkers: safeValues.$1,
+        totalMemoryBudgetMiB: safeValues.$2,
+        maxConcurrentJobs: safeValues.$3,
       );
+      if (safeValues != values && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已按设备当前资源限制并发参数。')));
+      }
       await _controller.tick();
     } on Object catch (error) {
       if (mounted) {
@@ -340,9 +410,48 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           expectedExportFingerprint: task.exportFingerprint,
           legacyTaskAssociationPresent: true,
           legacyTaskBindingVerified: nativeVerified,
+          mobileStorageService: _android ? _storage : null,
+          exportMimeType: switch (task.exportFormat) {
+            ExportFormat.png => 'image/png',
+            ExportFormat.tiff => 'image/tiff',
+            ExportFormat.jpegXl => 'image/jxl',
+          },
         ),
       ),
     );
+  }
+
+  Future<void> _confirmBatchJob(BatchQueue queue, BatchQueueItem item) async {
+    final task = await _controller.taskForItem(item);
+    if (!mounted || task == null || !task.needsLargeJobConfirmation) return;
+    final power = await PlatformPowerGate().readState();
+    if (!mounted) return;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(StitchLocalizations.of(context).text('确认大型任务')),
+        content: Text(
+          StitchLocalizations.of(context).largeJobConfirmation(
+            rows: task.grid.rows,
+            columns: task.grid.columns,
+            photoCount: task.photos.length,
+            onBattery: power != PowerState.externalPower && _android,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(StitchLocalizations.of(context).text('批准并开始')),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    await _controller.approveLargeJob(queue.id, item.id);
   }
 
   @override
@@ -352,17 +461,17 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       actions: [
         IconButton(
           tooltip: StitchLocalizations.of(context).text('批处理资源设置'),
-          onPressed: _mobile ? null : _resourceSettings,
+          onPressed: _resourceSettings,
           icon: const Icon(Icons.tune),
         ),
         IconButton(
           tooltip: StitchLocalizations.of(context).text('选择母目录'),
-          onPressed: _mobile || _busy ? null : _selectParent,
+          onPressed: (_mobile && !_android) || _busy ? null : _selectParent,
           icon: const Icon(Icons.create_new_folder_outlined),
         ),
       ],
     ),
-    body: _mobile
+    body: _mobile && !_android
         ? const Center(
             child: Padding(
               padding: EdgeInsets.all(24),
@@ -395,6 +504,8 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                         const Icon(Icons.queue, size: 44),
                         const SizedBox(height: 12),
                         const Text('选择一个母目录；每个直接子目录会成为独立全景任务。'),
+                        if (_android)
+                          const Text('Android 将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
                         const SizedBox(height: 12),
                         FilledButton.icon(
                           onPressed: _busy ? null : _selectParent,
@@ -507,6 +618,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                     onPressed: () => _settings(queue, item),
                     icon: const Icon(Icons.tune),
                   )
+                else if (item.state == BatchItemState.needsApproval)
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('确认大型任务'),
+                    onPressed: () => _confirmBatchJob(queue, item),
+                    icon: const Icon(Icons.warning_amber_outlined),
+                  )
                 else if (active || item.state == BatchItemState.ready) ...[
                   IconButton(
                     tooltip: StitchLocalizations.of(context).text('暂停任务'),
@@ -565,10 +682,11 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         switch (item.state) {
           BatchItemState.pending => '等待资源',
           BatchItemState.needsSettings => '需要处理设置',
+          BatchItemState.needsApproval => '等待大型任务确认',
           BatchItemState.skipped => '已跳过',
           BatchItemState.ready => '等待开始',
           BatchItemState.running => '合成中',
-          BatchItemState.exporting => '导出整图 PNG',
+          BatchItemState.exporting => '导出整图',
           BatchItemState.paused => '已暂停',
           BatchItemState.cancelled => '已取消',
           BatchItemState.failed => '需要处理',
@@ -592,6 +710,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     BatchItemState.paused ||
     BatchItemState.cancelled => Icons.pause_circle_outline,
     BatchItemState.needsSettings => Icons.tune,
+    BatchItemState.needsApproval => Icons.warning_amber_outlined,
     _ => Icons.schedule,
   };
 
@@ -599,6 +718,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     BatchItemState.completed => Colors.green,
     BatchItemState.failed ||
     BatchItemState.needsSettings => Theme.of(context).colorScheme.error,
+    BatchItemState.needsApproval => Theme.of(context).colorScheme.tertiary,
     BatchItemState.skipped => Theme.of(context).disabledColor,
     _ => null,
   };

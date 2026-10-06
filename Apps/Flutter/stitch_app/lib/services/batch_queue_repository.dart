@@ -94,6 +94,21 @@ class BatchQueueRepository {
           !RegExp(r'^[0-9]+-[a-f0-9]+$').hasMatch(item.taskId!)) {
         return false;
       }
+      final durableInput = item.durableInputDirectory;
+      if (durableInput != null &&
+          (item.taskId == null ||
+              durableInput.trim().isEmpty ||
+              !p.isAbsolute(durableInput) ||
+              p.equals(
+                p.normalize(durableInput),
+                p.normalize(queue.parentDirectory),
+              ) ||
+              p.isWithin(
+                p.normalize(queue.parentDirectory),
+                p.normalize(durableInput),
+              ))) {
+        return false;
+      }
     }
     return true;
   }

@@ -20,6 +20,8 @@ import 'services/native_job_api.dart';
 import 'services/batch_queue_controller.dart';
 import 'services/photo_importer.dart';
 import 'services/power_service.dart';
+import 'services/mobile_storage_service.dart';
+import 'services/mobile_runtime_service.dart';
 import 'services/spherical_request.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
@@ -72,6 +74,9 @@ class StitchHomePage extends StatefulWidget {
     this.initialTask,
     this.initialManifest,
     this.mobileOverride,
+    this.androidOverride,
+    this.mobileStorageService,
+    this.mobileRuntimeService,
   });
   final JobApi? jobApi;
   final PowerGate? powerGate;
@@ -81,6 +86,9 @@ class StitchHomePage extends StatefulWidget {
   final StitchTask? initialTask;
   final Map<String, Object?>? initialManifest;
   final bool? mobileOverride;
+  final bool? androidOverride;
+  final MobileStorageService? mobileStorageService;
+  final MobileRuntimeService? mobileRuntimeService;
   @override
   State<StitchHomePage> createState() => _StitchHomePageState();
 }
@@ -88,11 +96,23 @@ class StitchHomePage extends StatefulWidget {
 class _StitchHomePageState extends State<StitchHomePage>
     with WidgetsBindingObserver {
   late final _repository = widget.repository ?? TaskRepository();
+  late final bool _android = widget.androidOverride ?? Platform.isAndroid;
+  late final MobileStorageService _storage =
+      widget.mobileStorageService ?? const MobileStorageService();
+  late final MobileRuntimeService? _runtime = _android
+      ? widget.mobileRuntimeService ?? MobileRuntimeService()
+      : null;
   final _importer = PhotoImporter();
   late final JobApi _api = widget.jobApi ?? NativeJobApi();
-  late final BatchQueueController? _batchController = _mobile
+  late final BatchQueueController? _batchController = (_mobile && !_android)
       ? null
-      : widget.batchQueueController ?? BatchQueueController(api: _api);
+      : widget.batchQueueController ??
+            BatchQueueController(
+              api: _api,
+              requireLargeJobApproval: _android,
+              runtimeService: _runtime,
+              storageService: _android ? _storage : null,
+            );
   late final PowerGate _power = widget.powerGate ?? PlatformPowerGate();
   late final ForegroundWorkLock _lock =
       widget.foregroundWorkLock ?? PlatformForegroundWorkLock();
@@ -141,6 +161,19 @@ class _StitchHomePageState extends State<StitchHomePage>
   double _viewerScale = 1;
   bool _jpegXlAvailable = false;
   final TransformationController _tileTransform = TransformationController();
+  StreamSubscription<List<String>>? _runtimeTimeoutSubscription;
+  final Set<String> _runtimeGuardedJobs = {};
+  final Set<String> _runtimeGuardUnavailableJobs = {};
+  final Set<String> _pendingRuntimeTimeoutJobIds = {};
+  final Set<String> _confirmedRuntimeTimeoutJobIds = {};
+  final Set<String> _failedRuntimeTimeoutAckJobIds = {};
+  final Set<String> _runtimeTimeoutJobIdsReceivedWhileProcessing = {};
+  Future<bool>? _runtimeTimeoutAckInFlight;
+  bool _processingRuntimeTimeouts = false;
+  bool _androidTimeoutSnapshotReady = false;
+  bool _batchControllerInitialized = false;
+  late final Future<bool> _androidResourcesReady = _configureAndroidResources();
+  MobileResourceBudget? _resourceBudget;
 
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
@@ -176,6 +209,90 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   void _onBatchQueueChanged() {
     if (mounted) setState(() {});
+    unawaited(_acknowledgeConfirmedQueueTimeouts());
+  }
+
+  Future<void> _acknowledgeConfirmedQueueTimeouts() async {
+    final controller = _batchController;
+    final runtime = _runtime;
+    if (!_android ||
+        !_androidTimeoutSnapshotReady ||
+        controller == null ||
+        runtime == null) {
+      return;
+    }
+    final confirmed = _pendingRuntimeTimeoutJobIds
+        .where((id) => !controller.pendingRuntimePauseJobIds.contains(id))
+        .toList(growable: false);
+    if (confirmed.isEmpty) return;
+    _confirmedRuntimeTimeoutJobIds.addAll(confirmed);
+    await _acknowledgeConfirmedRuntimeTimeouts();
+  }
+
+  Future<bool> _acknowledgeConfirmedRuntimeTimeouts({
+    bool retryFailed = false,
+  }) async {
+    final runtime = _runtime;
+    if (runtime == null) return false;
+    final inFlight = _runtimeTimeoutAckInFlight;
+    if (inFlight != null) {
+      if (!await inFlight) return false;
+      if (_confirmedRuntimeTimeoutJobIds.isEmpty &&
+          _failedRuntimeTimeoutAckJobIds.isEmpty) {
+        return true;
+      }
+      return _acknowledgeConfirmedRuntimeTimeouts(retryFailed: retryFailed);
+    }
+
+    final candidates = _confirmedRuntimeTimeoutJobIds
+        .where(
+          (id) => retryFailed || !_failedRuntimeTimeoutAckJobIds.contains(id),
+        )
+        .toList(growable: false);
+    if (candidates.isEmpty) {
+      return _confirmedRuntimeTimeoutJobIds.isEmpty &&
+          _failedRuntimeTimeoutAckJobIds.isEmpty;
+    }
+
+    late final Future<bool> operation;
+    operation = () async {
+      var saved = false;
+      try {
+        saved = await runtime.acknowledgeTimeoutJobs(candidates);
+      } on Object {
+        saved = false;
+      }
+      if (saved) {
+        _confirmedRuntimeTimeoutJobIds.removeAll(candidates);
+        _failedRuntimeTimeoutAckJobIds.removeAll(candidates);
+        _pendingRuntimeTimeoutJobIds.removeAll(candidates);
+        _batchController?.pendingRuntimePauseJobIds.removeAll(candidates);
+      } else {
+        _failedRuntimeTimeoutAckJobIds.addAll(candidates);
+        if (mounted) {
+          setState(
+            () => _message = StitchLocalizations.of(
+              context,
+            ).text('无法保存 Android 后台暂停记录；请重试后再启动或恢复。'),
+          );
+        }
+      }
+      if (identical(_runtimeTimeoutAckInFlight, operation)) {
+        _runtimeTimeoutAckInFlight = null;
+      }
+      final newlyConfirmed = _confirmedRuntimeTimeoutJobIds
+          .where((id) => !_failedRuntimeTimeoutAckJobIds.contains(id))
+          .toList(growable: false);
+      if (newlyConfirmed.isNotEmpty &&
+          !await _acknowledgeConfirmedRuntimeTimeouts()) {
+        return false;
+      }
+      return saved &&
+          _confirmedRuntimeTimeoutJobIds.isEmpty &&
+          _failedRuntimeTimeoutAckJobIds.isEmpty;
+    }();
+    _runtimeTimeoutAckInFlight = operation;
+    return operation;
   }
 
   bool get _canStart =>
@@ -206,9 +323,9 @@ class _StitchHomePageState extends State<StitchHomePage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     if (_mobile && widget.initialTask == null) {
-      _exportFormat = ExportFormat.png;
-      _refineGridNeighbors = false;
-      _seamBlendMode = SeamBlendMode.feather;
+      _exportFormat = _android ? ExportFormat.tiff : ExportFormat.png;
+      _refineGridNeighbors = _android;
+      _seamBlendMode = _android ? SeamBlendMode.deghost : SeamBlendMode.feather;
       _localTextureWarp = true;
     }
     if (widget.initialTask != null) {
@@ -236,21 +353,48 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
     final batchController = _batchController;
     if (batchController != null) {
+      batchController.requireLargeJobApproval = _android;
+      if (_android) batchController.resourceConfigurationReady = false;
       batchController.addListener(_onBatchQueueChanged);
       unawaited(_initializeBatchOwnership(batchController));
     } else {
       _batchOwnershipReady = true;
       _batchOwnershipReadySignal.complete();
     }
-    if (!_mobile) unawaited(_loadFormatCapabilities());
+    if (!_mobile || _android) unawaited(_loadFormatCapabilities());
+    _runtimeTimeoutSubscription = _runtime?.timeoutRequests.listen(
+      _handleRuntimeTimeout,
+    );
     _refreshTasks();
   }
 
   Future<void> _initializeBatchOwnership(
     BatchQueueController controller,
   ) async {
+    var startupTimeoutJobIds = <String>[];
     try {
+      if (_android) {
+        final configured = await _androidResourcesReady;
+        controller.resourceConfigurationReady = configured;
+        controller.resourceBudget = _resourceBudget;
+        try {
+          startupTimeoutJobIds = await _runtime!.readPendingTimeoutJobs();
+        } on Object catch (error) {
+          controller.resourceConfigurationReady = false;
+          if (mounted) {
+            setState(() => _message = '无法读取 Android 后台超时记录；批处理任务保持待核对：$error');
+          }
+          return;
+        }
+        _androidTimeoutSnapshotReady = true;
+        _pendingRuntimeTimeoutJobIds.addAll(startupTimeoutJobIds);
+        controller.pendingRuntimePauseJobIds.addAll(startupTimeoutJobIds);
+        controller.pendingRuntimePauseJobIds.addAll(
+          _pendingRuntimeTimeoutJobIds,
+        );
+      }
       await controller.initialize();
+      _batchControllerInitialized = true;
     } finally {
       _batchOwnershipReady = true;
       if (!_batchOwnershipReadySignal.isCompleted) {
@@ -258,6 +402,98 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       if (mounted) setState(() {});
     }
+    if (_android && _pendingRuntimeTimeoutJobIds.isNotEmpty) {
+      await _processRuntimeTimeouts({
+        ...startupTimeoutJobIds,
+        ..._pendingRuntimeTimeoutJobIds,
+      }, queueInitializationHandled: true);
+    }
+  }
+
+  Future<bool> _configureAndroidResources() async {
+    if (!_android) return true;
+    final runtime = _runtime;
+    MobileResourceBudget budget;
+    try {
+      budget = await runtime!.readResourceBudget();
+    } on Object {
+      budget = const MobileResourceBudget(
+        totalMemoryMiB: 128,
+        availableMemoryMiB: 128,
+        cpuCount: 1,
+        availableStorageMiB: 0,
+        thermalStatus: 'unknown',
+        readingsValid: false,
+      );
+    }
+    _resourceBudget = budget;
+    try {
+      await _api.configureResources(
+        totalCpuWorkers: budget.recommendedTotalCpuWorkers,
+        totalMemoryBudgetMiB: budget.recommendedTotalMemoryBudgetMiB,
+        maxConcurrentJobs: budget.recommendedMaxConcurrentJobs,
+      );
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> _androidCanStart() async {
+    if (!_android) return true;
+    if (!_androidTimeoutSnapshotReady) {
+      try {
+        final pending = await _runtime!.readPendingTimeoutJobs();
+        _pendingRuntimeTimeoutJobIds.addAll(pending);
+        final controller = _batchController;
+        controller?.pendingRuntimePauseJobIds.addAll(pending);
+        _androidTimeoutSnapshotReady = true;
+        if (controller != null && !_batchControllerInitialized) {
+          controller.resourceConfigurationReady = await _androidResourcesReady;
+          controller.resourceBudget = _resourceBudget;
+          await controller.initialize();
+          _batchControllerInitialized = true;
+        }
+        if (_pendingRuntimeTimeoutJobIds.isNotEmpty) {
+          await _processRuntimeTimeouts(
+            _pendingRuntimeTimeoutJobIds.toList(growable: false),
+            queueInitializationHandled: _batchControllerInitialized,
+          );
+        }
+      } on Object catch (error) {
+        if (mounted) {
+          setState(() => _message = '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：$error');
+        }
+        return false;
+      }
+    }
+    if (_confirmedRuntimeTimeoutJobIds.isNotEmpty &&
+        !await _acknowledgeConfirmedRuntimeTimeouts(
+          retryFailed: _failedRuntimeTimeoutAckJobIds.isNotEmpty,
+        )) {
+      if (mounted) {
+        setState(
+          () => _message = StitchLocalizations.of(
+            context,
+          ).text('无法保存 Android 后台暂停记录；请重试后再启动或恢复。'),
+        );
+      }
+      return false;
+    }
+    if (!await _androidResourcesReady) {
+      if (mounted) setState(() => _message = '无法设置 Android 渲染资源预算，已暂缓启动。');
+      return false;
+    }
+    try {
+      _resourceBudget = await _runtime!.readResourceBudget();
+    } on Object {
+      // Keep the last validated initialization reading if a live refresh fails.
+    }
+    if (_resourceBudget?.shouldDeferNewStarts == true) {
+      if (mounted) setState(() => _message = '设备温度较高，待温度降低后再启动新任务。');
+      return false;
+    }
+    return true;
   }
 
   Future<void> _loadFormatCapabilities() async {
@@ -275,10 +511,284 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
   }
 
+  Future<void> _handleRuntimeTimeout(List<String> jobIds) async {
+    final received = jobIds.where((id) => id.isNotEmpty).toSet();
+    _pendingRuntimeTimeoutJobIds.addAll(received);
+    _batchController?.pendingRuntimePauseJobIds.addAll(received);
+    if (_processingRuntimeTimeouts) {
+      _runtimeTimeoutJobIdsReceivedWhileProcessing.addAll(received);
+      return;
+    }
+    if (!_batchOwnershipReady || !_androidTimeoutSnapshotReady) return;
+    await _processRuntimeTimeouts(received.toList(growable: false));
+  }
+
+  Future<void> _processRuntimeTimeouts(
+    Iterable<String> jobIds, {
+    bool queueInitializationHandled = false,
+  }) async {
+    if (!_android || _processingRuntimeTimeouts) return;
+    final requested = jobIds.where((id) => id.isNotEmpty).toSet();
+    _processingRuntimeTimeouts = true;
+    try {
+      _pendingRuntimeTimeoutJobIds.addAll(requested);
+      if (requested.isEmpty || _runtime == null) return;
+
+      final controller = _batchController;
+      final tasks = await _repository.loadAll();
+      final queuedTaskIds =
+          controller?.queues
+              .expand((queue) => queue.items)
+              .map((item) => item.taskId)
+              .whereType<String>()
+              .toSet() ??
+          const <String>{};
+      final acknowledged = <String>[];
+
+      for (final jobId in requested) {
+        if (_confirmedRuntimeTimeoutJobIds.contains(jobId)) continue;
+        _runtimeGuardUnavailableJobs.add(jobId);
+        _runtimeGuardedJobs.remove(jobId);
+        final queuedTask = tasks.where(
+          (task) =>
+              task.nativeJobId == jobId && queuedTaskIds.contains(task.id),
+        );
+        if (queuedTask.isNotEmpty) {
+          if (queueInitializationHandled) {
+            if (controller != null &&
+                !controller.pendingRuntimePauseJobIds.contains(jobId)) {
+              acknowledged.add(jobId);
+            } else if (controller != null &&
+                await controller.pauseJobByNativeId(jobId)) {
+              controller.pendingRuntimePauseJobIds.remove(jobId);
+              acknowledged.add(jobId);
+            }
+          } else if (controller != null &&
+              await controller.pauseJobByNativeId(jobId)) {
+            controller.pendingRuntimePauseJobIds.remove(jobId);
+            acknowledged.add(jobId);
+          }
+          continue;
+        }
+
+        final taskMatches = tasks.where((task) => task.nativeJobId == jobId);
+        if (taskMatches.length != 1) continue;
+        if (await _pauseAndConfirmTimedOutTask(taskMatches.single)) {
+          acknowledged.add(jobId);
+        }
+      }
+
+      if (acknowledged.isNotEmpty) {
+        final acknowledgedSet = acknowledged.toSet();
+        _confirmedRuntimeTimeoutJobIds.addAll(acknowledgedSet);
+        controller?.pendingRuntimePauseJobIds.removeAll(acknowledgedSet);
+        await _acknowledgeConfirmedRuntimeTimeouts();
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _message = 'Android 后台超时任务仍待安全核对：$error');
+      }
+    } finally {
+      _processingRuntimeTimeouts = false;
+      final newlyReceived = _runtimeTimeoutJobIdsReceivedWhileProcessing
+          .toSet();
+      _runtimeTimeoutJobIdsReceivedWhileProcessing.clear();
+      final toReplay = newlyReceived.difference(requested);
+      if (_batchOwnershipReady && toReplay.isNotEmpty) {
+        unawaited(_processRuntimeTimeouts(toReplay));
+      }
+    }
+  }
+
+  Future<bool> _pauseAndConfirmTimedOutTask(StitchTask task) async {
+    final jobId = task.nativeJobId;
+    if (jobId == null) return false;
+    final generation = _controlGeneration;
+    const quiescentStates = {
+      'paused',
+      'completed',
+      'failed',
+      'cancelled',
+      'interrupted',
+    };
+    Map<String, Object?>? observed;
+    try {
+      observed = await _api.status(jobId);
+    } on Object {
+      // A timeout remains pending when native state cannot be verified.
+    }
+    if (observed == null ||
+        !quiescentStates.contains(observed['state'] as String?)) {
+      try {
+        await _api.pause(jobId);
+      } on Object {
+        // Verify status below even if the pause request itself failed.
+      }
+      try {
+        observed = await _api.status(jobId);
+      } on Object {
+        observed = null;
+      }
+    }
+    final state = observed?['state'] as String?;
+    if (state == null || !quiescentStates.contains(state)) {
+      if (observed != null) {
+        final operation = observed['operation'] as String? ?? 'render';
+        final phase = _phase(state);
+        await _persist(
+          task.copyWith(
+            phase: phase,
+            stage: observed['stage'] as String? ?? task.stage,
+            autoExportOnCompletion: false,
+            pauseReason: 'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。',
+          ),
+          expectedGeneration: generation,
+          expectedTaskId: task.id,
+        );
+        if (operation == 'export' &&
+            {StitchPhase.failed, StitchPhase.cancelled}.contains(phase)) {
+          await _persist(
+            task.copyWith(
+              phase: StitchPhase.completed,
+              stage: 'export-failed',
+              autoExportOnCompletion: false,
+              pauseReason: 'Android 后台运行时限已到；保留此前成功的导出结果。',
+            ),
+            expectedGeneration: generation,
+            expectedTaskId: task.id,
+          );
+        }
+      }
+      if (_task?.nativeJobId == jobId && _hasActiveJob) _beginPolling();
+      return false;
+    }
+
+    final operation = observed?['operation'] as String? ?? 'render';
+    var phase = _phase(state);
+    var stage = observed?['stage'] as String? ?? task.stage;
+    if (operation == 'export' &&
+        {StitchPhase.failed, StitchPhase.cancelled}.contains(phase)) {
+      phase = StitchPhase.completed;
+      stage = 'export-failed';
+    }
+    await _persist(
+      task.copyWith(
+        phase: phase,
+        stage: stage,
+        autoExportOnCompletion: false,
+        pauseReason: phase == StitchPhase.paused
+            ? 'Android 后台运行时限已到，任务已安全暂停。'
+            : 'Android 后台运行时限已到；已记录原生任务的终止状态。',
+      ),
+      expectedGeneration: generation,
+      expectedTaskId: task.id,
+    );
+    return true;
+  }
+
+  Future<bool> _confirmLargeJob(StitchTask task) async {
+    if (!_android ||
+        !task.needsLargeJobConfirmation ||
+        task.hasCurrentLargeJobApproval) {
+      return true;
+    }
+    final power = await _power.readState();
+    if (!mounted) return false;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('确认大型合成任务'),
+        content: Text(
+          StitchLocalizations.of(context).largeJobConfirmation(
+            rows: task.grid.rows,
+            columns: task.grid.columns,
+            photoCount: task.photos.length,
+            onBattery: power != PowerState.externalPower,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('继续'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true) return false;
+    final approved = task.copyWith(
+      largeJobApprovalScope: task.currentLargeJobApprovalScope,
+    );
+    await _persist(approved);
+    return true;
+  }
+
+  Future<StitchPhase?> _enableMobileRuntime(String jobId) async {
+    if (!_android) return null;
+    final runtime = _runtime;
+    final ready =
+        runtime != null &&
+        await runtime.setProcessingActive(true, jobId: jobId);
+    if (ready) {
+      _runtimeGuardUnavailableJobs.remove(jobId);
+      _runtimeGuardedJobs.add(jobId);
+      return null;
+    }
+    _runtimeGuardUnavailableJobs.add(jobId);
+    var state = 'unknown';
+    try {
+      final response = await _api.pause(jobId);
+      state = response['state'] as String? ?? 'pausing';
+    } on Object {
+      try {
+        final response = await _api.status(jobId);
+        state = response['state'] as String? ?? 'unknown';
+      } on Object {
+        // Unknown remains interrupted and is reconciled by normal status polling.
+      }
+    }
+    if (runtime != null) {
+      await runtime.setProcessingActive(false, jobId: jobId);
+    }
+    if (state == 'paused' ||
+        state == 'completed' ||
+        state == 'failed' ||
+        state == 'cancelled') {
+      _runtimeGuardedJobs.remove(jobId);
+    }
+    return _phase(state);
+  }
+
+  Future<bool> _enableMobileRuntimeBeforeStart(String jobId) async {
+    if (!_android) return true;
+    final ready =
+        _runtime != null &&
+        await _runtime.setProcessingActive(true, jobId: jobId);
+    if (ready) {
+      _runtimeGuardUnavailableJobs.remove(jobId);
+      _runtimeGuardedJobs.add(jobId);
+      return true;
+    }
+    _runtimeGuardUnavailableJobs.add(jobId);
+    await _runtime?.setProcessingActive(false, jobId: jobId);
+    if (mounted) {
+      setState(() => _message = '无法启动 Android 后台运行保护；核心任务尚未启动');
+    }
+    return false;
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = _mobile && state != AppLifecycleState.resumed;
-    if (_background && _hasActiveJob && _task!.phase != StitchPhase.paused) {
+    if (_background &&
+        _hasActiveJob &&
+        _task!.phase != StitchPhase.paused &&
+        (!_android ||
+            _runtime == null ||
+            !_runtimeGuardedJobs.contains(_task!.nativeJobId))) {
       unawaited(_requestPause('应用进入后台，已请求暂停；等待核心确认'));
     }
   }
@@ -286,11 +796,19 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    unawaited(_runtimeTimeoutSubscription?.cancel());
+    if (widget.mobileRuntimeService == null) {
+      unawaited(_runtime?.dispose());
+    }
     _poll?.cancel();
     _tileTransform.dispose();
-    _batchController
-      ?..removeListener(_onBatchQueueChanged)
-      ..dispose();
+    if (widget.batchQueueController == null) {
+      _batchController
+        ?..removeListener(_onBatchQueueChanged)
+        ..dispose();
+    } else {
+      _batchController?.removeListener(_onBatchQueueChanged);
+    }
     _rows.dispose();
     _columns.dispose();
     _fov.dispose();
@@ -727,19 +1245,11 @@ class _StitchHomePageState extends State<StitchHomePage>
       setState(() => _message = '原片尺寸不一致，核心无法共用相机内参。');
       return;
     }
-    final power = await _power.readState();
-    if (_mobile && power != PowerState.externalPower) {
-      setState(
-        () => _message = power == PowerState.unknown
-            ? '无法确认外接电源状态；连接充电器后再开始或恢复。'
-            : '移动设备须接入外部电源后才能开始或恢复合成。',
-      );
-      return;
-    }
     if (!_api.isAvailable) {
       setState(() => _message = _api.unavailableReason);
       return;
     }
+    if (!await _androidCanStart()) return;
     setState(() {
       _busy = true;
       _message = null;
@@ -748,7 +1258,27 @@ class _StitchHomePageState extends State<StitchHomePage>
       StitchTask active = task;
       if (resume) {
         active = task.copyWith(autoExportOnCompletion: true);
+        if (!await _confirmLargeJob(active)) return;
+        if (active.needsLargeJobConfirmation) {
+          active = active.copyWith(
+            largeJobApprovalScope: active.currentLargeJobApprovalScope,
+          );
+        }
         await _persist(active);
+        _runtimeGuardUnavailableJobs.remove(task.nativeJobId!);
+        final guardedPhase = await _enableMobileRuntime(task.nativeJobId!);
+        if (guardedPhase != null) {
+          active = active.copyWith(
+            phase: guardedPhase,
+            pauseReason: guardedPhase == StitchPhase.paused
+                ? 'Android 无法启动后台运行保护，任务已安全暂停'
+                : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+          );
+          await _persist(active);
+          if (guardedPhase != StitchPhase.paused) _beginPolling();
+          setState(() => _message = active.pauseReason);
+          return;
+        }
         final response = await _api.resume(task.nativeJobId!);
         active = active.copyWith(
           phase: _phase(response['state']),
@@ -768,15 +1298,68 @@ class _StitchHomePageState extends State<StitchHomePage>
           });
         }
         active = active.copyWith(autoExportOnCompletion: true);
+        if (!await _confirmLargeJob(active)) return;
+        if (active.needsLargeJobConfirmation) {
+          active = active.copyWith(
+            largeJobApprovalScope: active.currentLargeJobApprovalScope,
+          );
+        }
         await _persist(active);
+        _runtimeGuardUnavailableJobs.remove(
+          active.nativeJobId ?? active.outputDirectory,
+        );
         final out = await _repository.prepareOutput(active);
+        final budget = _resourceBudget;
+        final effectiveMemory = _android && budget != null
+            ? math
+                  .min(
+                    active.memoryBudgetMiB,
+                    budget.recommendedTotalMemoryBudgetMiB,
+                  )
+                  .toInt()
+            : active.memoryBudgetMiB;
+        final effectiveWorkers = _android && budget != null
+            ? math
+                  .min(
+                    active.workers,
+                    budget.recommendedTotalMemoryBudgetMiB <= 512 ||
+                            budget.isStorageConstrained
+                        ? 1
+                        : budget.recommendedTotalCpuWorkers,
+                  )
+                  .toInt()
+            : active.workers;
+        final anticipatedJobId = active.nativeJobId ?? out.path;
+        if (!await _enableMobileRuntimeBeforeStart(anticipatedJobId)) return;
         final response = await _api.start(
           buildSphericalRequest(active),
           out.path,
-          memoryBudgetMiB: active.memoryBudgetMiB,
-          workers: active.workers,
+          memoryBudgetMiB: effectiveMemory,
+          workers: effectiveWorkers,
         );
         final jobId = response['jobId'] as String? ?? active.outputDirectory;
+        final guardedPhase = jobId == anticipatedJobId
+            ? null
+            : await _enableMobileRuntime(jobId);
+        if (guardedPhase != null) {
+          if (jobId != anticipatedJobId) {
+            _runtimeGuardedJobs.remove(anticipatedJobId);
+            await _runtime?.setProcessingActive(false, jobId: anticipatedJobId);
+          }
+          active = active.copyWith(
+            nativeJobId: jobId,
+            phase: guardedPhase,
+            pauseReason: guardedPhase == StitchPhase.paused
+                ? 'Android 无法启动后台运行保护，任务已安全暂停'
+                : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+          );
+          await _persist(active);
+          if (guardedPhase != StitchPhase.paused) _beginPolling();
+          if (mounted) {
+            setState(() => _message = active.pauseReason);
+          }
+          return;
+        }
         active = active.copyWith(
           nativeJobId: jobId,
           phase: _phase(response['state']),
@@ -797,6 +1380,11 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       _beginPolling();
     } on Object catch (error) {
+      final pendingJobId = _task?.nativeJobId ?? _task?.outputDirectory;
+      if (_android && pendingJobId != null) {
+        _runtimeGuardedJobs.remove(pendingJobId);
+        await _runtime?.setProcessingActive(false, jobId: pendingJobId);
+      }
       final text = error.toString();
       var failed = _task;
       if (failed != null &&
@@ -850,6 +1438,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       final updated = task.copyWith(
         phase: _phase(response['state']),
         pauseReason: reason,
+        autoExportOnCompletion: false,
       );
       await _persist(
         updated,
@@ -857,6 +1446,10 @@ class _StitchHomePageState extends State<StitchHomePage>
         expectedTaskId: task.id,
       );
       if (!_isCurrentSelection(generation, task.id)) return;
+      if (updated.phase == StitchPhase.paused && _android) {
+        _runtimeGuardedJobs.remove(task.nativeJobId!);
+        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+      }
       if (updated.phase == StitchPhase.paused) await _lock.disable();
       setState(() => _message = reason);
       _beginPolling();
@@ -889,7 +1482,12 @@ class _StitchHomePageState extends State<StitchHomePage>
       final updated = task.copyWith(
         phase: _phase(response['state']),
         pauseReason: '已请求取消；等待核心确认',
+        autoExportOnCompletion: false,
       );
+      if (updated.phase == StitchPhase.cancelled && _android) {
+        _runtimeGuardedJobs.remove(task.nativeJobId!);
+        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+      }
       await _persist(
         updated,
         expectedGeneration: generation,
@@ -943,18 +1541,77 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<void> _exportTask(StitchTask task) async {
-    if (_mobile && !task.exportFormat.supportedOnMobile) {
-      setState(() => _message = '此移动版目前仅支持已验证的 PNG 导出。');
-      return;
-    }
     if (task.exportFormat == ExportFormat.jpegXl && !_jpegXlAvailable) {
       setState(() => _message = '此原生核心未报告内置 JPEG XL 编码器，已阻止导出。');
       return;
     }
-    final power = await _power.readState();
-    if (_mobile && power != PowerState.externalPower) {
-      setState(() => _message = '整图导出需要外接电源；连接充电器后再导出。');
+    if (!await _androidCanStart()) {
+      if (_android && task.autoExportOnCompletion && task.nativeJobId != null) {
+        await _persist(
+          task.copyWith(
+            phase: StitchPhase.completed,
+            stage: 'auto-export-deferred',
+            clearExportCheckpointPath: true,
+          ),
+        );
+        _beginPolling();
+      } else if (task.phase == StitchPhase.exporting) {
+        await _persist(
+          task.copyWith(
+            phase: StitchPhase.completed,
+            stage: 'export-deferred',
+            clearExportCheckpointPath: true,
+          ),
+        );
+      }
       return;
+    }
+    if (!await _confirmLargeJob(task)) {
+      if (task.phase == StitchPhase.exporting) {
+        await _persist(
+          task.copyWith(
+            phase: StitchPhase.completed,
+            stage: 'done',
+            autoExportOnCompletion: false,
+            clearExportCheckpointPath: true,
+          ),
+        );
+      }
+      return;
+    }
+    final guardFailurePhase =
+        _android && _runtimeGuardedJobs.contains(task.nativeJobId)
+        ? null
+        : await _enableMobileRuntime(task.nativeJobId!);
+    if (guardFailurePhase != null) {
+      await _persist(
+        task.copyWith(
+          phase: guardFailurePhase,
+          stage: 'export-deferred',
+          clearExportCheckpointPath: true,
+          error: guardFailurePhase == StitchPhase.completed
+              ? 'Android 无法启动后台运行保护；未开始导出。'
+              : 'Android 无法确认安全暂停；正在核对原生任务状态。',
+        ),
+      );
+      if (guardFailurePhase != StitchPhase.paused &&
+          guardFailurePhase != StitchPhase.completed &&
+          guardFailurePhase != StitchPhase.failed &&
+          guardFailurePhase != StitchPhase.cancelled) {
+        _beginPolling();
+      }
+      setState(
+        () => _message = guardFailurePhase == StitchPhase.completed
+            ? '无法启动后台运行保护；整图导出未开始。'
+            : 'Android 无法确认安全暂停，正在核对原生任务状态。',
+      );
+      return;
+    }
+    var exportTask = task;
+    if (task.needsLargeJobConfirmation) {
+      exportTask = task.copyWith(
+        largeJobApprovalScope: task.currentLargeJobApprovalScope,
+      );
     }
     final directory = _mobile
         ? await getApplicationSupportDirectory()
@@ -962,14 +1619,14 @@ class _StitchHomePageState extends State<StitchHomePage>
     final exportDirectory = Directory(p.join(directory.path, 'LumiaStitch'));
     await exportDirectory.create(recursive: true);
     final destination =
-        task.exportCheckpointPath ??
+        exportTask.exportCheckpointPath ??
         p.join(
           exportDirectory.path,
           '${task.id}-${DateTime.now().toUtc().microsecondsSinceEpoch}.${task.exportFormat.extension}',
         );
-    final exportIntentTask = task.autoExportOnCompletion
-        ? task
-        : task.copyWith(autoExportOnCompletion: true);
+    final exportIntentTask = exportTask.autoExportOnCompletion
+        ? exportTask
+        : exportTask.copyWith(autoExportOnCompletion: true);
     setState(() {
       _busy = true;
       _message = null;
@@ -1058,6 +1715,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     final exportTask = _task;
     final path = exportTask?.exportPath;
     if (_mobile &&
+        !_android &&
         exportTask != null &&
         !exportTask.exportFormat.supportedOnMobile) {
       setState(() => _message = '此移动版目前仅支持已验证的 PNG 导出。');
@@ -1068,7 +1726,12 @@ class _StitchHomePageState extends State<StitchHomePage>
       return;
     }
     try {
-      if (_mobile) {
+      if (_android) {
+        await _storage.shareExport(
+          path,
+          mimeType: _mimeType(exportTask!.exportFormat),
+        );
+      } else if (_mobile) {
         await const MethodChannel(
           'com.lumia.stitch_app/files',
         ).invokeMethod<bool>('shareExport', {'path': path});
@@ -1091,7 +1754,7 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   Future<void> _openExportViewer(StitchTask task) async {
     final path = task.exportPath;
-    if (_mobile) {
+    if (_mobile && !_android) {
       if (mounted) setState(() => _message = '本期大图查看器仅在 Windows 桌面版提供。');
       return;
     }
@@ -1123,10 +1786,18 @@ class _StitchHomePageState extends State<StitchHomePage>
           expectedExportFingerprint: task.exportFingerprint,
           legacyTaskAssociationPresent: legacyAssociationPresent,
           legacyTaskBindingVerified: nativeVerified,
+          mobileStorageService: _android ? _storage : null,
+          exportMimeType: _mimeType(task.exportFormat),
         ),
       ),
     );
   }
+
+  String _mimeType(ExportFormat format) => switch (format) {
+    ExportFormat.png => 'image/png',
+    ExportFormat.tiff => 'image/tiff',
+    ExportFormat.jpegXl => 'image/jxl',
+  };
 
   Future<void> _deleteTask(StitchTask task) async {
     if (_busy || !_batchOwnershipReady || _isActivelyBatchOwned(task)) return;
@@ -1232,7 +1903,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     'completed' => StitchPhase.completed,
     'cancelled' => StitchPhase.cancelled,
     'failed' => StitchPhase.failed,
-    _ => StitchPhase.running,
+    _ => StitchPhase.interrupted,
   };
 
   Future<void> _persist(
@@ -1296,25 +1967,33 @@ class _StitchHomePageState extends State<StitchHomePage>
       final progress = (state['progress'] as num? ?? task.progress)
           .toDouble()
           .clamp(0, 1);
-      final power = await _power.readState();
-      if (controlGeneration != _controlGeneration || !identical(task, _task)) {
-        return;
-      }
-      if (_mobile &&
-          power != PowerState.externalPower &&
+      if (_android &&
           {
+            StitchPhase.queued,
             StitchPhase.running,
             StitchPhase.exporting,
-            StitchPhase.queued,
-          }.contains(phase)) {
-        if (phase != StitchPhase.pausing) {
-          await _requestPause(
-            _background ? '应用在后台，暂停请求已提交' : '外接电源已断开，暂停请求已提交',
+            StitchPhase.pausing,
+          }.contains(phase) &&
+          !_runtimeGuardedJobs.contains(task.nativeJobId) &&
+          !_runtimeGuardUnavailableJobs.contains(task.nativeJobId)) {
+        final guardedPhase = await _enableMobileRuntime(task.nativeJobId!);
+        if (guardedPhase != null) {
+          await _persist(
+            task.copyWith(
+              phase: guardedPhase,
+              pauseReason: guardedPhase == StitchPhase.paused
+                  ? 'Android 无法启动后台运行保护，任务已安全暂停'
+                  : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+            ),
           );
-          return; // Never overwrite the pause request with this older running snapshot.
+          if (guardedPhase != StitchPhase.paused) _beginPolling();
+          return;
         }
       }
       if (_background &&
+          (!_android ||
+              _runtime == null ||
+              !_runtimeGuardedJobs.contains(task.nativeJobId)) &&
           {StitchPhase.running, StitchPhase.exporting}.contains(phase) &&
           phase != StitchPhase.pausing) {
         await _requestPause('应用在后台，暂停请求已提交');
@@ -1400,6 +2079,16 @@ class _StitchHomePageState extends State<StitchHomePage>
             : task.resultStats,
         clearError: state['error'] == null && successfulExport,
       );
+      if (_android &&
+          {
+            StitchPhase.paused,
+            StitchPhase.completed,
+            StitchPhase.failed,
+            StitchPhase.cancelled,
+          }.contains(updated.phase)) {
+        _runtimeGuardedJobs.remove(task.nativeJobId!);
+        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+      }
       if (!_isCurrentSelection(controlGeneration, task.id) ||
           !identical(task, _task)) {
         return;
@@ -1685,15 +2374,19 @@ class _StitchHomePageState extends State<StitchHomePage>
           IconButton(
             tooltip: StitchLocalizations.of(
               context,
-            ).text(_mobile ? '批处理仅限 Windows 桌面版' : '批处理队列'),
-            onPressed: _mobile
+            ).text(_mobile && !_android ? '批处理仅限 Windows 桌面版' : '批处理队列'),
+            onPressed: _mobile && !_android
                 ? null
                 : () => Navigator.of(context).push(
                     MaterialPageRoute<void>(
                       builder: (_) => BatchQueuePage(
                         api: _api,
                         controller: _batchController,
-                        mobileOverride: false,
+                        mobileOverride: _mobile,
+                        androidOverride: _android,
+                        mobileStorageService: _storage,
+                        runtimeService: _runtime,
+                        resourceBudget: _resourceBudget,
                       ),
                     ),
                   ),
@@ -1727,7 +2420,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                   children: [
                     _statusCard(task),
                     const SizedBox(height: 12),
-                    if (!_mobile) ...[
+                    if (!_mobile || _android) ...[
                       _exportFormatCard(task),
                       const SizedBox(height: 12),
                     ],
@@ -1911,7 +2604,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                           _isActivelyBatchOwned(task) ||
                           task.nativeJobId == null ||
                           task.phase != StitchPhase.completed ||
-                          (_mobile && !task.exportFormat.supportedOnMobile) ||
+                          (_mobile &&
+                              !_android &&
+                              !task.exportFormat.supportedOnMobile) ||
                           (task.exportFormat == ExportFormat.jpegXl &&
                               !_jpegXlAvailable)
                       ? null
@@ -1921,7 +2616,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                     '${task.stage == 'export-failed' ? '重试' : '导出'}完整 ${task.exportFormat.shortLabel}',
                   ),
                 ),
-                if (task.exportPath != null && !_mobile)
+                if (task.exportPath != null && (!_mobile || _android))
                   OutlinedButton.icon(
                     key: const Key('open-exported-image'),
                     onPressed: _busy ? null : () => _openExportViewer(task),
@@ -2482,7 +3177,7 @@ class _StitchHomePageState extends State<StitchHomePage>
               '渲染内存预算用于缓存和活动图像/瓦片估算；配准阶段 OpenCV 与进程其他内存另计。',
               style: TextStyle(fontSize: 12),
             ),
-            if (!_mobile)
+            if (!_mobile || _android)
               ExpansionTile(
                 key: const Key('stitch-quality-expansion'),
                 tilePadding: EdgeInsets.zero,

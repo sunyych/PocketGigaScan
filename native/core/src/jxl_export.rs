@@ -38,8 +38,8 @@ type NativeCheckpoint = unsafe extern "C" fn(*mut std::ffi::c_void) -> i32;
 #[cfg(lumia_jxl)]
 unsafe extern "C" {
     fn lumia_jxl_encode_rgba_spool(
-        input_path: *const u16,
-        output_path: *const u16,
+        input_path: *const NativePathChar,
+        output_path: *const NativePathChar,
         width: u32,
         height: u32,
         memory_budget_mib: u64,
@@ -49,6 +49,35 @@ unsafe extern "C" {
         error_capacity: usize,
         peak_chunk_bytes: *mut u64,
     ) -> i32;
+}
+
+#[cfg(lumia_jxl)]
+#[cfg(target_os = "windows")]
+type NativePathChar = u16;
+#[cfg(lumia_jxl)]
+#[cfg(not(target_os = "windows"))]
+type NativePathChar = std::ffi::c_char;
+
+#[cfg(lumia_jxl)]
+#[cfg(target_os = "windows")]
+type NativePathZ = Vec<u16>;
+#[cfg(lumia_jxl)]
+#[cfg(not(target_os = "windows"))]
+type NativePathZ = std::ffi::CString;
+
+#[cfg(lumia_jxl)]
+fn native_path_z(path: &Path) -> Result<NativePathZ> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        Ok(path.as_os_str().encode_wide().chain([0]).collect())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| invalid("JPEG XL path contains an interior NUL byte"))
+    }
 }
 
 #[cfg(lumia_jxl)]
@@ -83,9 +112,9 @@ fn native_encode(
     memory_budget_mib: usize,
     checkpoint: &mut dyn FnMut(u32, u32) -> Result<()>,
 ) -> Result<u64> {
-    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
-    let input: Vec<u16> = input.as_os_str().encode_wide().chain([0]).collect();
-    let output: Vec<u16> = output.as_os_str().encode_wide().chain([0]).collect();
+    use std::ffi::c_void;
+    let input = native_path_z(input)?;
+    let output = native_path_z(output)?;
     let mut context = CheckpointContext {
         callback: checkpoint,
         cancelled: false,
@@ -307,7 +336,7 @@ mod tests {
             remaining_bytes: *mut u64,
         ) -> i32;
         fn lumia_jxl_test_read_rgba_pixel(
-            input_path: *const u16,
+            input_path: *const NativePathChar,
             width: u32,
             height: u32,
             x: u32,
@@ -316,7 +345,7 @@ mod tests {
         ) -> i32;
     }
 
-    #[cfg(all(lumia_jxl, lumia_jxl_test_helpers))]
+    #[cfg(all(windows, lumia_jxl, lumia_jxl_test_helpers))]
     #[test]
     fn native_chunk_allocator_enforces_aggregate_limit_and_releases_burst() {
         let mut peak = 0;
@@ -330,10 +359,33 @@ mod tests {
 
     #[cfg(all(lumia_jxl, lumia_jxl_test_helpers))]
     #[test]
+    fn native_chunk_reader_accepts_non_ascii_native_paths() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("lgs-jxl-路径-{}-{nonce}.rgba", std::process::id()));
+        fs::write(&path, [19, 73, 211, 127]).unwrap();
+        let native = native_path_z(&path).unwrap();
+        let mut actual = [0u8; 4];
+        let result = unsafe {
+            lumia_jxl_test_read_rgba_pixel(native.as_ptr(), 1, 1, 0, 0, actual.as_mut_ptr())
+        };
+        assert_eq!(
+            result, 0,
+            "native bridge could not open non-ASCII path {path:?}"
+        );
+        assert_eq!(actual, [19, 73, 211, 127]);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(all(lumia_jxl, lumia_jxl_test_helpers))]
+    #[test]
     fn native_chunk_reader_seeks_sparse_rgba_spool_past_four_gib() {
         use std::ffi::c_void;
         use std::io::{Seek, SeekFrom};
-        use std::os::windows::{ffi::OsStrExt, io::AsRawHandle};
+        use std::os::windows::io::AsRawHandle;
 
         #[link(name = "kernel32")]
         unsafe extern "system" {
@@ -388,7 +440,7 @@ mod tests {
         file.sync_all().unwrap();
         drop(file);
 
-        let wide: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+        let wide = native_path_z(&path).unwrap();
         let mut actual = [0u8; 4];
         let result = unsafe {
             lumia_jxl_test_read_rgba_pixel(wide.as_ptr(), width, height, x, y, actual.as_mut_ptr())

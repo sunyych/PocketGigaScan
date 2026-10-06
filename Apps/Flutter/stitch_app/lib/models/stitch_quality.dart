@@ -8,7 +8,8 @@ enum ExportFormat {
   final String label;
   final String extension;
   String get shortLabel => name.toUpperCase();
-  bool get supportedOnMobile => this == ExportFormat.png;
+  bool get supportedOnMobile => true;
+  bool get supportedOnAndroid => true;
 
   static ExportFormat fromSavedValue(Object? value) => switch (value) {
     'tiff' || 'tif' => ExportFormat.tiff,

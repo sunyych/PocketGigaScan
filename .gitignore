@@ -44,7 +44,6 @@ __pycache__/
 .build/
 
 # Retired local references excluded from the standalone source distribution
-/justfile
 /.gitleaks.toml
 /SECURITY.md
 /CONTRIBUTING.md
@@ -58,21 +57,27 @@ __pycache__/
 /docs/*
 !/docs/BUILD.md
 !/docs/RESTRUCTURE.md
+!/docs/PARITY.md
 !/docs/gigascan/
 /docs/gigascan/*
 !/docs/gigascan/COLLABORATION.md
 !/docs/gigascan/ROADMAP.md
 !/docs/gigascan/FLUTTER-STITCH.md
 !/docs/gigascan/STITCH-TESTING.md
+!/docs/gigascan/ANDROID-STITCH-DESIGN.md
+!/docs/gigascan/ANDROID-STITCH-PLAN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md
 !/docs/gigascan/evidence/TEXTURE-GRID-TESTS-2026-10-05.md
 !/docs/gigascan/evidence/TEXTURE-GRID-REPAIR-2026-10-04.md
 !/docs/gigascan/evidence/DWARF-STANDALONE-2026-10-05.md
+!/docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
+!/scripts/build-stitch-android-core.ps1
+!/scripts/test-build-stitch-android-core.Tests.ps1
 !/scripts/verify-spherical-seam-alignment.py
 !/scripts/tests/
 /scripts/tests/*

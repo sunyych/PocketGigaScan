@@ -9,6 +9,7 @@ import 'package:flutter/material.dart' hide Text;
 import 'package:path/path.dart' as p;
 
 import '../models/export_fingerprint.dart';
+import '../services/mobile_storage_service.dart';
 import '../l10n/localized_text.dart';
 import '../l10n/stitch_localizations.dart';
 
@@ -26,6 +27,8 @@ class ExportedImageViewer extends StatefulWidget {
     required this.expectedExportFingerprint,
     required this.legacyTaskAssociationPresent,
     required this.legacyTaskBindingVerified,
+    this.mobileStorageService,
+    this.exportMimeType,
   });
 
   final String exportFilePath;
@@ -33,6 +36,37 @@ class ExportedImageViewer extends StatefulWidget {
   final ExportFileFingerprint? expectedExportFingerprint;
   final bool legacyTaskAssociationPresent;
   final bool legacyTaskBindingVerified;
+  final MobileStorageService? mobileStorageService;
+  final String? exportMimeType;
+
+  Future<void> _saveExport(BuildContext context) async {
+    final service = mobileStorageService;
+    if (service == null || exportMimeType == null) return;
+    final saved = await service.saveExport(
+      exportFilePath,
+      mimeType: exportMimeType!,
+      suggestedName: p.basename(exportFilePath),
+    );
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(saved ? '已保存整图' : '保存已取消或失败')));
+    }
+  }
+
+  Future<void> _shareExport(BuildContext context) async {
+    final service = mobileStorageService;
+    if (service == null || exportMimeType == null) return;
+    final shared = await service.shareExport(
+      exportFilePath,
+      mimeType: exportMimeType!,
+    );
+    if (context.mounted) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(shared ? '已发送整图' : '分享已取消或失败')));
+    }
+  }
 
   @override
   State<ExportedImageViewer> createState() => _ExportedImageViewerState();
@@ -555,6 +589,19 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
       appBar: AppBar(
         title: Text(title, translate: false, overflow: TextOverflow.ellipsis),
         actions: [
+          if (widget.mobileStorageService != null &&
+              widget.exportMimeType != null) ...[
+            IconButton(
+              tooltip: '保存整图',
+              onPressed: () => widget._saveExport(context),
+              icon: const Icon(Icons.download),
+            ),
+            IconButton(
+              tooltip: '分享整图',
+              onPressed: () => widget._shareExport(context),
+              icon: const Icon(Icons.ios_share),
+            ),
+          ],
           IconButton(
             tooltip: StitchLocalizations.of(context).text('适合窗口'),
             onPressed: _pyramid == null ? null : _fitToWindow,
@@ -589,16 +636,35 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
           if (_pyramid != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Row(
-                children: [
-                  Text(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final scale = Text(
                     '缩放 ${(_scale * MediaQuery.devicePixelRatioOf(context) * 100).round()}%',
-                  ),
-                  const SizedBox(width: 12),
-                  Text('${_pyramid!.width} × ${_pyramid!.height} px'),
-                  const Spacer(),
-                  if (_level != null) Text('预览层级 $_level'),
-                ],
+                  );
+                  final dimensions = Text(
+                    '${_pyramid!.width} × ${_pyramid!.height} px',
+                  );
+                  final level = _level == null ? null : Text('预览层级 $_level');
+                  if (constraints.maxWidth < 600) {
+                    return SizedBox(
+                      width: constraints.maxWidth,
+                      child: Wrap(
+                        spacing: 12,
+                        runSpacing: 4,
+                        children: [scale, dimensions, ?level],
+                      ),
+                    );
+                  }
+                  return Row(
+                    children: [
+                      scale,
+                      const SizedBox(width: 12),
+                      dimensions,
+                      const Spacer(),
+                      ?level,
+                    ],
+                  );
+                },
               ),
             ),
         ],
@@ -713,10 +779,11 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
             child: ColoredBox(
               color: Theme.of(context).colorScheme.surfaceContainerLowest,
               child: InteractiveViewer(
+                key: const ValueKey('exported-image-interactive-viewer'),
                 transformationController: _transform,
                 constrained: false,
                 panEnabled: true,
-                scaleEnabled: false,
+                scaleEnabled: true,
                 minScale: _fitScale(viewport),
                 maxScale: _maxScale / MediaQuery.devicePixelRatioOf(context),
                 boundaryMargin: EdgeInsets.zero,
@@ -729,6 +796,7 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
                     children: [
                       for (final tile in visible)
                         Positioned(
+                          key: ValueKey('viewer-tile-${tile.path}'),
                           left: tile.column * _tileSize * factorX,
                           top: tile.row * _tileSize * factorY,
                           width: tile.width * factorX,

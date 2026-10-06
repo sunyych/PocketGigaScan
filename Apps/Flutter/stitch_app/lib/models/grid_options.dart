@@ -50,8 +50,10 @@ class GridOptions {
     this.forceGridCells = const {},
   });
 
-  static const maxAxis = 128;
-  static const maxCells = 1024;
+  static const _maxInt = 0x7fffffffffffffff;
+
+  static bool productFits(int rows, int columns) =>
+      rows > 0 && columns > 0 && rows <= _maxInt ~/ columns;
 
   final GridMode mode;
   final int rows;
@@ -86,10 +88,10 @@ class GridOptions {
   }
 
   String? get validationError {
-    if (rows < 1 || rows > maxAxis || columns < 1 || columns > maxAxis) {
-      return '行列数需为 1–$maxAxis';
+    if (rows < 1 || columns < 1) {
+      return '行列数必须是正整数';
     }
-    if (rows * columns > maxCells) return '网格最多支持 $maxCells 个格子';
+    if (!productFits(rows, columns)) return '网格行列乘积超出支持范围';
     return null;
   }
 
@@ -195,10 +197,7 @@ class GridMapping {
       }
       final row = int.tryParse(match.group(1)!);
       final column = int.tryParse(match.group(2)!);
-      if (row == null ||
-          column == null ||
-          row > GridOptions.maxAxis ||
-          column > GridOptions.maxAxis) {
+      if (row == null || column == null) {
         return const GridMapping(
           rows: 0,
           columns: 0,
@@ -225,19 +224,29 @@ class GridMapping {
         error: '检测到重复行列文件；请改用顺序模式，全部原片都会保留',
       );
     }
-    final rows =
-        normalized.map((cell) => cell.row).reduce((a, b) => a > b ? a : b) + 1;
-    final columns =
-        normalized.map((cell) => cell.column).reduce((a, b) => a > b ? a : b) +
-        1;
-    if (rows > GridOptions.maxAxis ||
-        columns > GridOptions.maxAxis ||
-        rows * columns > GridOptions.maxCells) {
+    final maxNormalizedRow = normalized
+        .map((cell) => cell.row)
+        .reduce((a, b) => a > b ? a : b);
+    final maxNormalizedColumn = normalized
+        .map((cell) => cell.column)
+        .reduce((a, b) => a > b ? a : b);
+    if (maxNormalizedRow == GridOptions._maxInt ||
+        maxNormalizedColumn == GridOptions._maxInt) {
+      return const GridMapping(
+        rows: 0,
+        columns: 0,
+        cells: [],
+        error: '文件名行列范围超出整数支持范围',
+      );
+    }
+    final rows = maxNormalizedRow + 1;
+    final columns = maxNormalizedColumn + 1;
+    if (!GridOptions.productFits(rows, columns)) {
       return GridMapping(
         rows: rows,
         columns: columns,
         cells: normalized,
-        error: '网格超过支持上限',
+        error: '网格行列乘积超出整数支持范围',
       );
     }
     if (normalized.length != rows * columns) {

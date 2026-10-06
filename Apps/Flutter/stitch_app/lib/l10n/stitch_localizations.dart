@@ -21,6 +21,20 @@ class StitchLocalizations {
 
   String get appName => 'PocketGigaScan';
 
+  String largeJobConfirmation({
+    required int rows,
+    required int columns,
+    required int photoCount,
+    bool onBattery = false,
+  }) {
+    if (isChinese) {
+      return '任务网格为 $rows×$columns，共 $photoCount 张原片，运行时间可能较长。'
+          '${onBattery ? '\n当前未连接外接电源，长时间运行可能耗尽电量。' : ''}';
+    }
+    return 'This job uses a $rows×$columns grid with $photoCount source photos and may run for a while.'
+        '${onBattery ? '\nNo external power is connected; a long run may drain the battery.' : ''}';
+  }
+
   String text(String source) {
     if (isChinese) return _zh[source] ?? source;
     final exact = _en[source];
@@ -63,6 +77,12 @@ class StitchLocalizations {
     final imageTotal = RegExp(r'^上次成功整图 (.+)：(.+)$').firstMatch(source);
     if (imageTotal != null) {
       return 'Last successful full image ${imageTotal[1]}: ${imageTotal[2]}';
+    }
+    final filenameGridGap = RegExp(
+      r'^文件名网格有空格；请切换到顺序模式并调整行列。所有 (\d+) 张原片都会保留。$',
+    ).firstMatch(source);
+    if (filenameGridGap != null) {
+      return 'The filename grid has gaps; switch to sequence mode and adjust rows and columns. All ${filenameGridGap[1]} source photos will be kept.';
     }
     final zoom = RegExp(r'^缩放 (\d+)%$').firstMatch(source);
     if (zoom != null) return 'Zoom ${zoom[1]}%';
@@ -155,12 +175,94 @@ class StitchLocalizations {
     '任务记录': 'Task history',
     '导入原片': 'Import photos',
     '导入照片': 'Import photos',
-    '批处理队列': 'Batch queue',
     '批处理仅限 Windows 桌面版': 'Batch processing is available on Windows desktop',
     '查看输出': 'View output',
     '整图输出': 'Full image output',
     '排列与相机': 'Grid and camera',
     '输出与画质': 'Output and quality',
+    '局部纹理校正': 'Local texture correction',
+    '查看输出信息': 'View output information',
+    '收起输出信息': 'Hide output information',
+    '保存整图': 'Save full image',
+    '分享整图': 'Share full image',
+    '已保存整图': 'Full image saved',
+    '保存已取消或失败': 'Save was canceled or failed',
+    '已发送整图': 'Full image shared',
+    '分享已取消或失败': 'Share was canceled or failed',
+    '批处理队列': 'Batch queue',
+    '批准并开始': 'Approve and start',
+    '确认后开始': 'Review and start',
+    '确认大型任务': 'Confirm large job',
+    '等待大型任务确认': 'Waiting for large-job approval',
+    '确认大型合成任务': 'Confirm large stitching job',
+    '无法设置 Android 渲染资源预算，已暂缓启动。':
+        'Could not configure Android render resources. The job was not started.',
+    '设备温度较高，待温度降低后再启动新任务。':
+        'Device temperature is elevated. Wait for it to cool before starting another job.',
+    '已按设备当前资源限制并发参数。':
+        'Concurrency settings were limited to current device resources.',
+    '大型任务需要重新确认': 'This large job needs approval again',
+    '正在安全暂停大型任务；确认后才能继续':
+        'Safely pausing this large job; it can continue after approval',
+    '大型任务需要确认后才会开始': 'This large job needs approval before it starts',
+    '无法启动后台运行保护；任务已请求暂停':
+        'Background protection could not start. A safe pause was requested.',
+    'Android 无法启动后台运行保护，任务已请求暂停':
+        'Android background protection could not start. A safe pause was requested.',
+    'Android 无法启动后台运行保护，任务已暂停':
+        'Android background protection could not start. The task is paused.',
+    '无法启动后台运行保护；整图导出未开始。':
+        'Background protection could not start. Full-image export was not started.',
+    'Android 后台运行时限已到，任务已请求安全暂停':
+        'Android background runtime limit reached. A safe pause was requested.',
+    'Android 后台运行时限已到；核心状态已确认':
+        'Android background execution timed out; the native job state is confirmed.',
+    'Android 后台运行时限已到；正在核对暂停状态':
+        'Android background execution timed out; checking the pause state.',
+    '已安全暂停': 'Safely paused',
+    '核心作业已结束': 'The native job has ended',
+    '正在安全暂停；等待核心确认':
+        'Safely pausing; waiting for the native job to confirm.',
+    '无法读取 Android 后台超时记录；批处理任务保持待核对：':
+        'Unable to read the Android background-timeout record; batch jobs remain pending verification: ',
+    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
+        'Unable to read the Android background-timeout record; start, resume, and export are deferred: ',
+    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。':
+        'Could not save the Android background pause record; retry before starting or resuming.',
+    'Android 后台超时任务仍待安全核对：':
+        'Android background-timeout jobs still require safety verification: ',
+    'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。':
+        'Android background execution timed out; the native job is still stopping. Waiting to confirm a safe pause.',
+    'Android 后台运行时限已到，任务已安全暂停。':
+        'Android background execution timed out; the job is safely paused.',
+    'Android 后台运行时限已到；已记录原生任务的终止状态。':
+        'Android background execution timed out; the native job\'s terminal state was recorded.',
+    'Android 后台运行时限已到；保留此前成功的导出结果。':
+        'Android background execution timed out; the previous successful export is preserved.',
+    '无法启动 Android 后台运行保护；核心任务尚未启动':
+        'Android background protection could not start; the native job was not started.',
+    'Android 后台运行保护不可用；请手动重试导出':
+        'Android background protection is unavailable; retry the export manually.',
+    '无法启动 Android 后台运行保护；整图导出尚未启动':
+        'Android background protection could not start; the full-image export was not started.',
+    '无法启动后台运行保护；导出保持暂停':
+        'Background protection could not start; the export remains paused.',
+    '无法启动后台运行保护；任务已安全暂停':
+        'Background protection could not start; the job is safely paused.',
+    '无法启动后台运行保护；正在核对核心暂停状态':
+        'Background protection could not start; checking the native pause state.',
+    'Android 无法确认后台安全暂停，正在核对原生任务状态':
+        'Android could not confirm a safe background pause; checking the native job state.',
+    'Android 批处理需要选择一个包含全景子目录的母目录。':
+        'Choose a parent folder containing panorama subfolders to add an Android batch.',
+    'Android 将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。':
+        'Android copies the selected folder to private staging, then imports each panorama subfolder.',
+    '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。':
+        'Batch processing is available on desktop. Mobile can still stitch single tasks.',
+    '保存到设备': 'Save to device',
+    '分享到…': 'Share…',
+    '保存成功': 'Saved successfully',
+    '分享已取消': 'Sharing was cancelled',
     '提速测试选项': 'Performance options',
     '保存任务设置': 'Save task settings',
     '保存': 'Save',
@@ -196,8 +298,6 @@ class StitchLocalizations {
     '设置行列与相机视角': 'Set grid and camera field of view',
     '资源设置': 'Resource settings',
     '适合窗口': 'Fit to window',
-    '收起输出信息': 'Hide output information',
-    '查看输出信息': 'Show output information',
     '重新检查': 'Check again',
     '100%': '100%',
     '正在加载全景…': 'Loading panorama…',
@@ -221,7 +321,6 @@ class StitchLocalizations {
     '按手动参数强制网格重试': 'Retry with manual grid placement',
     '新建副本重新合成': 'Create a copy and stitch again',
     'DWARF 固定视角（名义值）': 'DWARF nominal field of view',
-    '局部纹理校正': 'Local texture correction',
     '抑制接缝重影': 'Reduce seam ghosting',
     '精细校正相邻照片位置': 'Refine neighboring photo positions',
     '并行图像匹配': 'Parallel image matching',
@@ -407,8 +506,6 @@ class StitchLocalizations {
     ' 秒': ' sec',
     ' 分 ': ' min ',
     '选择包含多个全景子目录的母目录': 'Choose a parent folder containing panorama subfolders',
-    '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。':
-        'Batch processing is available on Windows desktop. Single-task stitching remains available on mobile.',
     '没有删除队列项目：': 'Could not remove queue item: ',
     '位于任务目录之外的路径已拒绝读取。': 'Reading paths outside the task directory is denied.',
     '全部': 'All',
@@ -491,6 +588,15 @@ class StitchLocalizations {
     '使用 0.6 MP 配准图；关闭时使用 2.0 MP。最终渲染仍为全分辨率。':
         'Align using 0.6 MP images; when off, use 2.0 MP. Final rendering remains full resolution.',
     '保存提速测试选项失败：': 'Could not save performance options: ',
+    '行列数必须是正整数': 'Rows and columns must be positive integers.',
+    '网格行列乘积超出支持范围': 'The grid dimensions exceed the supported integer range.',
+    '网格行列乘积超出整数支持范围': 'The grid dimensions exceed the supported integer range.',
+    '文件名行列范围超出整数支持范围':
+        'The filename grid dimensions exceed the supported integer range.',
+    'Android 无法启动后台运行保护；未开始导出。':
+        'Android could not start background protection; export was not started.',
+    '无法启动后台运行保护；任务已请求安全暂停。':
+        'Background protection could not start; a safe pause was requested.',
     '行列必须是有效整数。': 'Rows and columns must be valid integers.',
     '水平视角需介于 1° 与 179°。':
         'Horizontal field of view must be between 1° and 179°.',
@@ -513,6 +619,55 @@ class StitchLocalizations {
     '导入原片': '导入照片',
     '批处理队列': '批处理队列',
     '批处理仅限 Windows 桌面版': '批处理仅限 Windows 桌面版',
+    '局部纹理校正': '局部纹理校正',
+    '批准并开始': '批准并开始',
+    '确认后开始': '确认后开始',
+    '确认大型任务': '确认大型任务',
+    '等待大型任务确认': '等待大型任务确认',
+    '确认大型合成任务': '确认大型合成任务',
+    '无法设置 Android 渲染资源预算，已暂缓启动。': '无法设置 Android 渲染资源预算，已暂缓启动。',
+    '设备温度较高，待温度降低后再启动新任务。': '设备温度较高，待温度降低后再启动新任务。',
+    '已按设备当前资源限制并发参数。': '已按设备当前资源限制并发参数。',
+    '大型任务需要重新确认': '大型任务需要重新确认',
+    '正在安全暂停大型任务；确认后才能继续': '正在安全暂停大型任务；确认后才能继续',
+    '大型任务需要确认后才会开始': '大型任务需要确认后才会开始',
+    '无法启动后台运行保护；任务已请求暂停': '无法启动后台运行保护；任务已请求暂停',
+    'Android 无法启动后台运行保护，任务已请求暂停': 'Android 无法启动后台运行保护，任务已请求暂停',
+    'Android 无法启动后台运行保护，任务已暂停': 'Android 无法启动后台运行保护，任务已暂停',
+    '无法启动后台运行保护；整图导出未开始。': '无法启动后台运行保护；整图导出未开始。',
+    'Android 后台运行时限已到，任务已请求安全暂停': 'Android 后台运行时限已到，任务已请求安全暂停',
+    'Android 后台运行时限已到；核心状态已确认': 'Android 后台运行时限已到；核心状态已确认',
+    'Android 后台运行时限已到；正在核对暂停状态': 'Android 后台运行时限已到；正在核对暂停状态',
+    '已安全暂停': '已安全暂停',
+    '核心作业已结束': '核心作业已结束',
+    '正在安全暂停；等待核心确认': '正在安全暂停；等待核心确认',
+    '无法读取 Android 后台超时记录；批处理任务保持待核对：':
+        '无法读取 Android 后台超时记录；批处理任务保持待核对：',
+    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
+        '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：',
+    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。':
+        '无法保存 Android 后台暂停记录；请重试后再启动或恢复。',
+    'Android 后台超时任务仍待安全核对：': 'Android 后台超时任务仍待安全核对：',
+    'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。':
+        'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。',
+    'Android 后台运行时限已到，任务已安全暂停。': 'Android 后台运行时限已到，任务已安全暂停。',
+    'Android 后台运行时限已到；已记录原生任务的终止状态。': 'Android 后台运行时限已到；已记录原生任务的终止状态。',
+    'Android 后台运行时限已到；保留此前成功的导出结果。': 'Android 后台运行时限已到；保留此前成功的导出结果。',
+    '无法启动 Android 后台运行保护；核心任务尚未启动': '无法启动 Android 后台运行保护；核心任务尚未启动',
+    'Android 后台运行保护不可用；请手动重试导出': 'Android 后台运行保护不可用；请手动重试导出',
+    '无法启动 Android 后台运行保护；整图导出尚未启动': '无法启动 Android 后台运行保护；整图导出尚未启动',
+    '无法启动后台运行保护；导出保持暂停': '无法启动后台运行保护；导出保持暂停',
+    '无法启动后台运行保护；任务已安全暂停': '无法启动后台运行保护；任务已安全暂停',
+    '无法启动后台运行保护；正在核对核心暂停状态': '无法启动后台运行保护；正在核对核心暂停状态',
+    'Android 无法确认后台安全暂停，正在核对原生任务状态': 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+    'Android 批处理需要选择一个包含全景子目录的母目录。': 'Android 批处理需要选择一个包含全景子目录的母目录。',
+    'Android 将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。':
+        'Android 将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。',
+    '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。': '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。',
+    '保存到设备': '保存到设备',
+    '分享到…': '分享到…',
+    '保存成功': '保存成功',
+    '分享已取消': '分享已取消',
   };
 }
 
