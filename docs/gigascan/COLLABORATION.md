@@ -1,5 +1,21 @@
 # PocketGigaScan collaboration ledger
 
+## PG-051 blurred-photo alignment and overlap repair
+
+The user approved the algorithm proposal and requested implementation on
+2026-10-06. Luna registration coder owns spherical alignment and neighboring
+matching; Luna renderer coder owns local sharpness selection and rendered
+fixtures; Luna Flutter coder owns localized quality descriptions and diagnostics.
+The coordinator owns cache invalidation, independent review, qualification,
+build/package evidence and this ledger. Work uses `codex/blur-aware-stitch`.
+
+Review requires source-pixel-aware loop thresholds, ambiguity disclosure,
+reliability in both pose and pixel optimization, normalized high-frequency
+sharpness rather than scene variance, preserved sole coverage, and updated
+tiled memory accounting. See [implementation plan](BLUR-REPAIR-PLAN.md).
+The attached finished panorama is diagnostic context; its source photo set
+has not been supplied, so real four-border acceptance is pending.
+
 ## Retained processing baseline
 
 PG-046: Luna geometry/renderer/UI coders; coordinator independent review. Actual384 registration, original-resolution repaired corner crops, main-scene heldout checks,103 Flutter tests,154 core tests and four Windows native suites qualified Windows1.0.8 within the documented visual limits.

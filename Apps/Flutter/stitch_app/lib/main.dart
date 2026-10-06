@@ -2846,6 +2846,31 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (alignment is Map && alignment['qualityStatus'] is String) {
       lines.add(Text('配准质量状态：${alignment['qualityStatus']}'));
     }
+    final edgeDiagnostics = alignment is Map
+        ? alignment['edgeDiagnostics']
+        : null;
+    if (edgeDiagnostics is List && edgeDiagnostics.isNotEmpty) {
+      var adjustedEdges = 0;
+      var ambiguousEdges = 0;
+      for (final edge in edgeDiagnostics) {
+        if (edge is! Map) continue;
+        final weight = edge['reliabilityWeightScale'];
+        if (edge['disposition'] == 'accepted' &&
+            weight is num &&
+            weight < 0.999) {
+          adjustedEdges++;
+        }
+        if (edge['loopConflictAmbiguous'] == true) ambiguousEdges++;
+      }
+      lines.add(
+        Text(
+          StitchLocalizations.of(context).neighborReliabilitySummary(
+            adjustedEdges: adjustedEdges,
+            ambiguousEdges: ambiguousEdges,
+          ),
+        ),
+      );
+    }
     final overlapEstimate = alignment is Map
         ? alignment['gridOverlapEstimate']
         : stats['gridOverlapEstimate'];
@@ -3232,7 +3257,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                     key: const Key('refine-grid-neighbors-option'),
                     contentPadding: EdgeInsets.zero,
                     title: const Text('精细校正相邻照片位置'),
-                    subtitle: const Text('结合四个方向的相邻照片校正网格配准，可能需要更长时间。'),
+                    subtitle: const Text(
+                      '结合四邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。',
+                    ),
                     value: _refineGridNeighbors,
                     onChanged: enabled ? _updateRefineGridNeighbors : null,
                   ),
@@ -3240,7 +3267,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                     key: const Key('deghost-blending-option'),
                     contentPadding: EdgeInsets.zero,
                     title: const Text('抑制接缝重影'),
-                    subtitle: const Text('减少错位边缘的宽区域叠加；场景视差仍需检查。关闭可与传统羽化结果对照。'),
+                    subtitle: const Text(
+                      '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。',
+                    ),
                     value: _seamBlendMode == SeamBlendMode.deghost,
                     onChanged: enabled
                         ? (value) => _updateSeamBlendMode(

@@ -66,6 +66,7 @@ __pycache__/
 !/docs/gigascan/STITCH-TESTING.md
 !/docs/gigascan/ANDROID-STITCH-DESIGN.md
 !/docs/gigascan/ANDROID-STITCH-PLAN.md
+!/docs/gigascan/BLUR-REPAIR-PLAN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md
@@ -74,6 +75,7 @@ __pycache__/
 !/docs/gigascan/evidence/DWARF-STANDALONE-2026-10-05.md
 !/docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md
 !/docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md
+!/docs/gigascan/evidence/BLUR-REPAIR-2026-10-06.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1

@@ -18,7 +18,7 @@ const MAX_PIXEL_REFINEMENT_ITERATIONS: usize = 30;
 const MAX_GRID_COMPONENT_POSE_ITERATIONS: usize = 30;
 const GRID_COMPONENT_HUBER_ANGLE_RAD: f64 = 0.01;
 const GRID_COMPONENT_STEP_TOLERANCE_RAD: f64 = 1e-7;
-const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 7;
+const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 8;
 const APPROVED_V2_SNAPSHOT_PRODUCER_SHA256: &str =
     "3a1eb012a9f1756b8772f217088fbe904b6ec0803457a72d3d0a36c6f2b9911e";
 fn current_pixel_solver_parameters() -> Value {
@@ -375,6 +375,163 @@ fn root_anchored_visual_tiles(count: usize, constraints: &[Constraint]) -> Vec<b
     seen
 }
 
+fn correspondence_coverage(points: &[[f64; 4]], req: &Request) -> (usize, usize, f64) {
+    let mut source = 0u16;
+    let mut target = 0u16;
+    for point in points {
+        let cell = |x: f64, y: f64| -> Option<usize> {
+            if !x.is_finite()
+                || !y.is_finite()
+                || x < 0.0
+                || y < 0.0
+                || x >= req.source_width as f64
+                || y >= req.source_height as f64
+            {
+                return None;
+            }
+            let column = ((x / req.source_width as f64) * 4.0).floor() as usize;
+            let row = ((y / req.source_height as f64) * 4.0).floor() as usize;
+            Some(row.min(3) * 4 + column.min(3))
+        };
+        if let Some(index) = cell(point[0], point[1]) {
+            source |= 1 << index;
+        }
+        if let Some(index) = cell(point[2], point[3]) {
+            target |= 1 << index;
+        }
+    }
+    let source_count = source.count_ones() as usize;
+    let target_count = target.count_ones() as usize;
+    // A normal overlap often occupies only two columns of the 4x4 grid. Use
+    // eight cells as full credit and keep a non-zero floor so a valid blurry
+    // edge remains usable when its support is spatially narrow.
+    let score = 0.25 + 0.75 * (source_count.min(target_count) as f64 / 8.0).clamp(0.0, 1.0);
+    (source_count, target_count, score)
+}
+
+/// Check each elementary grid loop once (O(rows*columns)). When an alternate
+/// three-edge route disagrees with the fourth edge, reduce only the weakest
+/// correspondence constraint in that loop. Constraints remain present, so
+/// every input tile stays connected and provenance is still visual evidence.
+fn weight_neighbor_loop_conflicts(
+    rows: usize,
+    columns: usize,
+    constraints: &mut [Constraint],
+    req: &Request,
+) -> (
+    std::collections::HashMap<(usize, usize), f64>,
+    std::collections::HashMap<(usize, usize), f64>,
+    std::collections::HashSet<(usize, usize)>,
+) {
+    use std::collections::HashMap;
+    let mut indices = HashMap::with_capacity(constraints.len());
+    let qualities = constraints
+        .iter()
+        .map(|constraint| constraint.weight)
+        .collect::<Vec<_>>();
+    for (index, edge) in constraints.iter().enumerate() {
+        indices.insert((edge.from, edge.to), index);
+    }
+    let mut worst_loop = HashMap::<(usize, usize), f64>::new();
+    let mut downweighted = HashMap::<(usize, usize), f64>::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    let mut candidate_scales = HashMap::<(usize, usize), f64>::new();
+    for row in 0..rows.saturating_sub(1) {
+        for column in 0..columns.saturating_sub(1) {
+            let top_left = row * columns + column;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + columns;
+            let bottom_right = bottom_left + 1;
+            let Some(&top) = indices.get(&(top_left, top_right)) else {
+                continue;
+            };
+            let Some(&right) = indices.get(&(top_right, bottom_right)) else {
+                continue;
+            };
+            let Some(&bottom) = indices.get(&(bottom_left, bottom_right)) else {
+                continue;
+            };
+            let Some(&left) = indices.get(&(top_left, bottom_left)) else {
+                continue;
+            };
+            // The bottom and left edges point opposite to the loop traversal.
+            let cycle = mul(
+                mul(
+                    mul(constraints[top].rotation, constraints[right].rotation),
+                    inverse(constraints[bottom].rotation).unwrap_or(ID),
+                ),
+                inverse(constraints[left].rotation).unwrap_or(ID),
+            );
+            let residual = log_rotation(cycle)
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            if !residual.is_finite() {
+                continue;
+            }
+            let pixel_equivalent = residual * ((req.fx.abs() + req.fy.abs()) * 0.5);
+            for index in [top, right, bottom, left] {
+                let edge = &constraints[index];
+                worst_loop
+                    .entry((edge.from, edge.to))
+                    .and_modify(|value| *value = value.max(pixel_equivalent))
+                    .or_insert(pixel_equivalent);
+            }
+            if pixel_equivalent <= 12.0 {
+                continue;
+            }
+            let mut ranked = [top, right, bottom, left];
+            ranked.sort_by(|a, b| qualities[*a].total_cmp(&qualities[*b]));
+            let weakest = ranked[0];
+            // If support evidence is nearly tied, the loop alone cannot name
+            // the wrong edge. Preserve all four weights and expose ambiguity.
+            let ambiguous_choice = qualities[ranked[0]] >= qualities[ranked[1]] * 0.85;
+            let edge = &constraints[weakest];
+            let pair = (edge.from, edge.to);
+            if ambiguous_choice {
+                for index in [top, right, bottom, left] {
+                    ambiguous.insert((constraints[index].from, constraints[index].to));
+                }
+            } else {
+                candidate_scales
+                    .entry(pair)
+                    .and_modify(|value| *value = value.min(0.05))
+                    .or_insert(0.05);
+            }
+        }
+    }
+    for edge in constraints {
+        if let Some(scale) = candidate_scales.get(&(edge.from, edge.to)) {
+            edge.weight *= scale;
+            downweighted.insert((edge.from, edge.to), *scale);
+        }
+    }
+    ambiguous.retain(|pair| !candidate_scales.contains_key(pair));
+    (worst_loop, downweighted, ambiguous)
+}
+
+/// Convert final registration weights into relative pixel-optimizer confidence.
+/// This is support/residual/coverage/loop evidence, never a sharpness score.
+fn reliability_scales_from_constraints(
+    constraints: &[Constraint],
+) -> std::collections::HashMap<(usize, usize), f64> {
+    let mut weights = constraints
+        .iter()
+        .map(|constraint| constraint.weight)
+        .collect::<Vec<_>>();
+    let typical = median_value(&mut weights).unwrap_or(1.0).max(1e-9);
+    constraints
+        .iter()
+        .map(|constraint| {
+            (
+                (constraint.from, constraint.to),
+                (constraint.weight / typical).clamp(0.001, 1.0),
+            )
+        })
+        .collect()
+}
+
 fn visual_components(count: usize, constraints: &[Constraint]) -> Vec<Vec<usize>> {
     let mut adjacency = vec![Vec::<usize>::new(); count];
     for edge in constraints {
@@ -533,7 +690,9 @@ fn synthesize_grid_constraints(
                     continue;
                 }
                 let Some(step) = step else {
-                    return Err(format!("grid-assisted placement has no reliable {direction} rotation for neighbor edge {from}->{to}"));
+                    return Err(format!(
+                        "grid-assisted placement has no reliable {direction} rotation for neighbor edge {from}->{to}"
+                    ));
                 };
                 synthesized.push(Constraint {
                     from,
@@ -1255,23 +1414,38 @@ fn incident_pixel_cost(
     cost
 }
 
+#[cfg(test)]
 fn visual_pixel_huber_cost(
     poses: &[Mat],
     edges: &[&crate::pipeline::SphericalMatchEdge],
     req: &Request,
+) -> f64 {
+    visual_pixel_huber_cost_with_reliability(poses, edges, req, &std::collections::HashMap::new())
+}
+
+fn visual_pixel_huber_cost_with_reliability(
+    poses: &[Mat],
+    edges: &[&crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> f64 {
     let mut cost = 0.0;
     for edge in edges {
         let Some(residuals) = edge_pixel_residuals(poses, edge, req) else {
             return f64::INFINITY;
         };
-        cost += residuals
-            .into_iter()
-            .map(|residual| {
-                huber_cost(residual[0].hypot(residual[1]), 3.0)
-                    + huber_cost(residual[2].hypot(residual[3]), 3.0)
-            })
-            .sum::<f64>();
+        let reliability = reliability_scales
+            .get(&(edge.from, edge.to))
+            .copied()
+            .unwrap_or(1.0);
+        cost += reliability
+            * residuals
+                .into_iter()
+                .map(|residual| {
+                    huber_cost(residual[0].hypot(residual[1]), 3.0)
+                        + huber_cost(residual[2].hypot(residual[3]), 3.0)
+                })
+                .sum::<f64>();
     }
     cost
 }
@@ -1365,6 +1539,7 @@ struct JointPruneOutcome {
     final_refinement: Option<Value>,
 }
 
+#[cfg(test)]
 fn prune_visual_edges_with_joint_leave_one_out(
     poses: &mut [Mat],
     visual_constraints: &mut Vec<Constraint>,
@@ -1372,6 +1547,26 @@ fn prune_visual_edges_with_joint_leave_one_out(
     req: &Request,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     candidate_filter: Option<&std::collections::HashSet<(usize, usize)>>,
+) -> std::result::Result<JointPruneOutcome, Error> {
+    prune_visual_edges_with_joint_leave_one_out_weighted(
+        poses,
+        visual_constraints,
+        matched_edges,
+        req,
+        checkpoint,
+        candidate_filter,
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn prune_visual_edges_with_joint_leave_one_out_weighted(
+    poses: &mut [Mat],
+    visual_constraints: &mut Vec<Constraint>,
+    matched_edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    candidate_filter: Option<&std::collections::HashSet<(usize, usize)>>,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> std::result::Result<JointPruneOutcome, Error> {
     let mut outcome = JointPruneOutcome {
         rejected_edges: Vec::new(),
@@ -1510,13 +1705,14 @@ fn prune_visual_edges_with_joint_leave_one_out(
                 .map(|edge| edge.2)
                 .unwrap_or(f64::INFINITY);
             let mut trial_poses = poses.to_vec();
-            let stats = refine_visual_component_pixels_mode(
+            let stats = refine_visual_component_pixels_with_reliability(
                 &mut trial_poses,
                 &trial_constraints,
                 &trial_edges,
                 req,
                 checkpoint,
                 false,
+                reliability_scales,
             )?;
             let (trial_rms, _, _, _, mut trial_edge_errors, trial_complete) =
                 global_reprojection_metrics(&trial_poses, &trial_constraints, &trial_edges, req);
@@ -2002,6 +2198,7 @@ fn assemble_pixel_normal_equations(
     edges: &[&crate::pipeline::SphericalMatchEdge],
     req: &Request,
     variable_by_tile: &[Option<usize>],
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
     damping: f64,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<(NormalMatrix, Vec<f64>), Error> {
@@ -2019,12 +2216,18 @@ fn assemble_pixel_normal_equations(
     rhs.resize(dimension, 0.0);
     let epsilon = 1e-7;
     for (edge_index, edge) in edges.iter().enumerate() {
+        let reliability = reliability_scales
+            .get(&(edge.from, edge.to))
+            .copied()
+            .unwrap_or(1.0);
         for (point_index, point) in edge.points.iter().enumerate() {
             if point_index % 256 == 0 {
                 checkpoint("pixel-bundle-assembly").map_err(|_| Error::Cancelled)?;
             }
             let Some(base) = edge_point_pixel_residual(poses, edge, point, req) else {
-                return Err(Error::Registration(format!("pixel bundle projection failed on edge {edge_index}, correspondence {point_index}")));
+                return Err(Error::Registration(format!(
+                    "pixel bundle projection failed on edge {edge_index}, correspondence {point_index}"
+                )));
             };
             let tiles = [edge.from, edge.to];
             let mut jacobians = [[[0.0; 4]; 3]; 2];
@@ -2055,7 +2258,7 @@ fn assemble_pixel_normal_equations(
             }
             for pair_start in [0usize, 2usize] {
                 let radius = base[pair_start].hypot(base[pair_start + 1]);
-                let robust_weight = if radius > 3.0 { 3.0 / radius } else { 1.0 };
+                let robust_weight = reliability * if radius > 3.0 { 3.0 / radius } else { 1.0 };
                 for lhs_side in 0..2 {
                     let Some(lhs_variable) = variable_by_tile[tiles[lhs_side]] else {
                         continue;
@@ -2093,6 +2296,7 @@ fn assemble_pixel_normal_equations(
     Ok((normal, rhs))
 }
 
+#[cfg(test)]
 fn refine_visual_component_pixels(
     poses: &mut [Mat],
     visual_constraints: &[Constraint],
@@ -2116,9 +2320,18 @@ fn refine_visual_component_pixels(
     ),
     Error,
 > {
-    refine_visual_component_pixels_mode(poses, visual_constraints, edges, req, checkpoint, true)
+    refine_visual_component_pixels_with_reliability(
+        poses,
+        visual_constraints,
+        edges,
+        req,
+        checkpoint,
+        true,
+        &std::collections::HashMap::new(),
+    )
 }
 
+#[cfg(test)]
 fn refine_visual_component_pixels_mode(
     poses: &mut [Mat],
     visual_constraints: &[Constraint],
@@ -2126,6 +2339,42 @@ fn refine_visual_component_pixels_mode(
     req: &Request,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     reinitialize_from_rotation_graph: bool,
+) -> std::result::Result<
+    (
+        usize,
+        usize,
+        f64,
+        f64,
+        usize,
+        bool,
+        usize,
+        f64,
+        bool,
+        usize,
+        usize,
+        f64,
+    ),
+    Error,
+> {
+    refine_visual_component_pixels_with_reliability(
+        poses,
+        visual_constraints,
+        edges,
+        req,
+        checkpoint,
+        reinitialize_from_rotation_graph,
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn refine_visual_component_pixels_with_reliability(
+    poses: &mut [Mat],
+    visual_constraints: &[Constraint],
+    edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    reinitialize_from_rotation_graph: bool,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> std::result::Result<
     (
         usize,
@@ -2252,12 +2501,14 @@ fn refine_visual_component_pixels_mode(
         for _ in &visual_edges {
             checkpoint("pixel-refinement-edge").map_err(|_| Error::Cancelled)?;
         }
-        let old_global_cost = visual_pixel_huber_cost(poses, &visual_edges, req);
+        let old_global_cost =
+            visual_pixel_huber_cost_with_reliability(poses, &visual_edges, req, reliability_scales);
         let (normal, rhs) = assemble_pixel_normal_equations(
             poses,
             &visual_edges,
             req,
             &variable_by_tile,
+            reliability_scales,
             damping,
             checkpoint,
         )?;
@@ -2335,7 +2586,13 @@ fn refine_visual_component_pixels_mode(
                 poses[tile] = normalize_rotation(mul(exp_rotation(step), original_poses[tile]))
                     .unwrap_or(original_poses[tile]);
             }
-            if visual_pixel_huber_cost(poses, &visual_edges, req) < old_global_cost {
+            if visual_pixel_huber_cost_with_reliability(
+                poses,
+                &visual_edges,
+                req,
+                reliability_scales,
+            ) < old_global_cost
+            {
                 accepted = true;
                 break;
             }
@@ -2350,7 +2607,8 @@ fn refine_visual_component_pixels_mode(
         }
         damping = (damping * 0.3).max(1e-8);
         completed_sweeps = sweep + 1;
-        let new_global_cost = visual_pixel_huber_cost(poses, &visual_edges, req);
+        let new_global_cost =
+            visual_pixel_huber_cost_with_reliability(poses, &visual_edges, req, reliability_scales);
         if (old_global_cost - new_global_cost) <= old_global_cost.max(1.0) * 1e-8 {
             converged = true;
             break;
@@ -3607,6 +3865,7 @@ fn diagnostic_correspondence_snapshot(
     edges: &[crate::pipeline::SphericalMatchEdge],
     warps: Option<&[Option<crate::texture_warp::SourcePlaneWarp>]>,
 ) -> Value {
+    let reliability_scales = reliability_scales_from_constraints(constraints);
     let source_hashes = tiles
         .iter()
         .enumerate()
@@ -3626,6 +3885,7 @@ fn diagnostic_correspondence_snapshot(
                 "to":edge.to,
                 "rotation":constraint.rotation,
                 "weight":constraint.weight,
+                "reliabilityWeightScale":reliability_scales.get(&(constraint.from,constraint.to)).copied().unwrap_or(1.0),
                 "matches":edge.matches,
                 "inliers":edge.inliers,
                 "inlierRatio":edge.inlier_ratio,
@@ -3885,7 +4145,10 @@ fn align(
                            disposition: &str,
                            ray_median: Option<f64>,
                            ray_rms: Option<f64>| {
-        json!({"from":edge.from,"to":edge.to,"initial":attempt_diagnostic(&edge.initial),"retry":edge.retry.as_ref().map(&attempt_diagnostic),"claheRetry":edge.clahe_retry.as_ref().map(&attempt_diagnostic),"selectedAttempt":if edge.used_clahe_retry {"clahe"} else if edge.used_retry {"lowContrast"} else {"initial"},"usedRetry":edge.used_retry,"usedClaheRetry":edge.used_clahe_retry,"matches":edge.matches,"inliers":edge.inliers,"inlierRatio":edge.inlier_ratio,"rayMedianResidualPx":ray_median,"rayRmsResidualPx":ray_rms,"disposition":disposition})
+        {
+            let (source_cells, target_cells, score) = correspondence_coverage(&edge.points, &req);
+            json!({"from":edge.from,"to":edge.to,"initial":attempt_diagnostic(&edge.initial),"retry":edge.retry.as_ref().map(&attempt_diagnostic),"claheRetry":edge.clahe_retry.as_ref().map(&attempt_diagnostic),"selectedAttempt":if edge.used_clahe_retry {"clahe"} else if edge.used_retry {"lowContrast"} else {"initial"},"usedRetry":edge.used_retry,"usedClaheRetry":edge.used_clahe_retry,"matches":edge.matches,"inliers":edge.inliers,"inlierRatio":edge.inlier_ratio,"rayMedianResidualPx":ray_median,"rayRmsResidualPx":ray_rms,"spatialCoverage":{"sourceOccupiedCells":source_cells,"targetOccupiedCells":target_cells,"score":score},"cycleConsistencyPixels":Value::Null,"reliabilityWeightScale":score,"loopConflictAmbiguous":false,"disposition":disposition})
+        }
     };
     for edge in &matched_edges {
         if touches_forced_grid_cell(edge.from, edge.to, &forced_grid_indices) {
@@ -3938,8 +4201,11 @@ fn align(
         let from = edge.from;
         let to = edge.to;
         let source_to_target = transpose(target_from_source);
-        let weight = (edge.inliers as f64 * edge.inlier_ratio.max(0.05) / (1. + median_residual))
+        let (_, _, coverage_score) = correspondence_coverage(&edge.points, &req);
+        let base_weight = (edge.inliers as f64 * edge.inlier_ratio.max(0.05)
+            / (1. + median_residual))
             .clamp(0.1, 1000.);
+        let weight = base_weight * coverage_score;
         constraints.push(Constraint {
             from,
             to,
@@ -3954,6 +4220,23 @@ fn align(
             Some(median_residual),
             Some(rms_residual),
         ));
+    }
+    let (loop_residuals, loop_scales, ambiguous_loops) =
+        weight_neighbor_loop_conflicts(req.rows, req.columns, &mut constraints, &req);
+    // Carry the same inlier/residual/coverage/loop evidence into the pixel
+    // bundle. The floor keeps a valid low-texture edge participating.
+    let reliability_scales = reliability_scales_from_constraints(&constraints);
+    for diagnostic in &mut edge_diagnostics {
+        let pair = (
+            diagnostic["from"].as_u64().unwrap_or(u64::MAX) as usize,
+            diagnostic["to"].as_u64().unwrap_or(u64::MAX) as usize,
+        );
+        if let Some(residual) = loop_residuals.get(&pair) {
+            diagnostic["cycleConsistencyPixels"] = json!(residual);
+        }
+        diagnostic["reliabilityWeightScale"] =
+            json!(reliability_scales.get(&pair).copied().unwrap_or(1.0));
+        diagnostic["loopConflictAmbiguous"] = json!(ambiguous_loops.contains(&pair));
     }
     let mut visual_constraints = constraints.clone();
     let root_graph_reachable = connected_tiles(tiles.len(), &visual_constraints);
@@ -4058,7 +4341,9 @@ fn align(
                 if !angle.is_finite() || angle <= 1e-6 || angle >= fov * 0.9 {
                     return Err(SphericalFailure {
                         code: "REGISTRATION_FAILED",
-                        message: format!("grid-assisted {axis} step {angle:.4}rad is outside the useful overlap range"),
+                        message: format!(
+                            "grid-assisted {axis} step {angle:.4}rad is outside the useful overlap range"
+                        ),
                         diagnostics: Some(json!({
                             "placementMode": "grid-assisted",
                             "axis": axis,
@@ -4115,12 +4400,14 @@ fn align(
         pixel_dense_cholesky_fallback_count,
         pixel_max_accepted_linear_residual,
     ) = if is_grid_assisted {
-        refine_visual_component_pixels(
+        refine_visual_component_pixels_with_reliability(
             &mut poses,
             &visual_constraints,
             &matched_edges,
             &req,
             checkpoint,
+            true,
+            &reliability_scales,
         )?
     } else {
         (0, 0, 0.0, 0.0, 0, true, 0, 0.0, true, 0, 0, 0.0)
@@ -4128,13 +4415,14 @@ fn align(
     let cycle_pruning_disabled_until_joint_loo = false;
     let pixel_post_prune_started = std::time::Instant::now();
     let prune_outcome = if is_grid_assisted {
-        prune_visual_edges_with_joint_leave_one_out(
+        prune_visual_edges_with_joint_leave_one_out_weighted(
             &mut poses,
             &mut visual_constraints,
             &matched_edges,
             &req,
             checkpoint,
             None,
+            &reliability_scales,
         )?
     } else {
         JointPruneOutcome {
@@ -4288,7 +4576,9 @@ fn align(
     {
         let message = format!(
             "global matched-ray reprojection is {:.2}px RMS (worst edge {:.2}px; limit {:.1}px); supplied intrinsics or scene parallax may be unsuitable",
-            global_reprojection_rms, maximum_edge_reprojection_rms, MAX_GLOBAL_REPROJECTION_RMS_PIXELS
+            global_reprojection_rms,
+            maximum_edge_reprojection_rms,
+            MAX_GLOBAL_REPROJECTION_RMS_PIXELS
         );
         return Err(SphericalFailure {
             code: "REGISTRATION_FAILED",
@@ -4394,6 +4684,7 @@ fn align(
         "cycleLeaveOneOutEvaluations": cycle_loo_evaluations,
         "cyclePruneBudgetExceeded": cycle_prune_budget_exceeded,
         "cyclePruningDisabledUntilJointLeaveOneOut": cycle_pruning_disabled_until_joint_loo,
+        "reliabilityWeightScaleDefinition": "relative confidence = final edge constraint weight / median accepted visual constraint weight, clamped to [0.001, 1.0]; it is not a blur score",
         "cyclePruneBudgetPolicy": "max(1, floor(componentVisualEdgeCount / 20)); the minimum of one can exceed 5% for components smaller than 20 edges",
         "postPrunePixelRefinement": post_prune_pixel_refinement,
         "gridComponentPoseRefinement": grid_component_pose_refinement,
@@ -4537,22 +4828,20 @@ fn align(
         .enumerate()
         .filter_map(|(i, connected)| (!connected).then_some(i))
         .collect::<Vec<_>>());
-    report["gridHorizontalStepRadians"] =
-        json!(horizontal_grid_step
-            .as_ref()
-            .map(|step| log_rotation(step.rotation)
-                .iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-                .sqrt()));
-    report["gridVerticalStepRadians"] =
-        json!(vertical_grid_step
-            .as_ref()
-            .map(|step| log_rotation(step.rotation)
-                .iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-                .sqrt()));
+    report["gridHorizontalStepRadians"] = json!(horizontal_grid_step.as_ref().map(|step| {
+        log_rotation(step.rotation)
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    }));
+    report["gridVerticalStepRadians"] = json!(vertical_grid_step.as_ref().map(|step| {
+        log_rotation(step.rotation)
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    }));
     report["gridHorizontalStep"] = grid_step_diagnostic(horizontal_grid_step.as_ref());
     report["gridVerticalStep"] = grid_step_diagnostic(vertical_grid_step.as_ref());
     report["gridEstimatedPlacementHasDirectVisualEvidence"] = json!(false);
@@ -4616,6 +4905,17 @@ fn align(
         quality_warnings.push(
             "reference tile (0,0) has no accepted visual edge; other visual components still contribute to the solved layout but are positioned relative to the reference through synthesized grid edges".into(),
         );
+    }
+    if !ambiguous_loops.is_empty() {
+        quality_warnings.push(format!(
+            "{} neighbor-loop conflicts have similar correspondence support across competing edges; loop evidence could not identify a single bad edge, so inspect the affected seams",
+            ambiguous_loops.len()
+        ));
+    } else if !loop_scales.is_empty() {
+        quality_warnings.push(format!(
+            "{} lower-support neighbor edges were downweighted after inconsistent 2x2 loops; inspect the affected seams",
+            loop_scales.len()
+        ));
     }
     if nominal_only_layout {
         quality_warnings.push(
@@ -5039,6 +5339,8 @@ fn refine_correspondence_snapshot_excluding_internal(
         .ok_or_else(|| failure("accepted visual edge list is missing".into()))?;
     let mut constraints = Vec::with_capacity(cache_edges.len());
     let mut edges = Vec::with_capacity(cache_edges.len());
+    let mut cached_reliability_scales = std::collections::HashMap::new();
+    let mut reconstructed_legacy_reliability = false;
     for item in cache_edges {
         let from = item["from"].as_u64().unwrap_or(u64::MAX) as usize;
         let to = item["to"].as_u64().unwrap_or(u64::MAX) as usize;
@@ -5068,6 +5370,26 @@ fn refine_correspondence_snapshot_excluding_internal(
             rotation,
             weight: item["weight"].as_f64().unwrap_or(1.0),
         });
+        if item.get("reliabilityWeightScale").is_none() {
+            if !legacy_fit_compatible {
+                return Err(failure(
+                    "snapshot edge is missing its reliability weight; regenerate the alignment snapshot".into(),
+                ));
+            }
+            reconstructed_legacy_reliability = true;
+        } else {
+            let Some(scale) = item["reliabilityWeightScale"].as_f64() else {
+                return Err(failure(
+                    "cached edge reliability weight is not numeric".into(),
+                ));
+            };
+            if !scale.is_finite() || !(0.0..=1.0).contains(&scale) || scale <= 0.0 {
+                return Err(failure(
+                    "cached edge reliability weight is outside the valid range".into(),
+                ));
+            }
+            cached_reliability_scales.insert((from, to), scale);
+        }
         let attempt = crate::pipeline::SphericalMatchAttempt {
             from_features: 0,
             to_features: 0,
@@ -5153,9 +5475,13 @@ fn refine_correspondence_snapshot_excluding_internal(
             "existing diagnostic exclusions split a visual component".into(),
         ));
     }
+    // The snapshot stores the final constraint weight (including spatial and
+    // loop reliability). Reconstruct the same relative scales during replay.
+    let mut reliability_scales = reliability_scales_from_constraints(&constraints);
+    reliability_scales.extend(cached_reliability_scales);
     let mut refined_poses = poses;
     let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
-    let outcome = prune_visual_edges_with_joint_leave_one_out(
+    let outcome = prune_visual_edges_with_joint_leave_one_out_weighted(
         &mut refined_poses,
         &mut constraints,
         &edges,
@@ -5166,6 +5492,7 @@ fn refine_correspondence_snapshot_excluding_internal(
         } else {
             Some(&newly_requested)
         },
+        &reliability_scales,
     )
     .map_err(|error| failure(format!("offline joint leave-one-out failed: {error}")))?;
     let accepted_new = outcome
@@ -5438,6 +5765,11 @@ fn refine_correspondence_snapshot_excluding_internal(
         "excludedEdgesHeldOut":held_out_diagnostics,
         "diagnosticCorrespondenceSnapshot":snapshot
     });
+    result["reliabilityScaleCompatibility"] = json!(if reconstructed_legacy_reliability {
+        "reconstructed_from_legacy_constraint_weights"
+    } else {
+        "restored_from_snapshot"
+    });
     if let (Some(warps), Some(metrics)) = (diagnostic_warps, corrected_metrics) {
         let tiles = req
             .tiles
@@ -5661,6 +5993,7 @@ mod tests {
                 .collect::<Vec<_>>();
             accepted_edges.push(json!({
                 "from":from,"to":to,"rotation":mul(transpose(poses[from]), poses[to]),"weight":1.0,
+                "reliabilityWeightScale":if from == 0 && to == 1 { 0.0171875 } else { 1.0 },
                 "points":points,"matches":corners.len(),"inliers":corners.len(),"inlierRatio":1.0,"homographyResidualPx":0.5
             }));
         }
@@ -5695,6 +6028,34 @@ mod tests {
             &[(0, 2)],
         )
         .unwrap();
+        assert_eq!(
+            initial["diagnosticCorrespondenceSnapshot"]["acceptedVisualEdges"][0]
+                ["reliabilityWeightScale"],
+            0.0171875
+        );
+        let mut invalid_scale_snapshot = snapshot.clone();
+        invalid_scale_snapshot["acceptedVisualEdges"][0]["reliabilityWeightScale"] = json!(0.0);
+        rehash_snapshot(&mut invalid_scale_snapshot);
+        assert!(refine_correspondence_snapshot_json(
+            &request_json,
+            &invalid_scale_snapshot.to_string()
+        )
+        .unwrap_err()
+        .message
+        .contains("reliability weight"));
+        let mut missing_scale_snapshot = snapshot.clone();
+        missing_scale_snapshot["acceptedVisualEdges"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reliabilityWeightScale");
+        rehash_snapshot(&mut missing_scale_snapshot);
+        assert!(refine_correspondence_snapshot_json(
+            &request_json,
+            &missing_scale_snapshot.to_string()
+        )
+        .unwrap_err()
+        .message
+        .contains("missing its reliability weight"));
         assert_eq!(initial["retainedGraphGatePassed"], true);
         assert_eq!(initial["qualityGatePassed"], false);
         assert_eq!(initial["productionLayoutEmitted"], false);
@@ -6114,6 +6475,81 @@ mod tests {
     }
 
     #[test]
+    fn correspondence_coverage_distinguishes_broad_and_concentrated_support() {
+        let req = grid_request(1, 2);
+        let broad = (0..4)
+            .flat_map(|row| {
+                (0..4).map(move |column| {
+                    let x = 10.0 + column as f64 * 20.0;
+                    let y = 10.0 + row as f64 * 20.0;
+                    [x, y, x, y]
+                })
+            })
+            .collect::<Vec<_>>();
+        let concentrated = vec![[20.0, 20.0, 20.0, 20.0]; 16];
+        let (_, _, broad_score) = correspondence_coverage(&broad, &req);
+        let (source_cells, target_cells, concentrated_score) =
+            correspondence_coverage(&concentrated, &req);
+        assert_eq!((source_cells, target_cells), (1, 1));
+        assert_eq!(broad_score, 1.0);
+        assert!(concentrated_score < broad_score);
+        assert!(
+            concentrated_score > 0.0,
+            "valid narrow evidence stays usable"
+        );
+    }
+
+    #[test]
+    fn neighbor_loop_uses_noncommuting_rotations_and_scales_only_weak_conflict() {
+        let mut req = grid_request(2, 2);
+        req.fx = 400.0;
+        req.fy = 420.0;
+        let truth = [
+            ID,
+            mul(rx(0.08), ry(0.12)),
+            mul(rz(-0.1), rx(0.15)),
+            mul(ry(0.2), rz(0.05)),
+        ];
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let mut constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: mul(transpose(truth[from]), truth[to]),
+                weight: if (from, to) == (0, 1) { 0.1 } else { 10.0 },
+            })
+            .collect::<Vec<_>>();
+        let (positive_residuals, positive_scales, _) =
+            weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(positive_residuals[&(0, 1)] < 12.0);
+        assert!(positive_scales.is_empty());
+
+        constraints[0].rotation = mul(constraints[0].rotation, ry(0.2));
+        let (negative_residuals, negative_scales, ambiguous) =
+            weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(negative_residuals[&(0, 1)] > 12.0);
+        assert_eq!(negative_scales.get(&(0, 1)), Some(&0.05));
+        assert!(ambiguous.is_empty());
+        assert!(constraints[0].weight < 0.1);
+        assert!(constraints[1..].iter().all(|edge| edge.weight == 10.0));
+
+        let mut tied_constraints = constraints
+            .iter()
+            .cloned()
+            .map(|mut edge| {
+                edge.weight = 1.0;
+                edge
+            })
+            .collect::<Vec<_>>();
+        let (_, tied_scales, tied_ambiguity) =
+            weight_neighbor_loop_conflicts(2, 2, &mut tied_constraints, &req);
+        assert!(tied_scales.is_empty());
+        assert_eq!(tied_ambiguity.len(), 4);
+        assert!(tied_constraints.iter().all(|edge| edge.weight == 1.0));
+    }
+
+    #[test]
     fn accepts_large_grids_without_arbitrary_axis_or_photo_caps() {
         assert!(validate(&grid_request(16, 24)).is_ok());
         assert!(validate(&grid_request(32, 32)).is_ok());
@@ -6208,6 +6644,10 @@ mod tests {
         assert_eq!(parsed.tiles.len(), 2);
     }
 
+    fn rx(a: f64) -> Mat {
+        let (s, c) = a.sin_cos();
+        [1., 0., 0., 0., c, -s, 0., s, c]
+    }
     fn rz(a: f64) -> Mat {
         let (s, c) = a.sin_cos();
         [c, -s, 0., s, c, 0., 0., 0., 1.]
@@ -7532,6 +7972,107 @@ mod tests {
     }
 
     #[test]
+    fn pixel_bundle_keeps_peers_stable_when_a_loop_conflict_is_downweighted() {
+        let mut req = grid_request(2, 2);
+        req.fx = 500.0;
+        req.fy = 480.0;
+        req.cx = 200.0;
+        req.cy = 150.0;
+        req.source_width = 400;
+        req.source_height = 300;
+        let truth = [
+            ID,
+            mul(rx(0.04), ry(0.1)),
+            rz(-0.08),
+            mul(ry(0.12), rz(0.03)),
+        ];
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let corners = [
+            (30.0, 30.0),
+            (360.0, 30.0),
+            (30.0, 270.0),
+            (360.0, 270.0),
+            (100.0, 80.0),
+            (300.0, 220.0),
+            (190.0, 40.0),
+            (210.0, 260.0),
+        ];
+        let mut edges = pairs
+            .iter()
+            .map(|&(from, to)| {
+                let points = corners
+                    .iter()
+                    .map(|&(x, y)| {
+                        let world_ray = mul_vec(truth[from], camera_ray(x, y, &req));
+                        let target_ray = mul_vec(transpose(truth[to]), world_ray);
+                        let (tx, ty) = project_camera_ray(target_ray, &req).unwrap();
+                        [x, y, tx, ty]
+                    })
+                    .collect::<Vec<_>>();
+                let mut edge = reprojection_fixture_edge(points);
+                edge.from = from;
+                edge.to = to;
+                edge
+            })
+            .collect::<Vec<_>>();
+        for point in &mut edges[0].points {
+            point[2] += 35.0;
+        }
+        let constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: mul(transpose(truth[from]), truth[to]),
+                weight: 1.0,
+            })
+            .collect::<Vec<_>>();
+        let mut unweighted = truth;
+        let mut weighted = truth;
+        let mut no_cancel = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        refine_visual_component_pixels_mode(
+            &mut unweighted,
+            &constraints,
+            &edges,
+            &req,
+            &mut no_cancel,
+            true,
+        )
+        .unwrap();
+        let scales = std::collections::HashMap::from([((0, 1), 0.001)]);
+        refine_visual_component_pixels_with_reliability(
+            &mut weighted,
+            &constraints,
+            &edges,
+            &req,
+            &mut no_cancel,
+            true,
+            &scales,
+        )
+        .unwrap();
+        let pose_error = |poses: &[Mat]| {
+            poses
+                .iter()
+                .zip(truth)
+                .skip(1)
+                .map(|(pose, expected)| {
+                    log_rotation(mul(transpose(expected), *pose))
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                        .sqrt()
+                })
+                .sum::<f64>()
+        };
+        let unweighted_error = pose_error(&unweighted);
+        let weighted_error = pose_error(&weighted);
+        assert!(
+            weighted_error < unweighted_error * 0.5,
+            "weighted pixel optimization should protect the peer backbone: {weighted_error} vs {unweighted_error}"
+        );
+    }
+
+    #[test]
     fn pixel_refinement_converges_on_a_long_visual_loop_with_monotonic_cost() {
         let req = Request {
             rows: 1,
@@ -7852,7 +8393,10 @@ mod tests {
         assert_eq!(edges.len(), 728);
         assert_eq!(reinitialized, 383);
         assert_eq!(optimized, 383);
-        assert!(converged, "384 grid failed to converge after {iterations} iterations; PCG {pcg_max_iterations}, relres {pcg_max_residual:e}, failures {pcg_failures}");
+        assert!(
+            converged,
+            "384 grid failed to converge after {iterations} iterations; PCG {pcg_max_iterations}, relres {pcg_max_residual:e}, failures {pcg_failures}"
+        );
         assert!(iterations > 0 && iterations <= MAX_PIXEL_REFINEMENT_ITERATIONS);
         assert!(
             pcg_all_converged,

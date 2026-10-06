@@ -17,7 +17,7 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 14;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 15;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
@@ -1118,6 +1118,8 @@ fn alignment_stats(layout: &Value, cache_hit: bool) -> Value {
         "registrationMegapixels":report["registrationMegapixels"],
         "neighborMode":report["neighborMode"],
         "qualityStatus":report["qualityStatus"],
+        "edgeDiagnostics":report["edgeDiagnostics"],
+        "qualityWarnings":report["qualityWarnings"],
         "gridOverlapEstimate":report["gridOverlapEstimate"],
         "featureExtractionMs":report["featureExtractionMs"],
         "initialMatchingMs":report["initialMatchingMs"],
@@ -1573,9 +1575,10 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
-            alignment_cache_key_for_version(14, &request, &hashes),
-            "the current component-pose algorithm must use cache version 14"
+            alignment_cache_key_for_version(15, &request, &hashes),
+            "neighbor reliability weighting must use cache version 15"
         );
+        assert_ne!(key, alignment_cache_key_for_version(14, &request, &hashes));
         assert_ne!(
             key,
             alignment_cache_key_for_version(13, &request, &hashes),
@@ -1588,7 +1591,7 @@ mod tests {
 
     #[test]
     fn corrupt_alignment_cache_record_is_rejected() {
-        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3}});
+        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3,"edgeDiagnostics":[{"from":0,"to":1,"reliabilityWeightScale":0.05,"loopConflictAmbiguous":true}],"qualityWarnings":["inspect affected seams"]}});
         let layout_json = serde_json::to_string(&layout).unwrap();
         let hash = fingerprint::sha256_bytes(layout_json.as_bytes());
         let valid =
@@ -1600,6 +1603,14 @@ mod tests {
         assert_eq!(summary["qualityStatus"], "needs-visual-review");
         assert_eq!(summary["matchingWorkers"], 3);
         assert_eq!(summary["cached"], true);
+        assert_eq!(
+            summary["edgeDiagnostics"],
+            layout["report"]["edgeDiagnostics"]
+        );
+        assert_eq!(
+            summary["qualityWarnings"],
+            layout["report"]["qualityWarnings"]
+        );
         let mut corrupt_layout = layout.clone();
         corrupt_layout["width"] = json!(9);
         let mut corrupt = valid.clone();

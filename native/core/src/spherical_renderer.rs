@@ -34,6 +34,11 @@ const SOURCE_QUALITY_MIN_EDGE_CONTRAST: f64 = 24.0;
 const SOURCE_QUALITY_SUSPECT_CONFIDENCE: f64 = 0.65;
 const SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE: f64 = 8.0;
 const SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX: f64 = 32.0;
+const SOURCE_QUALITY_BLUR_PEER_TEXTURE: f64 = 12.0;
+const SOURCE_QUALITY_BLUR_RELATIVE_MAX: f64 = 0.70;
+const SOURCE_QUALITY_BLUR_PEER_SHARPNESS: f64 = 18.0;
+const SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS: i32 = 4;
+static RENDERER_IDENTITY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlendMode {
@@ -55,7 +60,7 @@ impl BlendMode {
     fn model_name(self) -> &'static str {
         match self {
             Self::Feather => "source-edge-smoothstep-feather",
-            Self::Deghost => "max-score-softmax-ownership",
+            Self::Deghost => "sharpness-aware-max-score-softmax-ownership",
         }
     }
 }
@@ -79,12 +84,13 @@ struct Source {
 #[derive(Clone, Debug)]
 struct SourceQualityMap {
     texture_energy: Vec<u8>,
+    normalized_sharpness: Vec<u8>,
     obstruction_confidence: Vec<u8>,
 }
 
 impl SourceQualityMap {
     fn byte_len() -> u64 {
-        (SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS) as u64 * SOURCE_QUALITY_BYTES_PER_CELL
+        (SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS) as u64 * (SOURCE_QUALITY_BYTES_PER_CELL + 1)
     }
 
     fn from_image(image: &RgbaImage) -> Self {
@@ -92,6 +98,7 @@ impl SourceQualityMap {
         let height = image.height();
         let mut luma = vec![0.0f64; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
         let mut texture_energy = vec![0u8; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
+        let mut normalized_sharpness = vec![0u8; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
         for row in 0..SOURCE_QUALITY_ROWS {
             let y0 = (row as f64 * f64::from(height.saturating_sub(1))
                 / (SOURCE_QUALITY_ROWS - 1) as f64)
@@ -135,7 +142,68 @@ impl SourceQualityMap {
                     / samples.len() as f64;
                 let index = row * SOURCE_QUALITY_COLUMNS + column;
                 luma[index] = mean;
-                texture_energy[index] = variance.sqrt().round().clamp(0.0, 255.0) as u8;
+                let contrast = variance.sqrt();
+                texture_energy[index] = contrast.round().clamp(0.0, 255.0) as u8;
+                // Use a contiguous full-resolution patch for sharpness. The
+                // broad 5x5 samples above span a quality cell and provide a
+                // larger-scale contrast reference, so 1-3px blur remains
+                // visible even on multi-megapixel photos.
+                const PATCH_SIDE: usize = (SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS * 2 + 1) as usize;
+                let center_x = (i64::from(x0) + i64::from(x1)) / 2;
+                let center_y = (i64::from(y0) + i64::from(y1)) / 2;
+                let mut patch = [0.0f64; PATCH_SIDE * PATCH_SIDE];
+                for py in 0..PATCH_SIDE {
+                    for px in 0..PATCH_SIDE {
+                        let x = (center_x + px as i64
+                            - i64::from(SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS))
+                        .clamp(0, i64::from(width) - 1) as u32;
+                        let y = (center_y + py as i64
+                            - i64::from(SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS))
+                        .clamp(0, i64::from(height) - 1) as u32;
+                        let rgba = image.get_pixel(x, y).0;
+                        patch[py * PATCH_SIDE + px] = 0.299 * f64::from(rgba[0])
+                            + 0.587 * f64::from(rgba[1])
+                            + 0.114 * f64::from(rgba[2]);
+                    }
+                }
+                let mut gradient_sum = 0.0;
+                for py in 0..PATCH_SIDE {
+                    for px in 0..PATCH_SIDE {
+                        let value = patch[py * PATCH_SIDE + px];
+                        if px + 1 < PATCH_SIDE {
+                            gradient_sum += (value - patch[py * PATCH_SIDE + px + 1]).abs();
+                        }
+                        if py + 1 < PATCH_SIDE {
+                            gradient_sum += (value - patch[(py + 1) * PATCH_SIDE + px]).abs();
+                        }
+                    }
+                }
+                let gradient_count = (PATCH_SIDE * (PATCH_SIDE - 1) * 2) as f64;
+                let mut laplacian_sum = 0.0;
+                let mut laplacian_count = 0usize;
+                for sy in 1..PATCH_SIDE - 1 {
+                    for sx in 1..PATCH_SIDE - 1 {
+                        let center = patch[sy * PATCH_SIDE + sx];
+                        let laplacian = 4.0 * center
+                            - patch[sy * PATCH_SIDE + sx - 1]
+                            - patch[sy * PATCH_SIDE + sx + 1]
+                            - patch[(sy - 1) * PATCH_SIDE + sx]
+                            - patch[(sy + 1) * PATCH_SIDE + sx];
+                        laplacian_sum += laplacian.abs();
+                        laplacian_count += 1;
+                    }
+                }
+                // Combine normalized first differences and a Laplacian term;
+                // the broader-cell contrast denominator limits exposure bias
+                // without normalizing away blur at the patch scale.
+                let normalized_gradient = gradient_sum / gradient_count / (contrast + 1.0);
+                let normalized_laplacian =
+                    laplacian_sum / laplacian_count.max(1) as f64 / (contrast + 1.0);
+                let detail_ratio = normalized_gradient + normalized_laplacian * 0.25;
+                // Log compression preserves useful separation for sharp
+                // sources without clipping their score at 255.
+                normalized_sharpness[index] =
+                    (detail_ratio.ln_1p() * 64.0).round().clamp(0.0, 255.0) as u8;
             }
         }
 
@@ -249,6 +317,7 @@ impl SourceQualityMap {
         }
         Self {
             texture_energy,
+            normalized_sharpness,
             obstruction_confidence,
         }
     }
@@ -261,6 +330,13 @@ impl SourceQualityMap {
         let confidence =
             sample_quality_field(&self.obstruction_confidence, width, height, x, y) / 255.0;
         (texture, confidence)
+    }
+
+    fn sharpness(&self, width: u32, height: u32, x: f64, y: f64) -> f64 {
+        if width < 2 || height < 2 {
+            return 0.0;
+        }
+        sample_quality_field(&self.normalized_sharpness, width, height, x, y)
     }
 }
 
@@ -494,6 +570,78 @@ fn validate_cached_tile(path: &Path, expected: (u32, u32)) -> crate::Result<()> 
     }
     Ok(())
 }
+
+fn renderer_identity(blend_mode: BlendMode) -> Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "blendModel": blend_mode.model_name(),
+        "algorithmVersion": 1
+    })
+}
+
+fn has_existing_render_tiles(output: &Path) -> crate::Result<bool> {
+    if !output.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(output)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || !entry.file_name().to_string_lossy().starts_with("level-")
+        {
+            continue;
+        }
+        if fs::read_dir(entry.path())?.next().transpose()?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_or_write_renderer_identity(output: &Path, blend_mode: BlendMode) -> crate::Result<()> {
+    let marker_path = output.join("renderer-identity.json");
+    let expected = renderer_identity(blend_mode);
+    if marker_path.is_file() {
+        let stored: Value = serde_json::from_slice(&fs::read(&marker_path).map_err(|error| {
+            crate::Error::Invalid(format!(
+                "cannot read renderer identity {}: {error}",
+                marker_path.display()
+            ))
+        })?)
+        .map_err(|error| {
+            crate::Error::Invalid(format!(
+                "renderer identity {} is invalid: {error}",
+                marker_path.display()
+            ))
+        })?;
+        if stored != expected {
+            return Err(crate::Error::Invalid(
+                "renderer algorithm changed; create a task copy and restitch to avoid mixing tiles"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    // Legacy feather rendering is byte-compatible, so it can adopt an
+    // identity marker in place. Deghost output predating this marker cannot be
+    // safely resumed because some cached tiles may use the old ownership model.
+    if blend_mode == BlendMode::Deghost && has_existing_render_tiles(output)? {
+        return Err(crate::Error::Invalid(
+            "renderer algorithm changed; create a task copy and restitch to avoid mixing tiles"
+                .into(),
+        ));
+    }
+
+    fs::create_dir_all(output)?;
+    let temporary = output.join(format!(
+        ".renderer-identity-{}-{}.tmp",
+        std::process::id(),
+        RENDERER_IDENTITY_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&temporary, serde_json::to_vec(&expected).unwrap())?;
+    fs::rename(&temporary, marker_path)?;
+    Ok(())
+}
 fn srgb(c: f64) -> u8 {
     let v = if c <= 0.0031308 {
         c * 12.92
@@ -588,7 +736,7 @@ fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32)
     ((ownership - max_ownership) / temperature).exp()
 }
 
-fn deghost_source_weight(
+fn deghost_source_weight_with_sharpness(
     ownership: f64,
     max_ownership: f64,
     max_uncapped_ownership: f64,
@@ -596,18 +744,25 @@ fn deghost_source_weight(
     max_structured_peer_texture: f64,
     obstruction_confidence: f64,
     texture_energy: f64,
+    normalized_sharpness: f64,
+    max_peer_sharpness: f64,
     source_min_dimension: u32,
 ) -> f64 {
-    let current_is_cap_eligible = obstruction_confidence >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
-        && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX;
+    let local_blur = max_structured_peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
+        && max_peer_sharpness >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
+        && normalized_sharpness <= max_peer_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+    let current_is_cap_eligible = local_blur
+        || (obstruction_confidence >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
+            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX);
     let structured_overlap = max_structured_peer_texture >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE
         && max_uncapped_ownership.is_finite()
         && max_cap_eligible_ownership > max_uncapped_ownership;
     if structured_overlap {
         // Every source that cannot be capped participates in the same
-        // reference. Only a high-confidence, low-texture obstruction is
-        // eligible for the cap; interpolation across a texture boundary must
-        // not switch the reference without also making the source cap-eligible.
+        // reference. A cap candidate must be either a high-confidence,
+        // low-texture obstruction or locally softer than a textured peer;
+        // interpolation across a quality boundary cannot switch the reference
+        // unless the source also satisfies the corresponding eligibility test.
         let margin = SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX / f64::from(source_min_dimension);
         let effective_ownership = if current_is_cap_eligible {
             ownership.min(max_uncapped_ownership - margin)
@@ -624,6 +779,31 @@ fn deghost_source_weight(
         // single-source or all-smooth regions never become holes.
         deghost_weight(ownership, max_ownership, source_min_dimension)
     }
+}
+
+#[cfg(test)]
+fn deghost_source_weight(
+    ownership: f64,
+    max_ownership: f64,
+    max_uncapped_ownership: f64,
+    max_cap_eligible_ownership: f64,
+    max_structured_peer_texture: f64,
+    obstruction_confidence: f64,
+    texture_energy: f64,
+    source_min_dimension: u32,
+) -> f64 {
+    deghost_source_weight_with_sharpness(
+        ownership,
+        max_ownership,
+        max_uncapped_ownership,
+        max_cap_eligible_ownership,
+        max_structured_peer_texture,
+        obstruction_confidence,
+        texture_energy,
+        0.0,
+        0.0,
+        source_min_dimension,
+    )
 }
 
 fn accumulate_weighted(cell: &mut [f32; 4], rgb: [f64; 3], weight: f64) {
@@ -660,7 +840,27 @@ pub fn render_layout_tiles_with_options(
     memory_budget_mib: usize,
     workers_requested: usize,
     use_source_cache: bool,
+    checkpoint: impl FnMut(u64, u64) -> bool,
+) -> crate::Result<Value> {
+    render_layout_tiles_with_options_internal(
+        layout,
+        output,
+        memory_budget_mib,
+        workers_requested,
+        use_source_cache,
+        checkpoint,
+        true,
+    )
+}
+
+fn render_layout_tiles_with_options_internal(
+    layout: &Value,
+    output: &Path,
+    memory_budget_mib: usize,
+    workers_requested: usize,
+    use_source_cache: bool,
     mut checkpoint: impl FnMut(u64, u64) -> bool,
+    sharpness_aware: bool,
 ) -> crate::Result<Value> {
     if !(32..=4096).contains(&memory_budget_mib) {
         return Err(crate::Error::Invalid(
@@ -671,6 +871,7 @@ pub fn render_layout_tiles_with_options(
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
     }
     let (width, height, bounds, sources, blend_mode) = dimensions(layout)?;
+    validate_or_write_renderer_identity(output, blend_mode)?;
     let dir = output.join("level-0");
     fs::create_dir_all(&dir)?;
     let cols = width.div_ceil(TILE);
@@ -698,8 +899,8 @@ pub fn render_layout_tiles_with_options(
     }
     let tile_bytes_per_pixel = if blend_mode == BlendMode::Deghost {
         // accum[4] (16 bytes) + global, uncapped, and cap-eligible ownership
-        // (12 bytes) + peer texture (1 byte), plus 4 bytes of Vec overhead.
-        33
+        // (12 bytes) + local peer texture and sharpness (2 bytes), plus Vec overhead.
+        34
     } else {
         24
     };
@@ -803,6 +1004,7 @@ pub fn render_layout_tiles_with_options(
                         &encode_micros,
                         use_source_cache,
                         blend_mode,
+                        sharpness_aware,
                     )
                 }));
             }
@@ -956,6 +1158,7 @@ fn render_one_tile(
     encode_micros: &AtomicU64,
     use_cache: bool,
     blend_mode: BlendMode,
+    sharpness_aware: bool,
 ) -> crate::Result<()> {
     let active = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
     peak_workers.fetch_max(active, Ordering::Relaxed);
@@ -988,6 +1191,7 @@ fn render_one_tile(
         (blend_mode == BlendMode::Deghost).then(|| vec![f32::NEG_INFINITY; count]);
     let mut max_structured_peer_texture =
         (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
+    let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
     let mut source_quality_maps = vec![None; sources.len()];
     if let Some(scores) = max_ownership.as_mut() {
         for (source_index, source) in sources.iter().enumerate() {
@@ -1014,22 +1218,62 @@ fn render_one_tile(
                     {
                         let index = (py * tw + px) as usize;
                         scores[index] = scores[index].max(ownership as f32);
+                        let (texture_energy, _) =
+                            quality.sample(source.width, source.height, source_x, source_y);
+                        let sharpness =
+                            quality.sharpness(source.width, source.height, source_x, source_y);
+                        if texture_energy >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE {
+                            let peer_texture =
+                                &mut max_structured_peer_texture.as_mut().unwrap()[index];
+                            *peer_texture =
+                                (*peer_texture).max(texture_energy.round().clamp(0.0, 255.0) as u8);
+                            let peer_sharpness = &mut max_peer_sharpness.as_mut().unwrap()[index];
+                            *peer_sharpness =
+                                (*peer_sharpness).max(sharpness.round().clamp(0.0, 255.0) as u8);
+                        }
+                    }
+                }
+            }
+        }
+        // Classify sources only after the per-pixel peer sharpness is known.
+        // This makes the decision independent of source order and compares
+        // local texture at the same projected scene point, rather than a
+        // whole-image sharpness score.
+        for (source_index, source) in sources.iter().enumerate() {
+            if !candidate(source, bounds, left, top, tw, th, width, height) {
+                continue;
+            }
+            let quality = source_quality_maps[source_index]
+                .as_ref()
+                .expect("quality map prepared in geometry pass");
+            for py in 0..th {
+                for px in 0..tw {
+                    let (sy, cy) = x_rays[px as usize];
+                    let (sp, cp) = y_rays[py as usize];
+                    let world = [sy * cp, sp, cy * cp];
+                    if let Some((source_x, source_y, _, ownership)) = sample_geometry(source, world)
+                    {
+                        let index = (py * tw + px) as usize;
                         let (texture_energy, obstruction_confidence) =
                             quality.sample(source.width, source.height, source_x, source_y);
-                        if obstruction_confidence < SOURCE_QUALITY_SUSPECT_CONFIDENCE
-                            || texture_energy > SOURCE_QUALITY_LOW_TEXTURE_MAX
-                        {
-                            let clean_scores = max_unflagged_ownership.as_mut().unwrap();
-                            clean_scores[index] = clean_scores[index].max(ownership as f32);
-                            if texture_energy >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE {
-                                let peer_texture =
-                                    &mut max_structured_peer_texture.as_mut().unwrap()[index];
-                                *peer_texture = (*peer_texture)
-                                    .max(texture_energy.round().clamp(0.0, 255.0) as u8);
-                            }
-                        } else {
+                        let sharpness =
+                            quality.sharpness(source.width, source.height, source_x, source_y);
+                        let peer_texture =
+                            f64::from(max_structured_peer_texture.as_ref().unwrap()[index]);
+                        let peer_sharp = f64::from(max_peer_sharpness.as_ref().unwrap()[index]);
+                        let blurred_against_peer = sharpness_aware
+                            && peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
+                            && peer_sharp >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
+                            && sharpness <= peer_sharp * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+                        let obstructed = obstruction_confidence
+                            >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
+                            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX;
+                        if blurred_against_peer || obstructed {
                             let eligible_scores = max_cap_eligible_ownership.as_mut().unwrap();
                             eligible_scores[index] = eligible_scores[index].max(ownership as f32);
+                        } else {
+                            let clean_scores = max_unflagged_ownership.as_mut().unwrap();
+                            clean_scores[index] = clean_scores[index].max(ownership as f32);
                         }
                     }
                 }
@@ -1062,12 +1306,13 @@ fn render_one_tile(
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
                             let index = (py * tw + px) as usize;
-                            let (texture_energy, obstruction_confidence) = source_quality_maps
-                                [source_index]
+                            let quality = source_quality_maps[source_index]
                                 .as_ref()
-                                .expect("deghost quality map prepared in geometry pass")
-                                .sample(source.width, source.height, x, y);
-                            deghost_source_weight(
+                                .expect("deghost quality map prepared in geometry pass");
+                            let (texture_energy, obstruction_confidence) =
+                                quality.sample(source.width, source.height, x, y);
+                            let sharpness = quality.sharpness(source.width, source.height, x, y);
+                            deghost_source_weight_with_sharpness(
                                 ownership,
                                 f64::from(max_ownership.as_ref().unwrap()[index]),
                                 f64::from(max_unflagged_ownership.as_ref().unwrap()[index]),
@@ -1075,6 +1320,12 @@ fn render_one_tile(
                                 f64::from(max_structured_peer_texture.as_ref().unwrap()[index]),
                                 obstruction_confidence,
                                 texture_energy,
+                                sharpness,
+                                if sharpness_aware {
+                                    f64::from(max_peer_sharpness.as_ref().unwrap()[index])
+                                } else {
+                                    0.0
+                                },
                                 source.width.min(source.height),
                             )
                         }
@@ -1640,6 +1891,61 @@ mod tests {
         image
     }
 
+    fn synthetic_scene_value(yaw: f64, pitch: f64) -> u8 {
+        let x = ((yaw + std::f64::consts::PI) / 0.003).floor() as i64;
+        let y = ((std::f64::consts::FRAC_PI_2 - pitch) / 0.003).floor() as i64;
+        let mut hash = (x as u64).wrapping_mul(0x9e3779b97f4a7c15)
+            ^ (y as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d049bb133111eb);
+        hash ^= hash >> 31;
+        (40 + hash % 200) as u8
+    }
+
+    fn synthetic_scene_source(path: &Path, yaw_offset: f64) {
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1152;
+        const FX: f64 = 1216.0;
+        const FY: f64 = 900.0;
+        const CX: f64 = (WIDTH as f64 - 1.0) * 0.5;
+        const CY: f64 = (HEIGHT as f64 - 1.0) * 0.5;
+        let (sin_yaw, cos_yaw) = yaw_offset.sin_cos();
+        let mut image = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let camera_x = (f64::from(x) - CX) / FX;
+                let camera_y = -(f64::from(y) - CY) / FY;
+                let world_x = cos_yaw * camera_x + sin_yaw;
+                let world_y = camera_y;
+                let world_z = -sin_yaw * camera_x + cos_yaw;
+                let yaw = world_x.atan2(world_z);
+                let pitch = world_y.atan2((world_x * world_x + world_z * world_z).sqrt());
+                let value = synthetic_scene_value(yaw, pitch);
+                image.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        image.save(path).unwrap();
+    }
+
+    fn collect_level_zero(output: &Path, width: u32, height: u32) -> RgbaImage {
+        let mut image = RgbaImage::new(width, height);
+        for row in 0..height.div_ceil(TILE) {
+            for col in 0..width.div_ceil(TILE) {
+                let tile = image::open(output.join("level-0").join(format!("{row}-{col}.png")))
+                    .unwrap()
+                    .into_rgba8();
+                for y in 0..tile.height() {
+                    for x in 0..tile.width() {
+                        image.put_pixel(col * TILE + x, row * TILE + y, *tile.get_pixel(x, y));
+                    }
+                }
+            }
+        }
+        image
+    }
+
     #[test]
     fn source_quality_map_flags_only_broad_dark_smooth_border_occlusion() {
         // Preserve the original moderate-contrast fixture as a conservative
@@ -1729,6 +2035,257 @@ mod tests {
         let flat_map = SourceQualityMap::from_image(&flat_dark);
         let (_, flat_confidence) = flat_map.sample(640, 360, 320., 180.);
         assert!(flat_confidence < SOURCE_QUALITY_SUSPECT_CONFIDENCE);
+    }
+
+    #[test]
+    fn normalized_local_sharpness_detects_blur_and_resists_exposure_shift() {
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1152;
+        let mut crisp = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let broad = if (x / 64 + y / 64) % 2 == 0 {
+                    105i16
+                } else {
+                    155i16
+                };
+                let detail = if (x / 4 + y / 4) % 2 == 0 {
+                    -30i16
+                } else {
+                    30i16
+                };
+                let value = (broad + detail) as u8;
+                crisp.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        let mildly_blurred = image::imageops::blur(&crisp, 1.0);
+        let blurred = image::imageops::blur(&crisp, 1.5);
+        let exposure_shifted = RgbaImage::from_fn(WIDTH, HEIGHT, |x, y| {
+            let pixel = crisp.get_pixel(x, y).0[0];
+            let shifted = (f64::from(pixel) * 0.72 + 35.0).round() as u8;
+            Rgba([shifted, shifted, shifted, 255])
+        });
+        let crisp_map = SourceQualityMap::from_image(&crisp);
+        let mild_map = SourceQualityMap::from_image(&mildly_blurred);
+        let blurred_map = SourceQualityMap::from_image(&blurred);
+        let shifted_map = SourceQualityMap::from_image(&exposure_shifted);
+        let (crisp_texture, _) = crisp_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let (mild_texture, _) = mild_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let (blurred_texture, _) = blurred_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let crisp_sharpness = crisp_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let mild_sharpness = mild_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let blurred_sharpness = blurred_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let shifted_sharpness = shifted_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(crisp_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(mild_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(blurred_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(crisp_sharpness >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS);
+        assert!(
+            crisp_sharpness > mild_sharpness && mild_sharpness > blurred_sharpness,
+            "sharpness should decrease monotonically with blur: crisp={crisp_sharpness}, sigma1={mild_sharpness}, sigma1.5={blurred_sharpness}"
+        );
+        assert!(
+            blurred_sharpness < crisp_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX,
+            "mild blur did not reduce normalized local sharpness enough: crisp={crisp_sharpness}, blurred={blurred_sharpness}"
+        );
+        assert!(
+            (shifted_sharpness / crisp_sharpness).clamp(0.0, 1.0) > 0.75,
+            "exposure shift changed normalized sharpness too much: crisp={crisp_sharpness}, shifted={shifted_sharpness}"
+        );
+
+        // A single-scale checker can lose broad contrast at the same time as
+        // fine detail. Keep it as a conservative limitation check: sharpness
+        // must still move monotonically, while the peer rule may decline to
+        // suppress when the relative evidence does not clear its threshold.
+        let mut single_scale = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let value = if (x / 4 + y / 4) % 2 == 0 { 35 } else { 220 };
+                single_scale.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        let single_blur = image::imageops::blur(&single_scale, 1.0);
+        let single_crisp_map = SourceQualityMap::from_image(&single_scale);
+        let single_blur_map = SourceQualityMap::from_image(&single_blur);
+        let single_crisp_texture = single_crisp_map.sample(WIDTH, HEIGHT, 1024.0, 576.0).0;
+        let single_blur_texture = single_blur_map.sample(WIDTH, HEIGHT, 1024.0, 576.0).0;
+        let single_crisp_sharpness = single_crisp_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let single_blur_sharpness = single_blur_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(
+            single_blur_sharpness < single_crisp_sharpness,
+            "single-scale blur should lower sharpness even when it may not meet suppression cutoff: crisp={single_crisp_sharpness}, blurred={single_blur_sharpness}"
+        );
+        let single_blur_is_cap_eligible =
+            single_blur_sharpness <= single_crisp_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+        let single_blur_weight = deghost_source_weight_with_sharpness(
+            0.35,
+            0.35,
+            if single_blur_is_cap_eligible {
+                0.25
+            } else {
+                0.35
+            },
+            if single_blur_is_cap_eligible {
+                0.35
+            } else {
+                f64::NEG_INFINITY
+            },
+            single_crisp_texture,
+            0.0,
+            single_blur_texture,
+            single_blur_sharpness,
+            single_crisp_sharpness,
+            2160,
+        );
+        if !single_blur_is_cap_eligible {
+            assert_eq!(single_blur_weight, 1.0);
+        } else {
+            assert!(single_blur_weight < 1.0);
+        }
+
+        let flat = RgbaImage::from_pixel(WIDTH, HEIGHT, Rgba([128, 128, 128, 255]));
+        let flat_map = SourceQualityMap::from_image(&flat);
+        let (flat_texture, _) = flat_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let flat_sharpness = flat_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(flat_texture < SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        let flat_weight = deghost_source_weight_with_sharpness(
+            0.3,
+            0.35,
+            0.25,
+            0.3,
+            flat_texture,
+            0.0,
+            flat_texture,
+            flat_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        assert_eq!(flat_weight, deghost_weight(0.3, 0.35, 2160));
+
+        let blurred_weight = deghost_source_weight_with_sharpness(
+            0.35,
+            0.35,
+            0.25,
+            0.35,
+            crisp_texture,
+            0.0,
+            blurred_texture,
+            blurred_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        let crisp_weight = deghost_source_weight_with_sharpness(
+            0.25,
+            0.35,
+            0.25,
+            0.35,
+            crisp_texture,
+            0.0,
+            crisp_texture,
+            crisp_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        assert!(blurred_weight < 0.001);
+        assert_eq!(crisp_weight, 1.0);
+    }
+
+    #[test]
+    fn sharpness_aware_render_improves_over_legacy_deghost_on_same_blurred_overlap() {
+        const WIDTH: u32 = 1025;
+        const HEIGHT: u32 = 512;
+        const SOURCE_WIDTH: u32 = 2048;
+        const SOURCE_HEIGHT: u32 = 1152;
+        const FX: f64 = 1216.0;
+        const FY: f64 = 900.0;
+        const CX: f64 = (SOURCE_WIDTH as f64 - 1.0) * 0.5;
+        const CY: f64 = (SOURCE_HEIGHT as f64 - 1.0) * 0.5;
+        let root = std::env::temp_dir().join(format!(
+            "lumia-blur-render-compare-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let center_path = root.join("blur-center.png");
+        let peer_path = root.join("sharp-peer.png");
+        synthetic_scene_source(&center_path, 0.0);
+        synthetic_scene_source(&peer_path, -0.6);
+        let center = image::open(&center_path).unwrap().into_rgba8();
+        image::imageops::blur(&center, 1.5)
+            .save(&center_path)
+            .unwrap();
+        let (sin_yaw, cos_yaw) = (-0.6f64).sin_cos();
+        let layout = serde_json::json!({
+            "schemaVersion":1,"projection":"spherical",
+            "width":WIDTH,"height":HEIGHT,
+            "yawMinRad":-0.8,"yawMaxRad":0.2,
+            "pitchMinRad":-0.2,"pitchMaxRad":0.2,
+            "renderBlendMode":"deghost",
+            "tiles":[
+                {"path":center_path,"width":SOURCE_WIDTH,"height":SOURCE_HEIGHT,
+                 "fx":FX,"fy":FY,"cx":CX,"cy":CY,
+                 "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]},
+                {"path":peer_path,"width":SOURCE_WIDTH,"height":SOURCE_HEIGHT,
+                 "fx":FX,"fy":FY,"cx":CX,"cy":CY,
+                 "cameraToWorld":[cos_yaw,0.0,sin_yaw,0.0,1.0,0.0,-sin_yaw,0.0,cos_yaw]}
+            ]
+        });
+        let legacy_dir = root.join("legacy");
+        let sharp_dir = root.join("sharpness-aware");
+        let checkpoint = |_, _| true;
+        render_layout_tiles_with_options_internal(
+            &layout,
+            &legacy_dir,
+            32,
+            1,
+            true,
+            checkpoint,
+            false,
+        )
+        .unwrap();
+        render_layout_tiles_with_options_internal(
+            &layout, &sharp_dir, 32, 1, true, checkpoint, true,
+        )
+        .unwrap();
+        let legacy = collect_level_zero(&legacy_dir, WIDTH, HEIGHT);
+        let sharp = collect_level_zero(&sharp_dir, WIDTH, HEIGHT);
+        let mut legacy_error = 0.0;
+        let mut sharp_error = 0.0;
+        let mut samples = 0usize;
+        for y in 0..HEIGHT {
+            let pitch = 0.2 - (f64::from(y) + 0.5) / f64::from(HEIGHT) * 0.4;
+            if pitch.abs() > 0.09 {
+                continue;
+            }
+            for x in 0..WIDTH {
+                let yaw = -0.8 + (f64::from(x) + 0.5) / f64::from(WIDTH);
+                if (yaw + 0.3).abs() > 0.08 {
+                    continue;
+                }
+                let expected = f64::from(synthetic_scene_value(yaw, pitch));
+                let old = legacy.get_pixel(x, y).0;
+                let new = sharp.get_pixel(x, y).0;
+                assert_eq!(old[3], 255, "legacy overlap unexpectedly uncovered");
+                assert_eq!(new[3], old[3], "blur repair changed overlap coverage");
+                legacy_error += (f64::from(old[0]) - expected).abs();
+                sharp_error += (f64::from(new[0]) - expected).abs();
+                samples += 1;
+            }
+        }
+        assert!(samples > 1000);
+        legacy_error /= samples as f64;
+        sharp_error /= samples as f64;
+        assert!(
+            sharp_error + 1.0 < legacy_error,
+            "sharpness-aware render should beat legacy deghost on the identical blur fixture: legacy MAE={legacy_error:.2}, sharpness-aware MAE={sharp_error:.2}, samples={samples}"
+        );
+        println!(
+            "blur-aware render ROI MAE: legacy={legacy_error:.2}, sharpness-aware={sharp_error:.2}, samples={samples}"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2077,6 +2634,36 @@ mod tests {
     }
 
     #[test]
+    fn renderer_identity_prevents_mixed_algorithm_cache_without_deleting_tiles() {
+        let root = std::env::temp_dir().join(format!(
+            "lumia-render-identity-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let level = root.join("level-0");
+        fs::create_dir_all(&level).unwrap();
+        let cached = level.join("0-0.png");
+        fs::write(&cached, b"preserve cached tile").unwrap();
+        let error = validate_or_write_renderer_identity(&root, BlendMode::Deghost).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("create a task copy and restitch"));
+        assert_eq!(fs::read(&cached).unwrap(), b"preserve cached tile");
+        assert!(!root.join("renderer-identity.json").exists());
+
+        // Feather is byte-compatible with legacy caches and may adopt a marker;
+        // switching that output to deghost is then rejected by identity.
+        validate_or_write_renderer_identity(&root, BlendMode::Feather).unwrap();
+        assert!(validate_or_write_renderer_identity(&root, BlendMode::Feather).is_ok());
+        assert!(validate_or_write_renderer_identity(&root, BlendMode::Deghost).is_err());
+        assert_eq!(fs::read(&cached).unwrap(), b"preserve cached tile");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parallel_tiles_match_serial_and_memory_budget_clamps_workers() {
         let root = std::env::temp_dir().join(format!(
             "lumia-render-parallel-{}-{}",
@@ -2213,7 +2800,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(serial["blendModel"], "source-edge-smoothstep-feather");
-        assert_eq!(deghost_serial["blendModel"], "max-score-softmax-ownership");
+        assert_eq!(
+            deghost_serial["blendModel"],
+            "sharpness-aware-max-score-softmax-ownership"
+        );
         assert_eq!(
             deghost_serial["completedTiles"],
             deghost_parallel["completedTiles"]
@@ -2289,7 +2879,10 @@ mod tests {
         let parallel =
             render_layout_tiles_with_options(&layout, &parallel_dir, 512, 8, true, |_, _| true)
                 .unwrap();
-        assert_eq!(original["blendModel"], "max-score-softmax-ownership");
+        assert_eq!(
+            original["blendModel"],
+            "sharpness-aware-max-score-softmax-ownership"
+        );
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
         assert_eq!(original["completedTiles"], reversed["completedTiles"]);
         assert_eq!(original["completedTiles"], parallel["completedTiles"]);

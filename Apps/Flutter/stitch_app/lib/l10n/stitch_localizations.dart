@@ -28,6 +28,13 @@ class StitchLocalizations {
   String get fullResolutionOutputUsesTaskFormat =>
       text('整图输出独立于瓦片预览，使用任务选择的输出格式。');
 
+  String neighborReliabilitySummary({
+    required int adjustedEdges,
+    required int ambiguousEdges,
+  }) => isChinese
+      ? '相邻匹配权重调整：$adjustedEdges 条；存在闭环不一致的边：$ambiguousEdges 条。'
+      : 'Neighbor match weights adjusted: $adjustedEdges; edges in inconsistent loops: $ambiguousEdges.';
+
   String phaseLabel(String phase) {
     final normalized = phase.trim().toLowerCase();
     final english = <String, String>{
@@ -61,12 +68,15 @@ class StitchLocalizations {
     required int photoCount,
     required String phase,
     required String format,
-  }) => '$photoCount ${isChinese ? '张' : 'photos'} · '
+  }) =>
+      '$photoCount ${isChinese ? '张' : 'photos'} · '
       '${phaseLabel(phase)} · ${formatLabel(format)}';
 
   String formatLabel(String format) {
     final normalized = format.trim().toLowerCase();
-    if (normalized.startsWith('jpeg xl') || normalized == 'jpegxl' || normalized == 'jxl') {
+    if (normalized.startsWith('jpeg xl') ||
+        normalized == 'jpegxl' ||
+        normalized == 'jxl') {
       return 'JPEG XL';
     }
     if (normalized.startsWith('tiff') || normalized == 'tif') return 'TIFF';
@@ -79,12 +89,15 @@ class StitchLocalizations {
     if (normalized == 'png' || normalized.startsWith('png（无损）')) {
       return 'PNG (lossless)';
     }
-    if (normalized == 'tiff' || normalized == 'tif' ||
+    if (normalized == 'tiff' ||
+        normalized == 'tif' ||
         normalized.startsWith('tiff（无损')) {
       return 'TIFF (lossless; BigTIFF for large images)';
     }
-    if (normalized == 'jpeg xl' || normalized == 'jpegxl' ||
-        normalized == 'jxl' || normalized.startsWith('jpeg xl（有损）')) {
+    if (normalized == 'jpeg xl' ||
+        normalized == 'jpegxl' ||
+        normalized == 'jxl' ||
+        normalized.startsWith('jpeg xl（有损）')) {
       return 'JPEG XL (lossy)';
     }
     return format;
@@ -105,6 +118,20 @@ class StitchLocalizations {
   }
 
   String text(String source) {
+    final nativeRendererError = RegExp(
+      r'^(?:([A-Z0-9_]+): )?(invalid input: )?renderer algorithm changed; create a task copy and restitch(?: to avoid mixing tiles)?$',
+    ).firstMatch(source);
+    if (nativeRendererError != null) {
+      if (!isChinese) return source;
+      final prefix = [
+        if (nativeRendererError[1] != null) '${nativeRendererError[1]}: ',
+        if (nativeRendererError[2] != null) '输入无效：',
+      ].join();
+      final translated = source.endsWith('to avoid mixing tiles')
+          ? '渲染算法已更改；请新建任务副本并重新合成，以避免瓦片混用。'
+          : '渲染算法已更改；请新建任务副本并重新合成。';
+      return '$prefix$translated';
+    }
     final details = RegExp(r'^(\d+) 张 · (.+) · (.+)$').firstMatch(source);
     if (details != null) {
       return taskSummary(
@@ -304,8 +331,7 @@ class StitchLocalizations {
         'Android background execution timed out; checking the pause state.',
     '已安全暂停': 'Safely paused',
     '核心作业已结束': 'The native job has ended',
-    '正在安全暂停；等待核心确认':
-        'Safely pausing; waiting for the native job to confirm.',
+    '正在安全暂停；等待核心确认': 'Safely pausing; waiting for the native job to confirm.',
     '无法读取 Android 后台超时记录；批处理任务保持待核对：':
         'Unable to read the Android background-timeout record; batch jobs remain pending verification: ',
     '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
@@ -665,10 +691,10 @@ class StitchLocalizations {
         'When automatic overlap is off, unmatched directions use focal length or field of view and manual overlap to estimate grid positions.',
     '从中间照片估算水平/垂直重叠并按网格合成':
         'Estimate horizontal and vertical overlap from center photos, then stitch the grid',
-    '结合四个方向的相邻照片校正网格配准，可能需要更长时间。':
-        'Refine grid alignment using neighboring photos in four directions. This may take longer.',
-    '减少错位边缘的宽区域叠加；场景视差仍需检查。关闭可与传统羽化结果对照。':
-        'Reduces broad blending around misaligned edges. Check scene parallax. Turn off to compare traditional feather blending.',
+    '结合四邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。':
+        'Refines placement from reliable matches in the four neighboring directions; unreliable matches have less influence. This may take longer.',
+    '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。':
+        'Prefers sharper photo sources in overlaps to reduce ghosting; original coverage is kept when no sharper neighbor exists. Turn off to compare feather blending.',
     '缓存保存在任务输入目录旁的应用任务目录中。':
         'The cache is stored in the app task folder beside the task input directory.',
     '使用 0.6 MP 配准图；关闭时使用 2.0 MP。最终渲染仍为全分辨率。':
@@ -705,8 +731,7 @@ class StitchLocalizations {
     '导入原片': '导入照片',
     '合成信息 / 日志': '合成信息 / 日志',
     '先新建副本，再修改设置': '先新建副本，再修改设置',
-    '整图输出独立于瓦片预览，使用任务选择的输出格式。':
-        '整图输出独立于瓦片预览，使用任务选择的输出格式。',
+    '整图输出独立于瓦片预览，使用任务选择的输出格式。': '整图输出独立于瓦片预览，使用任务选择的输出格式。',
     '整图输出': '整图输出',
     '完成后自动导出格式': '完成后自动导出格式',
     'PNG（无损）': 'PNG（无损）',
@@ -736,12 +761,9 @@ class StitchLocalizations {
     '已安全暂停': '已安全暂停',
     '核心作业已结束': '核心作业已结束',
     '正在安全暂停；等待核心确认': '正在安全暂停；等待核心确认',
-    '无法读取 Android 后台超时记录；批处理任务保持待核对：':
-        '无法读取 Android 后台超时记录；批处理任务保持待核对：',
-    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
-        '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：',
-    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。':
-        '无法保存 Android 后台暂停记录；请重试后再启动或恢复。',
+    '无法读取 Android 后台超时记录；批处理任务保持待核对：': '无法读取 Android 后台超时记录；批处理任务保持待核对：',
+    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：': '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：',
+    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。': '无法保存 Android 后台暂停记录；请重试后再启动或恢复。',
     'Android 后台超时任务仍待安全核对：': 'Android 后台超时任务仍待安全核对：',
     'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。':
         'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。',

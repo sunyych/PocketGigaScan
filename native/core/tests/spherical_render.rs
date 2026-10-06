@@ -310,6 +310,66 @@ fn textured_spherical_grid_renders_aligned_pixels_and_rejects_a_shifted_mesh() {
     );
 }
 
+#[test]
+fn deghost_blurred_center_preserves_coverage_and_tile_continuity() {
+    let dir = FixtureDir::new("blur-peer");
+    let mut layout = textured_layout(&dir);
+    layout["renderBlendMode"] = json!("deghost");
+    let span = layout["yawMaxRad"].as_f64().unwrap() - layout["yawMinRad"].as_f64().unwrap();
+    let tile_edge_yaw = -0.16;
+    layout["width"] = json!(1025);
+    layout["height"] = json!(768);
+    layout["yawMinRad"] = json!(tile_edge_yaw - span * 512.0 / 1025.0);
+    layout["yawMaxRad"] = json!(tile_edge_yaw + span * 513.0 / 1025.0);
+    let clean_reference = render(&layout, &dir.0.join("render-clean-reference"));
+    let center_path = PathBuf::from(layout["tiles"][4]["path"].as_str().unwrap());
+    let center = image::open(&center_path).unwrap().into_luma8();
+    image::imageops::blur(&center, 1.25)
+        .save(&center_path)
+        .unwrap();
+
+    let seam = (tile_edge_yaw, 0.0, 0.085);
+    let deghost = render(&layout, &dir.0.join("render-blurred-deghost"));
+    let deghost_error = ground_truth_error(&layout, &deghost, Some(seam));
+    assert!(
+        deghost_error < 15.0,
+        "blur-aware deghost should retain the established analytic seam tolerance: MAE={deghost_error:.2}"
+    );
+
+    let mut covered = 0usize;
+    let mut reference_covered = 0usize;
+    for (expected, actual) in clean_reference.pixels().zip(deghost.pixels()) {
+        reference_covered += usize::from(expected[3] == 255);
+        covered += usize::from(actual[3] == 255);
+        assert_eq!(
+            actual[3], expected[3],
+            "blur handling changed coverage mask"
+        );
+    }
+    assert!(reference_covered > 0 && covered == reference_covered);
+    assert_region_covered(&layout, &deghost, seam.0, seam.1);
+
+    // The blur seam is centered on the 512px renderer boundary; inspect both
+    // sides to catch tile-local quality maps and discontinuities.
+    assert_eq!(deghost.width(), 1025);
+    let left_error =
+        ground_truth_error(&layout, &deghost, Some((tile_edge_yaw - 0.045, 0.0, 0.04)));
+    let right_error =
+        ground_truth_error(&layout, &deghost, Some((tile_edge_yaw + 0.045, 0.0, 0.04)));
+    assert!(
+        left_error < 18.0 && right_error < 18.0,
+        "blur-aware selection introduced a tile-edge discontinuity: left={left_error:.2}, right={right_error:.2}"
+    );
+
+    let mut reversed_layout = layout.clone();
+    reversed_layout["tiles"].as_array_mut().unwrap().reverse();
+    let reversed = render(
+        &reversed_layout,
+        &dir.0.join("render-blurred-deghost-reversed"),
+    );
+    assert_eq!(deghost.as_raw(), reversed.as_raw());
+}
+
 fn nominal_grid_layout(dir: &FixtureDir) -> Value {
     let colors: [[u8; 4]; 4] = [
         [220, 30, 30, 255],

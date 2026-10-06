@@ -15,6 +15,61 @@ import 'support/empty_batch_queue_controller.dart';
 import 'support/localization_surface_fakes.dart';
 
 void main() {
+  test('quality repair descriptions are localized in both supported locales', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+
+    const registration = '结合四邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。';
+    const deghost = '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。';
+
+    expect(chinese.text(registration), registration);
+    expect(chinese.text(deghost), deghost);
+    expect(
+      english.text(registration),
+      'Refines placement from reliable matches in the four neighboring directions; unreliable matches have less influence. This may take longer.',
+    );
+    expect(
+      english.text(deghost),
+      'Prefers sharper photo sources in overlaps to reduce ghosting; original coverage is kept when no sharper neighbor exists. Turn off to compare feather blending.',
+    );
+    expect(
+      chinese.neighborReliabilitySummary(adjustedEdges: 2, ambiguousEdges: 1),
+      '相邻匹配权重调整：2 条；存在闭环不一致的边：1 条。',
+    );
+    expect(
+      english.neighborReliabilitySummary(adjustedEdges: 2, ambiguousEdges: 1),
+      'Neighbor match weights adjusted: 2; edges in inconsistent loops: 1.',
+    );
+  });
+
+  test(
+    'renderer algorithm guard directs Chinese users to copy and restitch',
+    () {
+      const english = StitchLocalizations(Locale('en'));
+      const chinese = StitchLocalizations(Locale('zh'));
+      const message =
+          'renderer algorithm changed; create a task copy and restitch';
+
+      const fullMessage = '$message to avoid mixing tiles';
+      const nativeFullMessage = 'invalid input: $fullMessage';
+      const codedNativeFullMessage = 'JOB_FAILED: $nativeFullMessage';
+
+      expect(english.text(nativeFullMessage), nativeFullMessage);
+      expect(
+        chinese.text(nativeFullMessage),
+        '输入无效：渲染算法已更改；请新建任务副本并重新合成，以避免瓦片混用。',
+      );
+      expect(
+        chinese.text(codedNativeFullMessage),
+        'JOB_FAILED: 输入无效：渲染算法已更改；请新建任务副本并重新合成，以避免瓦片混用。',
+      );
+      expect(
+        chinese.text('RENDERER_ALGORITHM_CHANGED: $fullMessage'),
+        'RENDERER_ALGORITHM_CHANGED: 渲染算法已更改；请新建任务副本并重新合成，以避免瓦片混用。',
+      );
+    },
+  );
+
   test('elapsed-time templates are fully localized', () {
     const english = StitchLocalizations(Locale('en'));
 
@@ -47,68 +102,80 @@ void main() {
     );
   });
 
-  test('dynamic task summaries and export labels follow English and Chinese', () {
-    const english = StitchLocalizations(Locale('en'));
-    const chinese = StitchLocalizations(Locale('zh', 'CN'));
+  test(
+    'dynamic task summaries and export labels follow English and Chinese',
+    () {
+      const english = StitchLocalizations(Locale('en'));
+      const chinese = StitchLocalizations(Locale('zh', 'CN'));
 
-    const phases = <String, (String, String)>{
-      'imported': ('Imported', '已导入'),
-      'queued': ('Queued', '排队中'),
-      'running': ('Stitching', '合成中'),
-      'pausing': ('Pausing', '正在暂停'),
-      'paused': ('Paused', '已暂停'),
-      'interrupted': ('Interrupted', '已中断'),
-      'exporting': ('Exporting', '正在导出'),
-      'completed': ('Completed', '已完成'),
-      'failed': ('Failed', '失败'),
-      'cancelled': ('Cancelled', '已取消'),
-    };
-    for (final entry in phases.entries) {
-      expect(english.phaseLabel(entry.key), entry.value.$1);
-      expect(chinese.phaseLabel(entry.key), entry.value.$2);
-    }
-    for (final format in const ['PNG', 'TIFF', 'JPEG XL']) {
+      const phases = <String, (String, String)>{
+        'imported': ('Imported', '已导入'),
+        'queued': ('Queued', '排队中'),
+        'running': ('Stitching', '合成中'),
+        'pausing': ('Pausing', '正在暂停'),
+        'paused': ('Paused', '已暂停'),
+        'interrupted': ('Interrupted', '已中断'),
+        'exporting': ('Exporting', '正在导出'),
+        'completed': ('Completed', '已完成'),
+        'failed': ('Failed', '失败'),
+        'cancelled': ('Cancelled', '已取消'),
+      };
+      for (final entry in phases.entries) {
+        expect(english.phaseLabel(entry.key), entry.value.$1);
+        expect(chinese.phaseLabel(entry.key), entry.value.$2);
+      }
+      for (final format in const ['PNG', 'TIFF', 'JPEG XL']) {
+        expect(
+          english.taskSummary(
+            photoCount: 7,
+            phase: 'completed',
+            format: format,
+          ),
+          '7 photos · Completed · $format',
+        );
+        expect(
+          chinese.taskSummary(
+            photoCount: 7,
+            phase: 'completed',
+            format: format,
+          ),
+          '7 张 · 已完成 · $format',
+        );
+      }
       expect(
-        english.taskSummary(
-          photoCount: 7,
-          phase: 'completed',
-          format: format,
-        ),
-        '7 photos · Completed · $format',
+        english.text('7 张 · completed · JPEG XL'),
+        '7 photos · Completed · JPEG XL',
       );
+      expect(chinese.text('7 张 · completed · JPEG XL'), '7 张 · 已完成 · JPEG XL');
+      expect(english.text('整图输出'), 'Full image output');
       expect(
-        chinese.taskSummary(
-          photoCount: 7,
-          phase: 'completed',
-          format: format,
-        ),
-        '7 张 · 已完成 · $format',
+        english.text('完成后自动导出格式'),
+        'Format for automatic export after stitching',
       );
-    }
-    expect(
-      english.text('7 张 · completed · JPEG XL'),
-      '7 photos · Completed · JPEG XL',
-    );
-    expect(chinese.text('7 张 · completed · JPEG XL'), '7 张 · 已完成 · JPEG XL');
-    expect(english.text('整图输出'), 'Full image output');
-    expect(english.text('完成后自动导出格式'), 'Format for automatic export after stitching');
-    expect(english.text('JPEG XL（有损）'), 'JPEG XL (lossy)');
-    expect(english.text('TIFF（无损，大图自动 BigTIFF）'), 'TIFF (lossless; BigTIFF for large images)');
-    const formatDescriptions = <ExportFormat, String>{
-      ExportFormat.png: 'PNG (lossless)',
-      ExportFormat.tiff: 'TIFF (lossless; BigTIFF for large images)',
-      ExportFormat.jpegXl: 'JPEG XL (lossy)',
-    };
-    for (final entry in formatDescriptions.entries) {
-      final source = '整图格式：${entry.key.label}';
-      expect(english.text(source), 'Full image format: ${entry.value}');
-      expect(chinese.text(source), source);
-    }
-    expect(english.compositionInfoLogs, 'Stitch details / log');
-    expect(english.duplicateBeforeEditingSettings, 'Create a copy before changing settings');
-    expect(chinese.compositionInfoLogs, '合成信息 / 日志');
-    expect(chinese.duplicateBeforeEditingSettings, '先新建副本，再修改设置');
-  });
+      expect(english.text('JPEG XL（有损）'), 'JPEG XL (lossy)');
+      expect(
+        english.text('TIFF（无损，大图自动 BigTIFF）'),
+        'TIFF (lossless; BigTIFF for large images)',
+      );
+      const formatDescriptions = <ExportFormat, String>{
+        ExportFormat.png: 'PNG (lossless)',
+        ExportFormat.tiff: 'TIFF (lossless; BigTIFF for large images)',
+        ExportFormat.jpegXl: 'JPEG XL (lossy)',
+      };
+      for (final entry in formatDescriptions.entries) {
+        final source = '整图格式：${entry.key.label}';
+        expect(english.text(source), 'Full image format: ${entry.value}');
+        expect(chinese.text(source), source);
+      }
+      expect(english.compositionInfoLogs, 'Stitch details / log');
+      expect(
+        english.duplicateBeforeEditingSettings,
+        'Create a copy before changing settings',
+      );
+      expect(chinese.compositionInfoLogs, '合成信息 / 日志');
+      expect(chinese.duplicateBeforeEditingSettings, '先新建副本，再修改设置');
+    },
+  );
 
   Widget fixture(Locale? locale) => LumiaStitchApp(
     locale: locale,
