@@ -29,6 +29,12 @@ void main() {
       english.text('完成后自动导出：PNG'),
       'Automatic export after stitching: PNG',
     );
+    for (final format in const ['PNG', 'TIFF', 'JPEG XL']) {
+      expect(
+        english.text('完成后自动导出：$format'),
+        'Automatic export after stitching: $format',
+      );
+    }
     expect(
       english.text('文件名需为 row_column.jpg；可切换到顺序模式'),
       'Filenames must use row_column.jpg; switch to sequence mode.',
@@ -39,6 +45,69 @@ void main() {
       ),
       contains('Overlap is measured from the photos.'),
     );
+  });
+
+  test('dynamic task summaries and export labels follow English and Chinese', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh', 'CN'));
+
+    const phases = <String, (String, String)>{
+      'imported': ('Imported', '已导入'),
+      'queued': ('Queued', '排队中'),
+      'running': ('Stitching', '合成中'),
+      'pausing': ('Pausing', '正在暂停'),
+      'paused': ('Paused', '已暂停'),
+      'interrupted': ('Interrupted', '已中断'),
+      'exporting': ('Exporting', '正在导出'),
+      'completed': ('Completed', '已完成'),
+      'failed': ('Failed', '失败'),
+      'cancelled': ('Cancelled', '已取消'),
+    };
+    for (final entry in phases.entries) {
+      expect(english.phaseLabel(entry.key), entry.value.$1);
+      expect(chinese.phaseLabel(entry.key), entry.value.$2);
+    }
+    for (final format in const ['PNG', 'TIFF', 'JPEG XL']) {
+      expect(
+        english.taskSummary(
+          photoCount: 7,
+          phase: 'completed',
+          format: format,
+        ),
+        '7 photos · Completed · $format',
+      );
+      expect(
+        chinese.taskSummary(
+          photoCount: 7,
+          phase: 'completed',
+          format: format,
+        ),
+        '7 张 · 已完成 · $format',
+      );
+    }
+    expect(
+      english.text('7 张 · completed · JPEG XL'),
+      '7 photos · Completed · JPEG XL',
+    );
+    expect(chinese.text('7 张 · completed · JPEG XL'), '7 张 · 已完成 · JPEG XL');
+    expect(english.text('整图输出'), 'Full image output');
+    expect(english.text('完成后自动导出格式'), 'Format for automatic export after stitching');
+    expect(english.text('JPEG XL（有损）'), 'JPEG XL (lossy)');
+    expect(english.text('TIFF（无损，大图自动 BigTIFF）'), 'TIFF (lossless; BigTIFF for large images)');
+    const formatDescriptions = <ExportFormat, String>{
+      ExportFormat.png: 'PNG (lossless)',
+      ExportFormat.tiff: 'TIFF (lossless; BigTIFF for large images)',
+      ExportFormat.jpegXl: 'JPEG XL (lossy)',
+    };
+    for (final entry in formatDescriptions.entries) {
+      final source = '整图格式：${entry.key.label}';
+      expect(english.text(source), 'Full image format: ${entry.value}');
+      expect(chinese.text(source), source);
+    }
+    expect(english.compositionInfoLogs, 'Stitch details / log');
+    expect(english.duplicateBeforeEditingSettings, 'Create a copy before changing settings');
+    expect(chinese.compositionInfoLogs, '合成信息 / 日志');
+    expect(chinese.duplicateBeforeEditingSettings, '先新建副本，再修改设置');
   });
 
   Widget fixture(Locale? locale) => LumiaStitchApp(

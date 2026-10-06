@@ -1,4 +1,4 @@
-package com.lumia.stitch_app
+package com.lumiaiq.pocketgigascan
 
 import android.app.Activity
 import android.content.Intent
@@ -41,7 +41,7 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumia.stitch_app/power")
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumiaiq.pocketgigascan/power")
             .setMethodCallHandler { call, result ->
                 if (call.method != "readPowerState") {
                     result.notImplemented()
@@ -61,7 +61,7 @@ class MainActivity : FlutterActivity() {
                 result.success(mapOf("state" to state))
             }
 
-        runtime = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumia.stitch_app/runtime")
+        runtime = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumiaiq.pocketgigascan/runtime")
         runtime.setMethodCallHandler { call, result ->
             when (call.method) {
                 "readResourceBudget" -> {
@@ -160,7 +160,7 @@ class MainActivity : FlutterActivity() {
             timeoutReceiverRegistered = true
         }
 
-        storage = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumia.stitch_app/storage")
+        storage = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumiaiq.pocketgigascan/storage")
         storage.setMethodCallHandler { call, result ->
             when (call.method) {
                 "pickBatchParent" -> launchPicker(result)

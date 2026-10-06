@@ -72,3 +72,26 @@ covered scoped input-copy recovery, export-pending scheduling, timeout-to-export
 races and persisted acknowledgement failure before standalone resume. The
 coordinator records APK inspection independently from these host tests; PG-049
 is not physically complete while ADB reports no connected phone.
+
+## PG-050 export, presentation and application identity
+
+Luna native coder owns JPEG XL mode/metadata and decoder-quality regressions.
+Luna UI coder owns shared home/queue presentation, completed-state controls and
+collapsed diagnostic panels. Luna localization/platform coder owns localized
+formats and task phases, Android application/channel identities and Windows
+application identity with legacy task-storage lookup. The coordinator reviews
+these disjoint changes and runs native, Flutter, Windows and Android SDK commands
+serially. User-approved scope and executed evidence are recorded in the linked
+PG-050 report; synthetic, package and physical evidence remain separate.
+
+Independent review repaired lossy-alpha metadata, preserved actionable pause
+messages outside the info panel, kept historical outputs neutral about codec
+mode, and removed clean-CI dependencies on ignored local iOS scaffolding.
+The coordinator reviewed six intended screenshot changes and ran the normal
+Windows source builder: 162 native tests pass (2 real-data tests ignored), clean
+Flutter analysis and 175 tests pass. Android ARM64 core/APK build and actual
+package inspection pass, with 5 JVM tests and zero lint errors (9 warnings).
+The new identity is `com.lumiaiq.pocketgigascan`; legacy Windows lookup remains.
+ADB has no connected phone, so physical Android execution remains pending.
+PR #3 was already merged by the time of the final sync; this correction uses
+the separate `codex/export-ui-identity-fixes` branch from the identical main tree.

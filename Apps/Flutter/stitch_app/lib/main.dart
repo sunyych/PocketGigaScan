@@ -161,6 +161,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   double _viewerScale = 1;
   bool _jpegXlAvailable = false;
   final TransformationController _tileTransform = TransformationController();
+  int _diagnosticsPanelGeneration = 0;
   StreamSubscription<List<String>>? _runtimeTimeoutSubscription;
   final Set<String> _runtimeGuardedJobs = {};
   final Set<String> _runtimeGuardUnavailableJobs = {};
@@ -1733,7 +1734,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         );
       } else if (_mobile) {
         await const MethodChannel(
-          'com.lumia.stitch_app/files',
+          'com.lumiaiq.pocketgigascan/files',
         ).invokeMethod<bool>('shareExport', {'path': path});
       } else {
         final directory = p.dirname(path);
@@ -2205,6 +2206,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _mappingCells = _makeMapping(task.grid);
       _manifest = null;
       _message = null;
+      _diagnosticsPanelGeneration++;
     });
     if (task.phase == StitchPhase.completed) {
       await _loadManifest(
@@ -2346,6 +2348,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         _workers.text = '${copy.workers}';
         _mappingCells = _makeMapping(copy.grid);
         _manifest = null;
+        _diagnosticsPanelGeneration++;
       });
       await _refreshTasks();
     } on Object catch (error) {
@@ -2420,17 +2423,20 @@ class _StitchHomePageState extends State<StitchHomePage>
                   children: [
                     _statusCard(task),
                     const SizedBox(height: 12),
-                    if (!_mobile || _android) ...[
+                    if ((!_mobile || _android) &&
+                        _canChooseOutputFormat(task)) ...[
                       _exportFormatCard(task),
                       const SizedBox(height: 12),
                     ],
                     if (task == null || task.photos.isEmpty)
                       _emptyCard()
                     else ...[
-                      _optionsCard(task, mappingError),
-                      const SizedBox(height: 12),
-                      _photoGrid(task, mappingError),
-                      const SizedBox(height: 12),
+                      if (task.phase != StitchPhase.completed) ...[
+                        _optionsCard(task, mappingError),
+                        const SizedBox(height: 12),
+                        _photoGrid(task, mappingError),
+                        const SizedBox(height: 12),
+                      ],
                       if (_manifest != null) _tilePyramid(task),
                     ],
                   ],
@@ -2460,7 +2466,11 @@ class _StitchHomePageState extends State<StitchHomePage>
           selected: task.id == _task?.id,
           title: Text(task.createdAt.toLocal().toString().substring(0, 16)),
           subtitle: Text(
-            '${task.photos.length} 张 · ${task.phase.name} · ${task.exportFormat.shortLabel}',
+            StitchLocalizations.of(context).taskSummary(
+              photoCount: task.photos.length,
+              phase: task.phase.name,
+              format: task.exportFormat.shortLabel,
+            ),
           ),
           enabled:
               _batchOwnershipReady &&
@@ -2510,35 +2520,33 @@ class _StitchHomePageState extends State<StitchHomePage>
             style: Theme.of(context).textTheme.titleLarge,
           ),
           const SizedBox(height: 6),
-          Text(
-            _api.isAvailable
-                ? '原生合成核心已加载'
-                : _api.unavailableReason ?? '原生核心不可用',
-            style: TextStyle(
-              color: _api.isAvailable
-                  ? Colors.green.shade800
-                  : Colors.deepOrange.shade800,
+          if (task == null)
+            Text(
+              _api.isAvailable
+                  ? '原生合成核心已加载'
+                  : _api.unavailableReason ?? '原生核心不可用',
+              style: TextStyle(
+                color: _api.isAvailable
+                    ? Colors.green.shade800
+                    : Colors.deepOrange.shade800,
+              ),
             ),
-          ),
           if (task != null) ...[
-            const SizedBox(height: 12),
-            LinearProgressIndicator(
-              value: task.progress == 0 ? null : task.progress,
-            ),
-            const SizedBox(height: 6),
-            Text(
-              '${_stageLabel(task.stage)} · ${(task.progress * 100).round()}% · ${task.phase == StitchPhase.completed && task.stage == 'export-failed' ? '导出失败' : _phaseLabel(task.phase)}',
-            ),
-            Text(
-              (task.autoExportOnCompletion &&
-                          task.phase == StitchPhase.completed) ||
-                      (task.phase == StitchPhase.exporting &&
-                          task.stage == 'auto-export')
-                  ? '合成完成，正在导出 ${task.exportFormat.shortLabel}'
-                  : '完成后自动导出：${task.exportFormat.shortLabel}',
-            ),
-            if (task.resultStats case final stats?)
-              ..._performanceStatsLines(stats),
+            if (!_api.isAvailable)
+              Text(
+                _api.unavailableReason ?? '原生核心不可用',
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            if (task.phase != StitchPhase.completed) ...[
+              const SizedBox(height: 12),
+              LinearProgressIndicator(
+                value: task.progress == 0 ? null : task.progress,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '${_stageLabel(task.stage)} · ${(task.progress * 100).round()}% · ${_phaseLabel(task.phase)}',
+              ),
+            ],
             if (task.error != null)
               Text(
                 task.error!,
@@ -2549,73 +2557,108 @@ class _StitchHomePageState extends State<StitchHomePage>
                 task.pauseReason!,
                 style: const TextStyle(color: Colors.deepOrange),
               ),
-            const Text('水平参考：以网格中心照片为准'),
+            ExpansionTile(
+              key: ValueKey(
+                'task-diagnostics-${task.id}-$_diagnosticsPanelGeneration',
+              ),
+              tilePadding: EdgeInsets.zero,
+              title: Text(StitchLocalizations.of(context).compositionInfoLogs),
+              children: [
+                if (_api.isAvailable)
+                  Text(
+                    '原生合成核心已加载',
+                    style: TextStyle(color: Colors.green.shade800),
+                  ),
+                if (task.phase == StitchPhase.completed &&
+                    task.stage == 'export-failed')
+                  const ListTile(title: Text('整图导出失败，可重试')),
+                if ((task.autoExportOnCompletion &&
+                        task.phase == StitchPhase.completed) ||
+                    (task.phase == StitchPhase.exporting &&
+                        task.stage == 'auto-export'))
+                  Text('合成完成，正在导出 ${task.exportFormat.shortLabel}'),
+                if (task.phase != StitchPhase.completed)
+                  Text('完成后自动导出：${task.exportFormat.shortLabel}'),
+                if (task.resultStats case final stats?)
+                  ..._performanceStatsLines(stats),
+                const Text('水平参考：以网格中心照片为准'),
+              ],
+            ),
             Wrap(
               spacing: 8,
               runSpacing: 6,
               children: [
-                FilledButton.icon(
-                  onPressed:
-                      _busy ||
-                          _isActivelyBatchOwned(task) ||
-                          !_canStart ||
-                          mappingErrorIsInvalid(task)
-                      ? null
-                      : () => _startOrResume(
-                          resume:
-                              task.phase == StitchPhase.interrupted ||
-                              task.phase == StitchPhase.paused,
-                        ),
-                  icon: const Icon(Icons.play_arrow),
-                  label: Text(
-                    task.phase == StitchPhase.paused ||
-                            task.phase == StitchPhase.interrupted
-                        ? '恢复'
-                        : task.phase == StitchPhase.imported
-                        ? '开始合成'
-                        : '新建合成任务',
+                if (task.phase != StitchPhase.completed)
+                  FilledButton.icon(
+                    onPressed:
+                        _busy ||
+                            _isActivelyBatchOwned(task) ||
+                            !_canStart ||
+                            mappingErrorIsInvalid(task)
+                        ? null
+                        : () => _startOrResume(
+                            resume:
+                                task.phase == StitchPhase.interrupted ||
+                                task.phase == StitchPhase.paused,
+                          ),
+                    icon: const Icon(Icons.play_arrow),
+                    label: Text(
+                      task.phase == StitchPhase.paused ||
+                              task.phase == StitchPhase.interrupted
+                          ? '恢复'
+                          : task.phase == StitchPhase.imported
+                          ? '开始合成'
+                          : '新建合成任务',
+                    ),
                   ),
-                ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _busy ||
-                          _isActivelyBatchOwned(task) ||
-                          task.nativeJobId == null ||
-                          !_hasRunningJob
-                      ? null
-                      : () => _requestPause('已请求暂停；等待核心确认'),
-                  icon: const Icon(Icons.pause),
-                  label: const Text('暂停'),
-                ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _busy ||
-                          _isActivelyBatchOwned(task) ||
-                          task.nativeJobId == null ||
-                          !_hasRunningJob
-                      ? null
-                      : _cancel,
-                  icon: const Icon(Icons.stop),
-                  label: const Text('取消'),
-                ),
-                OutlinedButton.icon(
-                  onPressed:
-                      _busy ||
-                          _isActivelyBatchOwned(task) ||
-                          task.nativeJobId == null ||
-                          task.phase != StitchPhase.completed ||
-                          (_mobile &&
-                              !_android &&
-                              !task.exportFormat.supportedOnMobile) ||
-                          (task.exportFormat == ExportFormat.jpegXl &&
-                              !_jpegXlAvailable)
-                      ? null
-                      : _export,
-                  icon: const Icon(Icons.save_alt),
-                  label: Text(
-                    '${task.stage == 'export-failed' ? '重试' : '导出'}完整 ${task.exportFormat.shortLabel}',
+                if (task.phase != StitchPhase.completed)
+                  OutlinedButton.icon(
+                    key: const Key('pause-task-action'),
+                    onPressed:
+                        _busy ||
+                            _isActivelyBatchOwned(task) ||
+                            task.nativeJobId == null ||
+                            !_hasRunningJob
+                        ? null
+                        : () => _requestPause('已请求暂停；等待核心确认'),
+                    icon: const Icon(Icons.pause),
+                    label: const Text('暂停'),
                   ),
-                ),
+                if (task.phase != StitchPhase.completed)
+                  OutlinedButton.icon(
+                    key: const Key('cancel-task-action'),
+                    onPressed:
+                        _busy ||
+                            _isActivelyBatchOwned(task) ||
+                            task.nativeJobId == null ||
+                            !_hasRunningJob
+                        ? null
+                        : _cancel,
+                    icon: const Icon(Icons.stop),
+                    label: const Text('取消'),
+                  ),
+                if (task.phase != StitchPhase.completed ||
+                    task.stage == 'export-failed' ||
+                    task.exportPath == null)
+                  OutlinedButton.icon(
+                    key: const Key('export-task-action'),
+                    onPressed:
+                        _busy ||
+                            _isActivelyBatchOwned(task) ||
+                            task.nativeJobId == null ||
+                            task.phase != StitchPhase.completed ||
+                            (_mobile &&
+                                !_android &&
+                                !task.exportFormat.supportedOnMobile) ||
+                            (task.exportFormat == ExportFormat.jpegXl &&
+                                !_jpegXlAvailable)
+                        ? null
+                        : _export,
+                    icon: const Icon(Icons.save_alt),
+                    label: Text(
+                      '${task.stage == 'export-failed' ? '重试' : '导出'}完整 ${task.exportFormat.shortLabel}',
+                    ),
+                  ),
                 if (task.exportPath != null && (!_mobile || _android))
                   OutlinedButton.icon(
                     key: const Key('open-exported-image'),
@@ -2627,13 +2670,21 @@ class _StitchHomePageState extends State<StitchHomePage>
                           : '查看上次成功输出',
                     ),
                   ),
-                if (!_editable && !_hasRunningJob)
+                if ((task.phase == StitchPhase.completed || !_editable) &&
+                    !_hasRunningJob)
                   TextButton.icon(
+                    key: const Key('new-run-copy-action'),
                     onPressed: _busy || _isActivelyBatchOwned(task)
                         ? null
                         : _newRunCopy,
                     icon: const Icon(Icons.copy),
                     label: const Text('新建副本重新合成'),
+                  ),
+                if (task.phase == StitchPhase.completed)
+                  Text(
+                    StitchLocalizations.of(
+                      context,
+                    ).duplicateBeforeEditingSettings,
                   ),
                 if (task.phase == StitchPhase.failed)
                   FilledButton.tonalIcon(
@@ -2647,7 +2698,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             ),
             if (task.exportPath != null) ...[
               Text(
-                '上次成功整图 ${ExportFormat.fromPath(task.exportPath!).label}：${task.exportPath}',
+                '上次成功整图 ${ExportFormat.fromPath(task.exportPath!).shortLabel}：${task.exportPath}',
               ),
               OutlinedButton.icon(
                 onPressed: _busy ? null : _shareExport,
@@ -2714,6 +2765,10 @@ class _StitchHomePageState extends State<StitchHomePage>
     );
   }
 
+  bool _canChooseOutputFormat(StitchTask? task) =>
+      task == null ||
+      (task.phase == StitchPhase.imported && task.nativeJobId == null);
+
   bool mappingErrorIsInvalid(StitchTask task) =>
       _mappingError() != null ||
       !task.photos.every(
@@ -2722,18 +2777,8 @@ class _StitchHomePageState extends State<StitchHomePage>
             photo.height == task.photos.first.height,
       );
 
-  String _phaseLabel(StitchPhase phase) => switch (phase) {
-    StitchPhase.imported => '已导入',
-    StitchPhase.queued => '排队中',
-    StitchPhase.running => '处理中',
-    StitchPhase.pausing => '正在暂停',
-    StitchPhase.paused => '已暂停',
-    StitchPhase.interrupted => '等待手动恢复',
-    StitchPhase.exporting => '导出中',
-    StitchPhase.completed => '已完成',
-    StitchPhase.cancelled => '已取消',
-    StitchPhase.failed => '处理失败',
-  };
+  String _phaseLabel(StitchPhase phase) =>
+      StitchLocalizations.of(context).phaseLabel(phase.name);
 
   String _stageLabel(String stage) => switch (stage) {
     'register' => '图像配准',
@@ -3688,7 +3733,11 @@ class _StitchHomePageState extends State<StitchHomePage>
                 ),
               ),
             ),
-            Text('完整 PNG 导出独立于瓦片预览，使用上方“导出完整 PNG”。'),
+            Text(
+              StitchLocalizations.of(
+                context,
+              ).fullResolutionOutputUsesTaskFormat,
+            ),
           ],
         ),
       ),

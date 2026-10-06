@@ -1,4 +1,4 @@
-package com.lumia.stitch_app
+package com.lumiaiq.pocketgigascan
 
 import java.nio.file.Files
 import org.junit.Assert.assertEquals

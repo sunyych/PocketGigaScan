@@ -13,9 +13,10 @@ Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the includ
 - Import DWARF photo grids, inspect rows/columns/order and estimate horizontal/vertical overlap from textured central neighbors.
 - Compare adjacent photos; refine texture geometry and retain every input. Explicit nominal/forced grid placement remains labelled as estimated and needs visual review.
 - Process individual jobs or queue child folders with resource-bounded concurrency, pause/resume and progress.
-- Choose PNG, TIFF/BigTIFF or JPEG XL. New Windows tasks default to TIFF and export automatically after successful rendering.
+- Choose lossless PNG or TIFF/BigTIFF, or high-quality lossy JPEG XL, before stitching. New Windows tasks default to TIFF and export automatically after successful rendering.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
-- Follow the system language: Chinese locales use Chinese; other locales use English.
+- Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.
+- Follow the system language: Chinese locales use Chinese; other locales use English, including automatic export and task statuses.
 
 Android adds folder access through the system document picker, streamed save/share,
 foreground processing and pinch/drag viewing. Android grids have no arbitrary
@@ -23,6 +24,12 @@ photo-count or axis limit: more than 6 rows, 6 columns or 36 photos requires
 confirmation before processing. Concurrency remains bounded by actual resources.
 Package/device qualification status is recorded in the
 [Android evidence](docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md).
+
+Current application identity is `com.lumiaiq.pocketgigascan`. Windows keeps access
+to legacy task directories. The new Android package can coexist with the old
+package; its private task storage is separate. Shared export/UI corrections and
+current package checks are recorded in the
+[export and identity evidence](docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md).
 
 Old completed layouts must be copied into a new task and recomputed to receive geometry improvements. Changing their export format does not change alignment. Some original-photo obstructions have no clean neighbor coverage and remain in the result.
 

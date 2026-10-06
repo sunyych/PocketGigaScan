@@ -93,6 +93,8 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    await tester.tap(find.text('合成信息 / 日志'));
+    await tester.pumpAndSettle();
 
     expect(find.textContaining('水平 28.0% · 垂直 24.0%'), findsOneWidget);
     expect(find.textContaining('水平 2765 px · 垂直 1641 px'), findsOneWidget);

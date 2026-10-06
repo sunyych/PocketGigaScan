@@ -19,12 +19,15 @@ Future<Directory> legacyCompatibleSupportDirectory({
 
   final appData = (environment ?? Platform.environment)['APPDATA'];
   if (appData == null || appData.trim().isEmpty) return current;
-  final legacyBase = Directory(
-    p.join(appData, 'com.lumia', 'Lumia Stitch', 'LumiaStitch'),
-  );
-  final hasLegacyData =
-      await Directory(p.join(legacyBase.path, 'tasks')).exists() ||
-      await Directory(p.join(legacyBase.path, 'batches')).exists();
-  if (hasLegacyData) return Directory(p.join(legacyBase.path, dataFolder));
+  final legacyBases = [
+    Directory(p.join(appData, 'com.lumia', 'Lumia Stitch', 'LumiaStitch')),
+    Directory(p.join(appData, 'com.lumia', 'PocketGigaScan', 'LumiaStitch')),
+  ];
+  for (final legacyBase in legacyBases) {
+    final hasLegacyData =
+        await Directory(p.join(legacyBase.path, 'tasks')).exists() ||
+        await Directory(p.join(legacyBase.path, 'batches')).exists();
+    if (hasLegacyData) return Directory(p.join(legacyBase.path, dataFolder));
+  }
   return current;
 }

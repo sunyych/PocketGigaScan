@@ -1,4 +1,4 @@
-package com.lumia.stitch_app
+package com.lumiaiq.pocketgigascan
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -132,15 +132,15 @@ class RenderForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     companion object {
-        const val ACTION_TIMEOUT = "com.lumia.stitch_app.PROCESSING_TIMEOUT"
-        const val ACTION_READY = "com.lumia.stitch_app.PROCESSING_READY"
+        const val ACTION_TIMEOUT = "com.lumiaiq.pocketgigascan.PROCESSING_TIMEOUT"
+        const val ACTION_READY = "com.lumiaiq.pocketgigascan.PROCESSING_READY"
         const val EXTRA_JOB_IDS = "jobIds"
         const val EXTRA_REQUEST_ID = "requestId"
         const val PREFERENCES = "render_service"
         const val ACTIVE_JOBS_KEY = "active_job_ids"
         const val PENDING_TIMEOUT_JOBS_KEY = "pending_timeout_job_ids"
         const val PROCESS_ID_KEY = "process_id"
-        private const val ACTION_START = "com.lumia.stitch_app.START_RENDER"
+        private const val ACTION_START = "com.lumiaiq.pocketgigascan.START_RENDER"
         private const val CHANNEL_ID = "local_render"
         private const val NOTIFICATION_ID = 1001
         private const val WAKELOCK_TIMEOUT_MS = 10L * 60L * 1000L

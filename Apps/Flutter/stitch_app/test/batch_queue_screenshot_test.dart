@@ -116,6 +116,30 @@ BatchQueue _fixtureQueue() => BatchQueue(
 );
 
 void main() {
+  testWidgets('completed batch cards show no progress or setup controls', (
+    tester,
+  ) async {
+    _setSize(tester, const Size(1280, 1200));
+    await tester.pumpWidget(_desktopPage([_fixtureQueue()]));
+    await tester.pump();
+
+    final card = find.byKey(const Key('batch-item-item-5'));
+    await tester.ensureVisible(card);
+    await tester.pump();
+    expect(
+      find.descendant(of: card, matching: find.byType(LinearProgressIndicator)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: card, matching: find.byIcon(Icons.tune)),
+      findsNothing,
+    );
+    expect(
+      find.descendant(of: card, matching: find.byTooltip('打开全景查看器')),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('batch queue desktop states at 1280x900', (tester) async {
     _setSize(tester, const Size(1280, 900));
     await tester.pumpWidget(_desktopPage([_fixtureQueue()]));
@@ -173,7 +197,9 @@ void main() {
     );
   });
 
-  testWidgets('mobile batch queue exposes folder import and settings', (tester) async {
+  testWidgets('mobile batch queue exposes folder import and settings', (
+    tester,
+  ) async {
     _setSize(tester, const Size(390, 844));
     await tester.pumpWidget(_mobilePage());
     await tester.pump();

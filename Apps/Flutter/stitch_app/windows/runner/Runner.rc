@@ -89,11 +89,11 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.lumia" "\0"
+            VALUE "CompanyName", "com.lumiaiq" "\0"
             VALUE "FileDescription", "PocketGigaScan - DWARF Stitch" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "PocketGigaScan" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.lumia. All rights reserved." "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.lumiaiq. All rights reserved." "\0"
             VALUE "OriginalFilename", "PocketGigaScan.exe" "\0"
             VALUE "ProductName", "PocketGigaScan" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"

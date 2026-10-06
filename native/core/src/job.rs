@@ -296,7 +296,7 @@ pub fn handle(input: &str) -> Value {
 }
 fn capabilities_value(limits: Limits) -> Value {
     let (active_jobs, reserved_workers, reserved_memory_mib) = job_resources::usage();
-    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":true})
+    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
 }
 fn capabilities() -> Value {
     json!({"ok":true,"capabilities":capabilities_value(job_resources::limits())})
@@ -1708,6 +1708,10 @@ mod tests {
         assert_eq!(cap["capabilities"]["gpuAvailable"], false);
         assert_eq!(cap["capabilities"]["memoryBudgetKind"], "reservation");
         assert_eq!(cap["capabilities"]["maxConcurrentJobsLimit"], 8);
+        assert_eq!(cap["capabilities"]["jpegXlLossless"], false);
+        assert_eq!(cap["capabilities"]["jpegXlDistance"], 1.0);
+        assert_eq!(cap["capabilities"]["jpegXlQuality"], 90);
+        assert_eq!(cap["capabilities"]["jpegXlAlphaDistance"], 0.0);
 
         job_resources::configure(1, 256, 2).unwrap();
         let job = temp_dir("resource-config");

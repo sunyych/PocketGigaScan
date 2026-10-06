@@ -1,5 +1,6 @@
 #include <flutter/dart_project.h>
 #include <flutter/flutter_view_controller.h>
+#include <ShObjIdl.h>
 #include <windows.h>
 
 #include "flutter_window.h"
@@ -16,6 +17,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Initialize COM, so that it is available for use in the library and/or
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  ::SetCurrentProcessExplicitAppUserModelID(L"com.lumiaiq.pocketgigascan");
 
   flutter::DartProject project(L"data");
 

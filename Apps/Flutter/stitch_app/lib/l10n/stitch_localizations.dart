@@ -21,6 +21,75 @@ class StitchLocalizations {
 
   String get appName => 'PocketGigaScan';
 
+  String get compositionInfoLogs => text('合成信息 / 日志');
+
+  String get duplicateBeforeEditingSettings => text('先新建副本，再修改设置');
+
+  String get fullResolutionOutputUsesTaskFormat =>
+      text('整图输出独立于瓦片预览，使用任务选择的输出格式。');
+
+  String phaseLabel(String phase) {
+    final normalized = phase.trim().toLowerCase();
+    final english = <String, String>{
+      'imported': 'Imported',
+      'queued': 'Queued',
+      'running': 'Stitching',
+      'pausing': 'Pausing',
+      'paused': 'Paused',
+      'interrupted': 'Interrupted',
+      'exporting': 'Exporting',
+      'completed': 'Completed',
+      'failed': 'Failed',
+      'cancelled': 'Cancelled',
+    };
+    final chinese = <String, String>{
+      'imported': '已导入',
+      'queued': '排队中',
+      'running': '合成中',
+      'pausing': '正在暂停',
+      'paused': '已暂停',
+      'interrupted': '已中断',
+      'exporting': '正在导出',
+      'completed': '已完成',
+      'failed': '失败',
+      'cancelled': '已取消',
+    };
+    return (isChinese ? chinese : english)[normalized] ?? text(phase);
+  }
+
+  String taskSummary({
+    required int photoCount,
+    required String phase,
+    required String format,
+  }) => '$photoCount ${isChinese ? '张' : 'photos'} · '
+      '${phaseLabel(phase)} · ${formatLabel(format)}';
+
+  String formatLabel(String format) {
+    final normalized = format.trim().toLowerCase();
+    if (normalized.startsWith('jpeg xl') || normalized == 'jpegxl' || normalized == 'jxl') {
+      return 'JPEG XL';
+    }
+    if (normalized.startsWith('tiff') || normalized == 'tif') return 'TIFF';
+    if (normalized.startsWith('png')) return 'PNG';
+    return text(format);
+  }
+
+  String exportDescription(String format) {
+    final normalized = format.trim().toLowerCase();
+    if (normalized == 'png' || normalized.startsWith('png（无损）')) {
+      return 'PNG (lossless)';
+    }
+    if (normalized == 'tiff' || normalized == 'tif' ||
+        normalized.startsWith('tiff（无损')) {
+      return 'TIFF (lossless; BigTIFF for large images)';
+    }
+    if (normalized == 'jpeg xl' || normalized == 'jpegxl' ||
+        normalized == 'jxl' || normalized.startsWith('jpeg xl（有损）')) {
+      return 'JPEG XL (lossy)';
+    }
+    return format;
+  }
+
   String largeJobConfirmation({
     required int rows,
     required int columns,
@@ -36,6 +105,20 @@ class StitchLocalizations {
   }
 
   String text(String source) {
+    final details = RegExp(r'^(\d+) 张 · (.+) · (.+)$').firstMatch(source);
+    if (details != null) {
+      return taskSummary(
+        photoCount: int.parse(details[1]!),
+        phase: details[2]!,
+        format: details[3]!,
+      );
+    }
+    final fullImageFormat = RegExp(r'^整图格式：(.+)$').firstMatch(source);
+    if (fullImageFormat != null) {
+      return isChinese
+          ? source
+          : 'Full image format: ${exportDescription(fullImageFormat[1]!)}';
+    }
     if (isChinese) return _zh[source] ?? source;
     final exact = _en[source];
     if (exact != null) return exact;
@@ -45,17 +128,13 @@ class StitchLocalizations {
     }
     final autoExport = RegExp(r'^完成后自动导出：(.+)$').firstMatch(source);
     if (autoExport != null) {
-      return 'Automatic export after stitching: ${autoExport[1]}';
+      return 'Automatic export after stitching: ${formatLabel(autoExport[1]!)}';
     }
     for (final entry in _en.entries) {
       if ((entry.key.endsWith('：') || entry.key == '设置 ') &&
           source.startsWith(entry.key)) {
         return '${entry.value}${source.substring(entry.key.length)}';
       }
-    }
-    final details = RegExp(r'^(\d+) 张 · (.+) · (.+)$').firstMatch(source);
-    if (details != null) {
-      return '${details[1]} photos · ${text(details[2]!)} · ${text(details[3]!)}';
     }
     final elapsed = RegExp(r'^已用 (\d+) 秒$').firstMatch(source);
     if (elapsed != null) return 'Elapsed ${elapsed[1]} sec';
@@ -178,6 +257,10 @@ class StitchLocalizations {
     '批处理仅限 Windows 桌面版': 'Batch processing is available on Windows desktop',
     '查看输出': 'View output',
     '整图输出': 'Full image output',
+    '合成信息 / 日志': 'Stitch details / log',
+    '先新建副本，再修改设置': 'Create a copy before changing settings',
+    '整图输出独立于瓦片预览，使用任务选择的输出格式。':
+        'Full-resolution output is separate from the tile preview and uses the format selected for this task.',
     '排列与相机': 'Grid and camera',
     '输出与画质': 'Output and quality',
     '局部纹理校正': 'Local texture correction',
@@ -541,6 +624,9 @@ class StitchLocalizations {
     '原片解码': 'Source image decoding',
     '瓦片写入': 'Tile writing',
     'TIFF 类型：': 'TIFF variant: ',
+    'PNG（无损）': 'PNG (lossless)',
+    'TIFF（无损，大图自动 BigTIFF）': 'TIFF (lossless; BigTIFF for large images)',
+    'JPEG XL（有损）': 'JPEG XL (lossy)',
     '实际渲染工作线程：': 'Actual render worker threads: ',
     '原片纹理缓存命中：': 'Source texture cache hits: ',
     '配准缓存：命中（沿用已保存的配准结果）': 'Alignment cache: hit (reusing saved alignment)',
@@ -617,6 +703,15 @@ class StitchLocalizations {
     '本地任务': '本地任务',
     '任务记录': '任务记录',
     '导入原片': '导入照片',
+    '合成信息 / 日志': '合成信息 / 日志',
+    '先新建副本，再修改设置': '先新建副本，再修改设置',
+    '整图输出独立于瓦片预览，使用任务选择的输出格式。':
+        '整图输出独立于瓦片预览，使用任务选择的输出格式。',
+    '整图输出': '整图输出',
+    '完成后自动导出格式': '完成后自动导出格式',
+    'PNG（无损）': 'PNG（无损）',
+    'TIFF（无损，大图自动 BigTIFF）': 'TIFF（无损，大图自动 BigTIFF）',
+    'JPEG XL（有损）': 'JPEG XL（有损）',
     '批处理队列': '批处理队列',
     '批处理仅限 Windows 桌面版': '批处理仅限 Windows 桌面版',
     '局部纹理校正': '局部纹理校正',
