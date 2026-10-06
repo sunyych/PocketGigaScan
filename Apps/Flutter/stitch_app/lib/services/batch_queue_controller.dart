@@ -81,6 +81,24 @@ class BatchQueueController extends ChangeNotifier {
     return '$prefix$sequence';
   }
 
+  String? _normalizedTimelineStage(String? stage) {
+    if (stage == null) return null;
+    if (stage.startsWith('grid-component-pose-')) {
+      return 'optimize-grid-poses';
+    }
+    if (stage.startsWith('pixel-refinement-') ||
+        stage.startsWith('pixel-bundle-')) {
+      return 'refine-pixel-texture';
+    }
+    if (stage.startsWith('source-plane-warp-')) {
+      return 'fit-local-texture-warp';
+    }
+    if (stage.startsWith('joint-cycle-prune-')) {
+      return 'prune-conflicting-neighbors';
+    }
+    return stage;
+  }
+
   bool _nativeHistoryCoversTaskState(
     StitchTimeline previous,
     StitchTimeline current,
@@ -94,7 +112,8 @@ class BatchQueueController extends ChangeNotifier {
       (event) =>
           event.id.startsWith('native:${task.nativeJobId}:') &&
           !previousIds.contains(event.id) &&
-          event.stage == task.stage &&
+          _normalizedTimelineStage(event.stage) ==
+              _normalizedTimelineStage(task.stage) &&
           (event.state == expectedState ||
               (task.phase == StitchPhase.exporting &&
                   event.state == 'queued')) &&
@@ -126,7 +145,8 @@ class BatchQueueController extends ChangeNotifier {
                 native.state == 'running' &&
                 event.state == 'exporting');
         return nearInTime &&
-            event.stage == native.stage &&
+            _normalizedTimelineStage(event.stage) ==
+                _normalizedTimelineStage(native.stage) &&
             event.operation == native.operation &&
             equivalentState;
       });
@@ -251,7 +271,8 @@ class BatchQueueController extends ChangeNotifier {
       final candidateUiCoversTransition = persisted.timeline.events.any(
         (event) =>
             event.id.startsWith('ui:') &&
-            event.stage == persisted.stage &&
+            _normalizedTimelineStage(event.stage) ==
+                _normalizedTimelineStage(persisted.stage) &&
             (inferredOperation == 'publish' ||
                 event.state == persisted.phase.name ||
                 (persisted.phase == StitchPhase.exporting &&
@@ -262,13 +283,14 @@ class BatchQueueController extends ChangeNotifier {
           !nativeHistoryCoversTransition &&
           !candidateUiCoversTransition &&
           (previous.phase != persisted.phase ||
-              previous.stage != persisted.stage)) {
+              _normalizedTimelineStage(previous.stage) !=
+                  _normalizedTimelineStage(persisted.stage))) {
         persisted = persisted.copyWith(
           timeline: persisted.timeline.mergeUiEvent(
             id: _nextTimelineUiId(task.id, persisted.timeline),
             kind: previous.phase != persisted.phase ? 'state' : 'stage',
             timestampUtc: _clock().toUtc(),
-            stage: task.stage,
+            stage: _normalizedTimelineStage(task.stage),
             state: persisted.phase.name,
             operation: inferredOperation,
           ),

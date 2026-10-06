@@ -113,6 +113,7 @@ class _Job {
   final int memory;
   String state = 'running';
   String operation = 'render';
+  String? stageOverride;
   String? destination;
   Object? error;
   double progress = 0.1;
@@ -213,7 +214,9 @@ class _FakeApi implements JobApi {
       'jobId': jobId,
       'state': job.state,
       'operation': job.operation,
-      'stage': job.operation == 'export' ? 'export' : 'register',
+      'stage':
+          job.stageOverride ??
+          (job.operation == 'export' ? 'export' : 'register'),
       'progress': job.progress,
       'workersEffective': job.workers,
       'operationWorkers': job.operation == 'export' ? 1 : job.workers,
@@ -1360,6 +1363,65 @@ void main() {
       );
       reopened.dispose();
       await reopened.drain();
+    },
+  );
+
+  test(
+    'grouped native stage suppresses duplicate UI rows across raw substep polls',
+    () async {
+      api.timelineClock = () => currentTime;
+      await _makeFolder(parent, 'grouped-stage', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1, 'grouped render start');
+      final job = api.jobs.values.single;
+      job
+        ..stageOverride = 'grid-component-pose-cost'
+        ..events.add({
+          'id': 1,
+          'timestampUtc': currentTime.millisecondsSinceEpoch,
+          'kind': 'transition',
+          'stage': 'optimize-grid-poses',
+          'state': 'running',
+          'operation': 'render',
+        });
+
+      await controller.tick();
+      job.stageOverride = 'grid-component-pose-line-search';
+      await controller.tick();
+
+      final task = (await tasks.loadById(item.taskId!))!;
+      expect(task.stage, 'grid-component-pose-line-search');
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              event.stage == 'optimize-grid-poses',
+        ),
+        isEmpty,
+      );
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              event.stage?.startsWith('grid-component-pose-') == true,
+        ),
+        isEmpty,
+      );
+      expect(
+        task.timeline.events.where(
+          (event) => event.stage == 'optimize-grid-poses',
+        ),
+        hasLength(1),
+      );
     },
   );
 
