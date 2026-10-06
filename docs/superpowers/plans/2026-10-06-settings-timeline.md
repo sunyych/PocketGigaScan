@@ -65,7 +65,7 @@ ownership, resource limits, pause/resume, preview/final and huge viewer remain.
 - [x] Bump version after implementation; run normal Windows source Release
   builder and Android ARM64 core/APK build, JVM tests/lint and package checks.
   Inspect connected ADB devices and use available hardware; report if absent.
-- [ ] Record evidence and ownership in ROADMAP/COLLABORATION, create a codex/
+- [x] Record evidence and ownership in ROADMAP/COLLABORATION, create a codex/
   branch, conventional commits including prior pending patch, push to origin,
   create a reviewable PR with validation and attach it to this task. Preserve
   historical notices/licenses; exclude .local, builds and personal data.

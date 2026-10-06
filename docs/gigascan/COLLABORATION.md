@@ -172,3 +172,7 @@ real-photo fixture tests intentionally ignored). Seven Android Kotlin tests pass
 lint has zero errors and nine existing warnings. Normal Windows x64 ZIP and
 Android ARM64 Release APK packages pass their integrity/license checks. ADB lists
 no devices. See [PG-053 evidence](evidence/SETTINGS-TIMELINE-2026-10-06.md).
+
+The qualified branch is committed and pushed. [PR #5](https://github.com/sunyych/PocketGigaScan/pull/5)
+is open and attached to the Codex task. Default-branch latest downloads update
+only after merge and a successful publishing build; this handoff does not merge.

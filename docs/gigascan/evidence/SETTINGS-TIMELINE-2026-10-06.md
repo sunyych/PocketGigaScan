@@ -3,6 +3,7 @@
 Application version: `1.3.0+14`. Branch: `codex/settings-stitch-timeline`.
 Final application source: `a2b7045e2b7b545b44d5f495756d01384b0d3288`.
 Subsequent documentation commits do not change the packaged application.
+[Review PR #5](https://github.com/sunyych/PocketGigaScan/pull/5).
 
 ## Behavior
 
