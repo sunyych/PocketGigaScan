@@ -67,3 +67,9 @@ Final regression qualification: Flutter analysis is clean and all 313 Flutter te
 
 Windows regression artifact: `.build/dwarf-mobile-1.4.2/PocketGigaScan-Windows-x64.zip`.
 SHA-256: `87013331bdec1fe9889d0d5598387581c63f5097dd22f6f4e2c6792dbf023693`.
+
+## Copy-only policy audit
+
+The user explicitly requires source photos to remain in place unless deletion is separately and explicitly requested. The user clarified that the apparent move was cache handling. Current import/download behavior already copies: DWARF media is read with GET/HEAD and metadata-only POST queries; phone/document-picker sources are streamed/copied into independent task inputs. Local `.part` rename and completed private staging cleanup do not move/delete camera or selected original files. Task record removal retains original inputs and exported results.
+
+Added source-preservation assertions to DWARF downloader, single/batch importer and staging-admission tests. All 55 targeted tests pass. A real-camera copy/re-read SHA-256 assertion was added to the integration test but was not run in this follow-up, because the phone was actively rendering 364 photos. No app reinstallation/restart or hardware-task interruption occurred. No production code change or new APK was required.

@@ -1555,8 +1555,14 @@ void main() {
       });
       await storageController.initialize();
       await _makeFolder(parent, 'copyable', 4);
+      final sourcePhoto = File(
+        '${parent.path}${Platform.pathSeparator}copyable${Platform.pathSeparator}image1.jpg',
+      );
+      final originalBytes = await sourcePhoto.readAsBytes();
       await storageController.addParent(parent.path);
       expect(releasedPaths, [parent.path]);
+      expect(await sourcePhoto.exists(), isTrue);
+      expect(await sourcePhoto.readAsBytes(), originalBytes);
       expect(
         storageController.queues.single.items.every(
           (item) => item.taskId != null,

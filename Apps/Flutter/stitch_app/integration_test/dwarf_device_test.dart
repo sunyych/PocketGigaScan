@@ -110,6 +110,24 @@ void main() {
               photo.sha256,
               sha256.convert(await File(photo.path).readAsBytes()).toString(),
             );
+            // Verify that copying leaves the selected camera original intact.
+            final verifyClient = HttpClient();
+            try {
+              final request = await verifyClient
+                  .getUrl(Uri.parse(originals.first.url))
+                  .timeout(const Duration(seconds: 30));
+              request.followRedirects = false;
+              final response = await request.close().timeout(
+                const Duration(seconds: 30),
+              );
+              expect(response.statusCode, HttpStatus.ok);
+              final sourceHash = await sha256
+                  .bind(response.timeout(const Duration(seconds: 60)))
+                  .first;
+              expect(sourceHash.toString(), photo.sha256);
+            } finally {
+              verifyClient.close(force: true);
+            }
             debugPrint(
               'Real original JPEG downloaded and verified: ${photo.bytes} bytes',
             );
@@ -140,10 +158,19 @@ void main() {
       var interrupt = true;
       var rangeRequests = 0;
       final requestErrors = <Object>[];
+      final mediaMethods = <String>[];
       server.listen((request) async {
         try {
           final path = request.uri.path;
           if (request.method == 'POST') {
+            expect(
+              const {
+                '/deviceInfo',
+                '/album/list/mediaCounts',
+                '/album/list/mediaInfos',
+              }.contains(path),
+              isTrue,
+            );
             final body = jsonDecode(await utf8.decoder.bind(request).join());
             Object data;
             if (path == '/deviceInfo') {
@@ -172,6 +199,7 @@ void main() {
             await request.response.close();
             return;
           }
+          mediaMethods.add(request.method);
           if (path.endsWith('/')) {
             request.response.headers.contentType = ContentType.html;
             request.response.write(
@@ -263,11 +291,25 @@ void main() {
         final complete = await downloader.resumeBatch('phone-fixture');
         expect(complete.isComplete, isTrue, reason: complete.error);
         expect(rangeRequests, greaterThan(0));
+        expect(
+          mediaMethods.every((method) => method == 'GET' || method == 'HEAD'),
+          isTrue,
+        );
         for (final photo in complete.files) {
           expect(
             sha256.convert(await File(photo.path).readAsBytes()),
             sha256.convert(bytes),
           );
+        }
+        final sourceCheck = HttpClient();
+        try {
+          final response = await (await sourceCheck.getUrl(
+            Uri.parse(originals.first.url),
+          )).close();
+          expect(response.statusCode, HttpStatus.ok);
+          expect(await sha256.bind(response).first, sha256.convert(bytes));
+        } finally {
+          sourceCheck.close(force: true);
         }
         await controller.addCompletedPanoramas([complete]);
         expect(controller.queues, hasLength(1));

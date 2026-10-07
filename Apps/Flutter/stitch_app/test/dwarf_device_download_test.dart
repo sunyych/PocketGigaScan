@@ -298,7 +298,9 @@ void main() {
   test(
     'downloads JPEGs with exact source names and durable manifest identity',
     () async {
+      final sourceMethods = <String>[];
       server.listen((request) async {
+        sourceMethods.add(request.method);
         request.response.headers.contentType = ContentType('image', 'jpeg');
         request.response.contentLength = _jpeg.length;
         request.response.add(_jpeg);
@@ -330,6 +332,23 @@ void main() {
       expect((await service.listBatches()).map((batch) => batch.id), [
         'DWARF3|P01',
       ]);
+      expect(
+        sourceMethods.every((method) => method == 'GET' || method == 'HEAD'),
+        isTrue,
+      );
+
+      // Copying must leave the source endpoint readable with identical bytes.
+      final sourceCheck = HttpClient();
+      try {
+        final response = await (await sourceCheck.getUrl(
+          Uri.parse(url),
+        )).close();
+        expect(response.statusCode, HttpStatus.ok);
+        expect(await sha256.bind(response).first, sha256.convert(_jpeg));
+      } finally {
+        sourceCheck.close(force: true);
+      }
+      expect(sourceMethods, ['GET', 'GET']);
     },
   );
 
