@@ -31,7 +31,15 @@ test, with cancel/error/count widget coverage separate from native import UI.
 Independent archive review rejected a mixed debug/Release asset package before
 delivery. Luna picker coder added owned generated-output cleanup and a fail-closed
 AOT/debug-asset guard; Codex corrected a missing fixture parent through the coder
-and verified the builder contract. Release/UI qualification remains in progress; see the
+and verified the builder contract. The corrected normal Windows builder passes 212 native, 284 Flutter and 32
+Python tests plus both contracts; its clean 1.3.4+18 AOT ZIP is independently
+verified. Serial Android source/Release build, seven Kotlin tests and lint
+pass, with APK alignment/signature/license checks. The Windows-engine import
+uses all 364 real JPEGs and preserves source/export hashes. Fresh Downloads
+extraction starts at medium integrity and loads legacy tasks; the latest native
+selector interaction is blocked by the running screen saver, and no ADB device
+is connected. No latest native-dialog or Android hardware acceptance is claimed.
+See the
 [PG-061 evidence record](evidence/WINDOWS-IMPORT-2026-10-07.md).
 
 ## PG-060 renderer hot path and recovery performance
