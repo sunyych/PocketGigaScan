@@ -3612,6 +3612,21 @@ fn warp_pixel(
     }
 }
 
+fn should_extend_source_warp_for_quality(
+    completed_rounds: usize,
+    base_limit: usize,
+    previous_worst_px: f64,
+    current_worst_px: f64,
+    quality_limit_px: f64,
+    minimum_improvement_px: f64,
+) -> bool {
+    completed_rounds == base_limit
+        && previous_worst_px.is_finite()
+        && current_worst_px.is_finite()
+        && current_worst_px > quality_limit_px
+        && previous_worst_px - current_worst_px >= minimum_improvement_px
+}
+
 fn fit_source_plane_warps(
     poses: &[Mat],
     visual_constraints: &[Constraint],
@@ -3648,11 +3663,16 @@ fn fit_source_plane_warps(
         .iter()
         .map(|edge| edge.2)
         .fold(0.0_f64, f64::max);
+    const BASE_MAX_OUTER_ITERATIONS: usize = 8;
+    const MAX_ADDITIONAL_QUALITY_ITERATIONS: usize = 4;
+    const MAX_OUTER_ITERATIONS: usize =
+        BASE_MAX_OUTER_ITERATIONS + MAX_ADDITIONAL_QUALITY_ITERATIONS;
     let mut accepted_rounds = 0usize;
     let mut attempted_rounds = 0usize;
     let mut termination_reason = "iteration_limit";
     let mut converged = false;
-    for outer_iteration in 0..8 {
+    let mut extended_for_quality = false;
+    for outer_iteration in 0..MAX_OUTER_ITERATIONS {
         checkpoint("source-plane-warp-outer-iteration").map_err(|_| Error::Cancelled)?;
         attempted_rounds += 1;
         let current_warps = warps.clone();
@@ -3892,11 +3912,11 @@ fn fit_source_plane_warps(
                 && trial_rms + 1e-4 < current_rms
                 && trial_worst <= current_worst + 1e-3
             {
-                accepted = Some(trial_warps);
+                accepted = Some((trial_warps, trial_worst));
                 break;
             }
         }
-        if let Some(accepted_warps) = accepted {
+        if let Some((accepted_warps, accepted_worst)) = accepted {
             let mut max_step = 0.0_f64;
             for (old, new) in current_warps.iter().zip(&accepted_warps) {
                 if let Some(new) = new {
@@ -3913,6 +3933,26 @@ fn fit_source_plane_warps(
             if max_step <= 0.05 {
                 converged = true;
                 termination_reason = "offset_step_tolerance";
+                break;
+            }
+            if extended_for_quality && accepted_worst <= 12.0 {
+                termination_reason = "quality_limit_reached";
+                break;
+            }
+            let completed_rounds = outer_iteration + 1;
+            if completed_rounds == BASE_MAX_OUTER_ITERATIONS
+                && should_extend_source_warp_for_quality(
+                    completed_rounds,
+                    BASE_MAX_OUTER_ITERATIONS,
+                    current_worst,
+                    accepted_worst,
+                    12.0,
+                    0.01,
+                )
+            {
+                extended_for_quality = true;
+            } else if completed_rounds == BASE_MAX_OUTER_ITERATIONS {
+                termination_reason = "iteration_limit";
                 break;
             }
         } else {
@@ -3965,7 +4005,10 @@ fn fit_source_plane_warps(
         "maximumOffsetEuclideanPx":crate::texture_warp::SOURCE_WARP_MAX_DISPLACEMENT_PX,
         "maximumLocalStrain":crate::texture_warp::SOURCE_WARP_MAX_LOCAL_STRAIN,
         "irlsIterations":5,
-        "maximumOuterIterations":8,
+        "maximumOuterIterations":MAX_OUTER_ITERATIONS,
+        "baseMaximumOuterIterations":BASE_MAX_OUTER_ITERATIONS,
+        "maximumAdditionalQualityIterations":MAX_ADDITIONAL_QUALITY_ITERATIONS,
+        "extendedForQuality":extended_for_quality,
         "proposalDamping":0.5,
         "minimumSupportPoints":32,
         "minimumOccupiedSupportQuadrants":2,
@@ -6041,6 +6084,246 @@ mod tests {
         };
         assert!(source_warp_max_step(Some(&coarse), &fine, 101, 101) < 1e-9);
         assert!(source_warp_max_step(Some(&fine), &coarse, 101, 101) < 1e-9);
+    }
+
+    #[test]
+    fn source_warp_quality_extension_is_bounded_and_requires_continued_improvement() {
+        assert!(should_extend_source_warp_for_quality(
+            8, 8, 12.4, 12.0857, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            7, 8, 12.4, 12.0857, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8, 8, 12.01, 11.99, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8, 8, 12.4, 12.395, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8,
+            8,
+            12.4,
+            f64::NAN,
+            12.0,
+            0.01
+        ));
+    }
+
+    fn source_warp_extension_fixture(
+        first_edge_shift_px: f64,
+        second_edge_shift_px: f64,
+    ) -> (
+        Request,
+        Vec<Constraint>,
+        Vec<crate::pipeline::SphericalMatchEdge>,
+    ) {
+        let req = Request {
+            rows: 1,
+            columns: 3,
+            tiles: vec![
+                InputTile {
+                    row: 0,
+                    column: 0,
+                    path: "fixture-0".into(),
+                    force_grid: false,
+                },
+                InputTile {
+                    row: 0,
+                    column: 1,
+                    path: "fixture-1".into(),
+                    force_grid: false,
+                },
+                InputTile {
+                    row: 0,
+                    column: 2,
+                    path: "fixture-2".into(),
+                    force_grid: false,
+                },
+            ],
+            fx: 1000.0,
+            fy: 1000.0,
+            cx: 500.0,
+            cy: 400.0,
+            source_width: 1000,
+            source_height: 800,
+            output_dir: String::new(),
+            placement_mode: String::new(),
+            allow_nominal_grid_fallback: false,
+            auto_grid_overlap: false,
+            refine_grid_neighbors: false,
+            seam_blend_mode: default_seam_blend_mode(),
+            grid_horizontal_overlap: None,
+            grid_vertical_overlap: None,
+            neighbor_mode: default_neighbor_mode(),
+            workers: default_workers(),
+            parallel_matching: default_parallel_matching(),
+            registration_megapixels: default_registration_megapixels(),
+            feature_type: default_feature_type(),
+            matcher_type: default_matcher_type(),
+            include_diagnostic_correspondences: false,
+            local_texture_warp: true,
+        };
+        let points = (0..8)
+            .flat_map(|row| {
+                (0..8).map(move |column| {
+                    let x = 180.0 + column as f64 * 90.0;
+                    let y = 90.0 + row as f64 * 88.0;
+                    [x, y, x - second_edge_shift_px, y]
+                })
+            })
+            .collect::<Vec<_>>();
+        let first_edge_points = points
+            .iter()
+            .map(|point| [point[0], point[1], point[0] - first_edge_shift_px, point[1]])
+            .collect();
+        let first_edge = reprojection_fixture_edge(first_edge_points);
+        let mut second_edge = reprojection_fixture_edge(points);
+        second_edge.from = 1;
+        second_edge.to = 2;
+        let constraints = vec![
+            Constraint {
+                from: 0,
+                to: 1,
+                rotation: ID,
+                weight: 1.0,
+            },
+            Constraint {
+                from: 1,
+                to: 2,
+                rotation: ID,
+                weight: 1.0,
+            },
+        ];
+        (req, constraints, vec![first_edge, second_edge])
+    }
+
+    #[test]
+    fn source_warp_solver_uses_only_bounded_extra_rounds_to_reach_quality_limit() {
+        let (req, constraints, edges) = source_warp_extension_fixture(26.0, 0.0);
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let (warps, _, summary) = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        )
+        .unwrap();
+
+        let attempted = summary["attemptedRounds"].as_u64().unwrap();
+        let final_worst = summary["finalWorstEdgeRmsPx"].as_f64().unwrap();
+        let compact_summary = format!(
+            "attempted={}, accepted={}, extended={}, termination={}, converged={}, initialWorst={:.4}, finalWorst={:.4}, initialRms={:.4}, finalRms={:.4}",
+            attempted,
+            summary["acceptedRounds"].as_u64().unwrap_or(0),
+            summary["extendedForQuality"].as_bool().unwrap_or(false),
+            summary["terminationReason"].as_str().unwrap_or("unknown"),
+            summary["converged"].as_bool().unwrap_or(false),
+            summary["initialWorstEdgeRmsPx"].as_f64().unwrap_or(f64::NAN),
+            final_worst,
+            summary["initialSymmetricRmsPx"].as_f64().unwrap_or(f64::NAN),
+            summary["finalSymmetricRmsPx"].as_f64().unwrap_or(f64::NAN),
+        );
+        assert_eq!(
+            summary["extendedForQuality"].as_bool(),
+            Some(true),
+            "{compact_summary}"
+        );
+        assert!(attempted > 8 && attempted <= 12, "{compact_summary}");
+        assert_eq!(summary["maximumOuterIterations"], 12, "{compact_summary}");
+        assert_eq!(
+            summary["terminationReason"], "quality_limit_reached",
+            "{compact_summary}"
+        );
+        assert!(
+            !summary["converged"].as_bool().unwrap(),
+            "{compact_summary}"
+        );
+        assert!(final_worst <= 12.0, "{compact_summary}");
+        assert!(summary["completeEvidence"].as_bool().unwrap());
+        assert_eq!(warps.len(), 3);
+        for warp in warps.iter().flatten() {
+            crate::texture_warp::validate_source_plane_warp(
+                warp,
+                req.source_width,
+                req.source_height,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn source_warp_solver_can_be_cancelled_during_bounded_quality_extension() {
+        let (req, constraints, edges) = source_warp_extension_fixture(32.0, 0.0);
+        let mut outer_iterations = 0usize;
+        let mut checkpoint = |stage: &str| {
+            if stage == "source-plane-warp-outer-iteration" {
+                outer_iterations += 1;
+                if outer_iterations == 9 {
+                    return Err("cancel during quality extension".to_owned());
+                }
+            }
+            Ok(())
+        };
+        let result = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(outer_iterations, 9);
+    }
+
+    #[test]
+    fn source_warp_solver_stays_fail_closed_after_bounded_budget_is_exhausted() {
+        let (req, constraints, edges) = source_warp_extension_fixture(32.0, 0.0);
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let (warps, _, summary) = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        )
+        .unwrap();
+        let attempted = summary["attemptedRounds"].as_u64().unwrap();
+        let final_worst = summary["finalWorstEdgeRmsPx"].as_f64().unwrap();
+        let compact_summary = format!(
+            "attempted={attempted}, extended={}, termination={}, converged={}, finalWorst={final_worst:.4}",
+            summary["extendedForQuality"].as_bool().unwrap_or(false),
+            summary["terminationReason"].as_str().unwrap_or("unknown"),
+            summary["converged"].as_bool().unwrap_or(false),
+        );
+        assert_eq!(attempted, 12, "{compact_summary}");
+        assert_eq!(
+            summary["extendedForQuality"].as_bool(),
+            Some(true),
+            "{compact_summary}"
+        );
+        assert_eq!(
+            summary["terminationReason"], "iteration_limit",
+            "{compact_summary}"
+        );
+        assert!(
+            !summary["converged"].as_bool().unwrap(),
+            "{compact_summary}"
+        );
+        assert!(final_worst > 12.0, "{compact_summary}");
+        assert!(summary["completeEvidence"].as_bool().unwrap());
+        assert!(warps.iter().flatten().all(|warp| {
+            crate::texture_warp::validate_source_plane_warp(
+                warp,
+                req.source_width,
+                req.source_height,
+            )
+            .is_ok()
+        }));
     }
 
     #[test]

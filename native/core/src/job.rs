@@ -17,7 +17,7 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 16;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 17;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
@@ -1779,14 +1779,15 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
-            alignment_cache_key_for_version(16, &request, &hashes),
-            "bounded source-plane warp geometry must use cache version 16"
+            alignment_cache_key_for_version(17, &request, &hashes),
+            "bounded source-plane warp geometry must use cache version 17"
         );
         assert_ne!(
             key,
-            alignment_cache_key_for_version(15, &request, &hashes),
-            "source-plane warp layouts must not reuse version 15 weak-support results"
+            alignment_cache_key_for_version(16, &request, &hashes),
+            "extended source-plane warp layouts must not reuse version 16 results"
         );
+        assert_ne!(key, alignment_cache_key_for_version(15, &request, &hashes));
         assert_ne!(key, alignment_cache_key_for_version(14, &request, &hashes));
         assert_ne!(
             key,
