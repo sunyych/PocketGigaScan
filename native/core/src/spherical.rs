@@ -87,6 +87,10 @@ struct Request {
     allow_nominal_grid_fallback: bool,
     #[serde(default)]
     auto_grid_overlap: bool,
+    /// True only for internally estimated overlap values passed into the
+    /// visual-neighbor refinement path. This is never accepted from JSON.
+    #[serde(skip)]
+    internal_measured_grid_overlap: bool,
     #[serde(default)]
     refine_grid_neighbors: bool,
     #[serde(default = "default_seam_blend_mode")]
@@ -3150,6 +3154,7 @@ pub fn reorient_layout_to_grid_center(layout: &mut Value) -> std::result::Result
         placement_mode: String::new(),
         allow_nominal_grid_fallback: false,
         auto_grid_overlap: false,
+        internal_measured_grid_overlap: false,
         refine_grid_neighbors: false,
         seam_blend_mode: default_seam_blend_mode(),
         grid_horizontal_overlap: None,
@@ -3298,6 +3303,7 @@ fn align_measured_grid_only(
         let central_overlap = estimate.report.clone();
         let mut refined_req = req;
         refined_req.auto_grid_overlap = false;
+        refined_req.internal_measured_grid_overlap = true;
         refined_req.refine_grid_neighbors = false;
         refined_req.placement_mode = "grid-assisted".into();
         refined_req.allow_nominal_grid_fallback = true;
@@ -4283,10 +4289,18 @@ fn validate(req: &Request) -> Result<()> {
             ("Horizontal", req.grid_horizontal_overlap.unwrap_or(0.3)),
             ("Vertical", req.grid_vertical_overlap.unwrap_or(0.3)),
         ] {
-            if !overlap.is_finite() || !(0.15..=0.8).contains(&overlap) {
-                return Err(Error::Invalid(format!(
-                    "grid{axis}Overlap must be finite and between 0.15 and 0.8"
-                )));
+            let in_range = if req.internal_measured_grid_overlap {
+                overlap > 0.0 && overlap < 1.0
+            } else {
+                (0.15..=0.8).contains(&overlap)
+            };
+            if !overlap.is_finite() || !in_range {
+                let message = if req.internal_measured_grid_overlap {
+                    format!("measured grid{axis}Overlap must be finite and between 0 and 1")
+                } else {
+                    format!("grid{axis}Overlap must be finite and between 0.15 and 0.8")
+                };
+                return Err(Error::Invalid(format!("{message}")));
             }
         }
     }
@@ -6781,6 +6795,7 @@ mod tests {
             placement_mode: String::new(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -7567,6 +7582,7 @@ mod tests {
             placement_mode: String::new(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -7580,6 +7596,46 @@ mod tests {
             include_diagnostic_correspondences: false,
             local_texture_warp: true,
         }
+    }
+
+    #[test]
+    fn only_internal_measured_overlaps_bypass_manual_bounds() {
+        let mut request = grid_request(2, 2);
+        request.grid_horizontal_overlap = Some(0.05);
+        request.grid_vertical_overlap = Some(0.95);
+        let manual_error = validate(&request).unwrap_err().to_string();
+        assert!(manual_error.contains("gridHorizontalOverlap"));
+
+        request.internal_measured_grid_overlap = true;
+        assert!(validate(&request).is_ok());
+        request.grid_vertical_overlap = Some(f64::NAN);
+        assert!(validate(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("measured gridVerticalOverlap"));
+
+        let external_request: Request = serde_json::from_value(json!({
+            "rows":2,
+            "columns":2,
+            "tiles":[
+                {"row":0,"column":0,"path":"a.jpg"},
+                {"row":0,"column":1,"path":"b.jpg"},
+                {"row":1,"column":0,"path":"c.jpg"},
+                {"row":1,"column":1,"path":"d.jpg"}
+            ],
+            "fx":100,"fy":100,"cx":50,"cy":50,
+            "sourceWidth":100,"sourceHeight":100,
+            "autoGridOverlap":false,
+            "gridHorizontalOverlap":0.05,
+            "gridVerticalOverlap":0.95,
+            "internalMeasuredGridOverlap":true
+        }))
+        .unwrap();
+        assert!(!external_request.internal_measured_grid_overlap);
+        assert!(validate(&external_request)
+            .unwrap_err()
+            .to_string()
+            .contains("gridHorizontalOverlap"));
     }
 
     #[test]
@@ -8474,6 +8530,7 @@ mod tests {
             placement_mode: "nominal".into(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -9329,6 +9386,7 @@ mod tests {
             placement_mode: String::new(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -9393,6 +9451,7 @@ mod tests {
             placement_mode: "grid-assisted".into(),
             allow_nominal_grid_fallback: true,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -9631,6 +9690,7 @@ mod tests {
             placement_mode: "grid-assisted".into(),
             allow_nominal_grid_fallback: true,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -9970,6 +10030,7 @@ mod tests {
             placement_mode: String::new(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,
@@ -10032,6 +10093,7 @@ mod tests {
             placement_mode: String::new(),
             allow_nominal_grid_fallback: false,
             auto_grid_overlap: false,
+            internal_measured_grid_overlap: false,
             refine_grid_neighbors: false,
             seam_blend_mode: default_seam_blend_mode(),
             grid_horizontal_overlap: None,

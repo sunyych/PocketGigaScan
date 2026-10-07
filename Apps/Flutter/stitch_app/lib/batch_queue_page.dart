@@ -91,6 +91,17 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _openTask(String? taskId) async {
+    if (taskId == null) return;
+    if (mounted &&
+        ModalRoute.of(context)?.isCurrent == true &&
+        Navigator.of(context).canPop()) {
+      Navigator.of(context).pop<String>(taskId);
+      return;
+    }
+    await widget.onDeviceTaskReady?.call(taskId);
+  }
+
   Future<void> _openDwarfDevice() async {
     final result = await Navigator.of(context).push<String>(
       MaterialPageRoute<String>(
@@ -674,10 +685,28 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(
-                        item.name,
-                        translate: false,
-                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      Tooltip(
+                        message: StitchLocalizations.of(
+                          context,
+                        ).text('Open stitch task'),
+                        child: Semantics(
+                          button: item.taskId != null,
+                          label: item.taskId == null
+                              ? item.name
+                              : '${StitchLocalizations.of(context).text('Open stitch task')}: ${item.name}',
+                          child: InkWell(
+                            onTap: item.taskId == null
+                                ? null
+                                : () => _openTask(item.taskId),
+                            child: Text(
+                              item.name,
+                              translate: false,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                       Text(
                         _detail(item),

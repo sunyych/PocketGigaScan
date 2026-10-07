@@ -25,6 +25,12 @@ class StitchLocalizations {
   String get stitchDetails => text('合成详情');
   String get stitchingLog => text('合成日志');
   String get stitchingProgressTitle => text('Stitching progress');
+  String get importedTaskUnavailable => text(
+    'The imported panorama task is not available yet. It remains in the task list; try opening it again.',
+  );
+  String importedTaskOpenFailed(String error) => isChinese
+      ? '无法打开导入的全景任务：$error'
+      : 'Could not open the imported panorama task: $error';
   String get stitchingForegroundPowerHint => text(
     'Keep the app open and connect power while stitching. Background work may pause; reopen the app to continue.',
   );
@@ -1145,6 +1151,7 @@ class StitchLocalizations {
   };
 
   static const _zh = <String, String>{
+    'Open stitch task': '打开合成任务',
     'Import from DWARF3': '从 DWARF3 导入',
     'DWARF3 panoramas': 'DWARF3 设备全景',
     'Device address': '设备地址',
@@ -1168,6 +1175,8 @@ class StitchLocalizations {
     'Keep this page open and connect power. The screen stays awake while downloading; background downloads pause safely.':
         '请保持此页面打开并连接电源。下载时屏幕会保持常亮；应用进入后台后会安全暂停下载。',
     'Stitching progress': '合成进度',
+    'The imported panorama task is not available yet. It remains in the task list; try opening it again.':
+        '导入的全景任务暂不可用。任务仍保留在列表中，请稍后重试打开。',
     'Stitching': '合成中',
     'Exporting': '导出中',
     'Keep the app open and connect power while stitching. Background work may pause; reopen the app to continue.':

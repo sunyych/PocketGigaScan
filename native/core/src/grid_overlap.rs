@@ -372,15 +372,20 @@ mod tests {
     }
 
     fn crop_fixture(blank: bool) -> (PathBuf, Vec<PathBuf>) {
+        crop_fixture_with_step(blank, 120)
+    }
+
+    fn crop_fixture_with_step(blank: bool, step: u32) -> (PathBuf, Vec<PathBuf>) {
         let dir = fixture_dir(if blank { "blank" } else { "crops" });
-        let canvas = GrayImage::from_fn(660, 660, |x, y| {
+        let canvas_size = 420 + 2 * step;
+        let canvas = GrayImage::from_fn(canvas_size, canvas_size, |x, y| {
             Luma([if blank { 128 } else { texture(x, y) }])
         });
         let mut paths = Vec::new();
         for row in 0..3 {
             for column in 0..3 {
                 let image = GrayImage::from_fn(420, 420, |x, y| {
-                    *canvas.get_pixel(column * 120 + x, row * 120 + y)
+                    *canvas.get_pixel(column * step + x, row * step + y)
                 });
                 let path = dir.join(format!("{row}-{column}.png"));
                 image.save(&path).unwrap();
@@ -433,6 +438,39 @@ mod tests {
                 .iter()
                 .any(|p| p["status"] == "accepted")
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn high_measured_angular_overlap_refines_without_manual_range_rejection() {
+        let (dir, paths) = crop_fixture_with_step(false, 22);
+        let request = json!({
+            "rows":3,
+            "columns":3,
+            "tiles":paths.iter().enumerate().map(|(i,path)| json!({
+                "row":i/3,"column":i%3,"path":path,"forceGrid":false
+            })).collect::<Vec<_>>(),
+            "fx":500,
+            "fy":500,
+            "cx":210,
+            "cy":210,
+            "sourceWidth":420,
+            "sourceHeight":420,
+            "autoGridOverlap":true,
+            "refineGridNeighbors":true,
+            "registrationMegapixels":0.2
+        });
+        let layout = crate::spherical::align_json_detailed(&request.to_string()).unwrap();
+        let report = &layout["report"];
+        let vertical_step_rad = report["gridVerticalStepRadians"].as_f64().unwrap();
+        let vertical_fov = 2.0 * (420.0_f64 / (2.0 * 500.0)).atan();
+        let angular_overlap = 1.0 - vertical_step_rad / vertical_fov;
+        assert!(
+            angular_overlap > 0.8,
+            "fixture must exercise a measured value outside the manual UI range: {report}"
+        );
+        assert_eq!(report["gridNeighborRefinement"]["enabled"], true);
+        assert_eq!(report["refineGridNeighbors"], true);
         let _ = std::fs::remove_dir_all(dir);
     }
 

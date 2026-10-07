@@ -318,6 +318,19 @@ class _StitchHomePageState extends State<StitchHomePage>
         false;
   }
 
+  bool _hasBatchTaskRecord(StitchTask task) =>
+      _batchController?.queues.any(
+        (queue) => queue.items.any((item) => item.taskId == task.id),
+      ) ??
+      false;
+
+  bool _canSelectTaskFromRail(StitchTask task) =>
+      _batchOwnershipReady &&
+      !_busy &&
+      (!_hasRunningJob ||
+          task.id == _task?.id ||
+          (_isActivelyBatchOwned(_task) && _hasBatchTaskRecord(task)));
+
   void _onBatchQueueChanged() {
     if (mounted) setState(() {});
     unawaited(_syncForegroundLock());
@@ -1274,10 +1287,32 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<void> _openImportedDeviceTask(String taskId) async {
-    final task = await _repository.loadById(taskId);
-    if (!mounted || task == null) return;
-    await _refreshTasks();
-    if (mounted) await _selectTask(task);
+    try {
+      final task = await _repository.loadById(taskId);
+      if (!mounted) return;
+      if (task == null) {
+        setState(
+          () => _message = StitchLocalizations.of(
+            context,
+          ).importedTaskUnavailable,
+        );
+        await _refreshTasks();
+        return;
+      }
+      // Select the task as soon as the durable record is available. Refreshing
+      // the whole list first introduces an unnecessary async window in which
+      // another poll/selection can supersede the device-import handoff.
+      await _selectTask(task);
+      if (mounted) await _refreshTasks();
+    } on Object catch (error) {
+      if (mounted) {
+        setState(
+          () => _message = StitchLocalizations.of(
+            context,
+          ).importedTaskOpenFailed(error.toString()),
+        );
+      }
+    }
   }
 
   @override
@@ -3471,17 +3506,11 @@ class _StitchHomePageState extends State<StitchHomePage>
               format: task.exportFormat.shortLabel,
             ),
           ),
-          enabled:
-              _batchOwnershipReady &&
-              !_busy &&
-              (!_hasRunningJob || task.id == _task?.id),
-          onTap:
-              _batchOwnershipReady &&
-                  !_busy &&
-                  (!_hasRunningJob || task.id == _task?.id)
-              ? () {
-                  Navigator.of(context).maybePop();
-                  _selectTask(task);
+          enabled: _canSelectTaskFromRail(task),
+          onTap: _canSelectTaskFromRail(task)
+              ? () async {
+                  await Navigator.of(context).maybePop();
+                  if (mounted) await _selectTask(task);
                 }
               : null,
           trailing: IconButton(
@@ -4181,45 +4210,53 @@ class _StitchHomePageState extends State<StitchHomePage>
                     ),
                   ),
                 ),
-                DropdownButton<TraversalAxis>(
-                  value: _grid.axis,
-                  onChanged: enabled && _grid.mode == GridMode.sequence
-                      ? (value) => _changeTraversal(axis: value)
-                      : null,
-                  items: const [
-                    DropdownMenuItem(
-                      value: TraversalAxis.row,
-                      child: Text('逐行拍摄'),
-                    ),
-                    DropdownMenuItem(
-                      value: TraversalAxis.column,
-                      child: Text('逐列拍摄'),
-                    ),
-                  ],
+                SizedBox(
+                  width: _mobile ? 140 : null,
+                  child: DropdownButton<TraversalAxis>(
+                    value: _grid.axis,
+                    isExpanded: _mobile,
+                    onChanged: enabled && _grid.mode == GridMode.sequence
+                        ? (value) => _changeTraversal(axis: value)
+                        : null,
+                    items: const [
+                      DropdownMenuItem(
+                        value: TraversalAxis.row,
+                        child: Text('逐行拍摄'),
+                      ),
+                      DropdownMenuItem(
+                        value: TraversalAxis.column,
+                        child: Text('逐列拍摄'),
+                      ),
+                    ],
+                  ),
                 ),
-                DropdownButton<StartCorner>(
-                  value: _grid.startCorner,
-                  onChanged: enabled && _grid.mode == GridMode.sequence
-                      ? (value) => _changeTraversal(corner: value)
-                      : null,
-                  items: const [
-                    DropdownMenuItem(
-                      value: StartCorner.topLeft,
-                      child: Text('左上起拍'),
-                    ),
-                    DropdownMenuItem(
-                      value: StartCorner.topRight,
-                      child: Text('右上起拍'),
-                    ),
-                    DropdownMenuItem(
-                      value: StartCorner.bottomLeft,
-                      child: Text('左下起拍'),
-                    ),
-                    DropdownMenuItem(
-                      value: StartCorner.bottomRight,
-                      child: Text('右下起拍'),
-                    ),
-                  ],
+                SizedBox(
+                  width: _mobile ? 155 : null,
+                  child: DropdownButton<StartCorner>(
+                    value: _grid.startCorner,
+                    isExpanded: _mobile,
+                    onChanged: enabled && _grid.mode == GridMode.sequence
+                        ? (value) => _changeTraversal(corner: value)
+                        : null,
+                    items: const [
+                      DropdownMenuItem(
+                        value: StartCorner.topLeft,
+                        child: Text('左上起拍'),
+                      ),
+                      DropdownMenuItem(
+                        value: StartCorner.topRight,
+                        child: Text('右上起拍'),
+                      ),
+                      DropdownMenuItem(
+                        value: StartCorner.bottomLeft,
+                        child: Text('左下起拍'),
+                      ),
+                      DropdownMenuItem(
+                        value: StartCorner.bottomRight,
+                        child: Text('右下起拍'),
+                      ),
+                    ],
+                  ),
                 ),
                 FilterChip(
                   label: const Text('蛇形'),
