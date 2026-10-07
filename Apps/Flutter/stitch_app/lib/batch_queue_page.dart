@@ -13,6 +13,8 @@ import 'services/platform_file_dialogs.dart';
 import 'services/settings_controller.dart';
 import 'services/power_service.dart';
 import 'models/stitch_task.dart';
+import 'dwarf_device_page.dart';
+import 'services/dwarf_download_service.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'l10n/localized_text.dart';
 import 'l10n/stitch_localizations.dart';
@@ -28,6 +30,9 @@ class BatchQueuePage extends StatefulWidget {
     this.runtimeService,
     this.resourceBudget,
     this.settingsController,
+    this.deviceDownloader,
+    this.onTransferStatus,
+    this.onDeviceTaskReady,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -37,6 +42,9 @@ class BatchQueuePage extends StatefulWidget {
   final MobileRuntimeService? runtimeService;
   final MobileResourceBudget? resourceBudget;
   final SettingsController? settingsController;
+  final DwarfDownloadService? deviceDownloader;
+  final ValueChanged<DwarfTransferStatus>? onTransferStatus;
+  final Future<void> Function(String taskId)? onDeviceTaskReady;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -81,6 +89,34 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
 
   void _changed() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _openDwarfDevice() async {
+    final result = await Navigator.of(context).push<String>(
+      MaterialPageRoute<String>(
+        builder: (_) => DwarfDevicePage(
+          queueController: _controller,
+          settingsController: widget.settingsController,
+          downloader: widget.deviceDownloader,
+          onTransferStatus: widget.onTransferStatus,
+          onTaskReady: (taskId) async {
+            if (mounted && ModalRoute.of(context)?.isCurrent == true) {
+              Navigator.of(context).pop<String>(taskId);
+            } else {
+              await widget.onDeviceTaskReady?.call(taskId);
+            }
+          },
+        ),
+      ),
+    );
+    if (result != null &&
+        mounted &&
+        ModalRoute.of(context)?.isCurrent == true &&
+        Navigator.of(context).canPop()) {
+      Navigator.of(context).pop<String>(result);
+    } else if (result != null) {
+      await widget.onDeviceTaskReady?.call(result);
+    }
   }
 
   @override
@@ -497,6 +533,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     appBar: AppBar(
       title: const Text('批处理队列'),
       actions: [
+        if (_mobile)
+          IconButton(
+            tooltip: StitchLocalizations.of(context).dwarfDeviceImport,
+            onPressed: _openDwarfDevice,
+            icon: const Icon(Icons.camera_alt_outlined),
+          ),
         IconButton(
           tooltip: StitchLocalizations.of(context).text('批处理资源设置'),
           onPressed: _resourceSettings,

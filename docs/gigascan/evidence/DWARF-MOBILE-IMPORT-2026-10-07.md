@@ -45,3 +45,25 @@ Release 1.4.1+20 supersedes the initial 1.4.0 package. Final analysis is clean a
 
 Artifact: `.local/deliverables/PocketGigaScan-Android-1.4.1-DWARF3.apk`.
 SHA-256: `d914a5c77e41f855b28f5f168761fd0656fb696fb4a4ed607e59d2cd6eb3068a`.
+
+## 1.4.2 thumbnail collision and visible transfer follow-up
+
+The previous 217-file enumeration counted recursive JPEG candidates, including thumbnails, rather than 217 unique originals. Known thumbnail/preview directories are now skipped; unknown subdirectory duplicates are grouped case-insensitively and the largest exact-byte version retains its source basename. Human-readable directory sizes such as `1K` are rounded estimates and cannot constrain download length. HEAD and single-byte Range metadata establish duplicate lengths without downloading all candidate photos.
+
+The protocol/download suite passes all 16 tests. Wireless-ADB integration passes both tests: actual camera connection, seven-package listing, first-package uniqueness/thumbnail exclusion and a real 775097-byte original download with durable completion/SHA-256 verification; plus synthetic interruption/resume and queue-reload coverage. Camera originals copied for validation are retained in app storage. A subsequent camera probe found one `panorama_thumbnail.jpg` preview in each package. That exact basename is also excluded while unrelated non-grid original filenames remain eligible. The seven package source counts after excluding this preview are 36, 364, 3, 95, 384, 9 and 9. These are source-file counts, not a qualified grid or optical reconstruction.
+
+Mobile status separates DWARF copy progress from stitching progress. Selected complete downloads are verified and admitted automatically, then the first associated task is opened for grid confirmation; stitching is still an explicit operator action. In-flight foreground transfers survive returning to the task screen, while app backgrounding safely pauses copying. A shared downloader prevents page disposal from destroying transfer ownership. Task navigation checks route identity to avoid popping an unrelated route when completion races with Back.
+
+Platform review found the Android dataSync foreground service and renewable CPU partial wake lock already protect background stitching subject to platform time limits; iOS safely interrupts background work. Main coordinates a shared screen-on lock across transfers, single jobs and queue jobs, releasing only when all applicable work is inactive. Mobile stitching guidance asks the operator to keep the app open and connect power. No additional native Android window flag is added because wakelock_plus already provides screen-on semantics.
+
+Release 1.4.2+21 is ARM64-only, min SDK 29 and target SDK 36, package `com.lumiaiq.pocketgigascan`. V2 signature verification passes. Wireless ADB installed it with `install -r`, preserving existing data; package manager confirms versionName 1.4.2/versionCode 21 and MainActivity was launched. The release screen renders on the phone and reports the native stitching engine loaded. The final real-camera phone run passes both integration tests, now explicitly rejecting `panorama_thumbnail.jpg` and observing 36 sources in the first package plus a verified 775097-byte original JPEG download.
+
+Artifact: `.local/deliverables/PocketGigaScan-Android-1.4.2-DWARF3.apk`.
+SHA-256: `6aebdd839caeafadbd71b3daeef2e0660d5346a8f809a796b55cbec71e2653bc`.
+
+Independent review covered case-insensitive basename identity, rounded directory sizes, page-disposal and Back-navigation races, enumeration interruption, unfinished selection state, queued native jobs, shared screen-lock release and queue progress overriding a stale main-page task snapshot. Protocol/download tests pass all 16 cases, download-page tests all 6 cases, and lifecycle tests all 13 cases, including shared-lock lifetime and main progress projected from an exporting queue item. The complete regression suite is also required by the normal Windows Release builder. Android foreground-service behavior is protected by existing runtime start/stop/timeout tests; no full real-photo reconstruction, long-duration locked-screen stitch or optical seam acceptance is claimed.
+
+Final regression qualification: Flutter analysis is clean and all 313 Flutter tests pass in the normal Windows builder. Native source tests pass 212 cases with two optional external real-photo fixtures ignored; `cargo fmt --check` and both Windows/Android build-script contracts pass. The normal source-based Windows Release build and dependency-license packaging pass. Desktop golden files are unchanged; the reviewed mobile batch-queue golden adds the DWARF camera entry only.
+
+Windows regression artifact: `.build/dwarf-mobile-1.4.2/PocketGigaScan-Windows-x64.zip`.
+SHA-256: `87013331bdec1fe9889d0d5598387581c63f5097dd22f6f4e2c6792dbf023693`.

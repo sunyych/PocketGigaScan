@@ -25,6 +25,8 @@ class DwarfDevicePage extends StatefulWidget {
     this.downloader,
     this.networkService,
     this.storageRoot,
+    this.onTransferStatus,
+    this.onTaskReady,
   });
 
   final BatchQueueController queueController;
@@ -34,9 +36,31 @@ class DwarfDevicePage extends StatefulWidget {
   final DwarfDownloadService? downloader;
   final DeviceNetworkService? networkService;
   final String? storageRoot;
+  final ValueChanged<DwarfTransferStatus>? onTransferStatus;
+  final FutureOr<void> Function(String taskId)? onTaskReady;
 
   @override
   State<DwarfDevicePage> createState() => _DwarfDevicePageState();
+}
+
+class DwarfTransferStatus {
+  const DwarfTransferStatus({
+    required this.batchId,
+    required this.title,
+    required this.state,
+    required this.completedBytes,
+    required this.totalBytes,
+    required this.completedFiles,
+    required this.totalFiles,
+  });
+
+  final String batchId;
+  final String title;
+  final DwarfDownloadState state;
+  final int completedBytes;
+  final int totalBytes;
+  final int completedFiles;
+  final int totalFiles;
 }
 
 class _DwarfDevicePageState extends State<DwarfDevicePage>
@@ -51,6 +75,7 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
   bool _downloading = false;
   bool _importing = false;
   String? _error;
+  String? _activePanoramaTitle;
   DwarfDeviceInfo? _device;
   List<DwarfPanorama> _panoramas = const [];
   final Set<String> _selected = {};
@@ -61,6 +86,9 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
   final Set<String> _importSelected = {};
   bool get _ownsClient => widget.client == null;
   bool get _ownsDownloader => widget.downloader == null;
+  bool _closeOwnedDownloaderWhenIdle = false;
+  String? _activeBatchId;
+  bool _backgroundPaused = false;
 
   String _batchId(DwarfPanorama panorama) {
     final host = _client?.host ?? _host.text.trim().toLowerCase();
@@ -83,16 +111,34 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
+      _backgroundPaused = true;
       unawaited(_pauseForBackground());
+    } else if (state == AppLifecycleState.resumed) {
+      _backgroundPaused = false;
     }
   }
 
   Future<void> _pauseForBackground() async {
     final ids = _activeBatchIds.toList(growable: false);
-    if (ids.isEmpty) return;
     for (final id in ids) {
       await _pause(id);
     }
+    final currentId = _activeBatchId;
+    if (currentId != null && _batches[currentId] == null) {
+      final progress = _progress[currentId];
+      widget.onTransferStatus?.call(
+        DwarfTransferStatus(
+          batchId: currentId,
+          title: _activePanoramaTitle ?? currentId,
+          state: DwarfDownloadState.paused,
+          completedBytes: progress?.fileBytes ?? 0,
+          totalBytes: progress?.fileSize ?? 0,
+          completedFiles: progress?.completedFiles ?? 0,
+          totalFiles: progress?.totalFiles ?? 0,
+        ),
+      );
+    }
+    if (ids.isEmpty && currentId == null) return;
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -122,6 +168,9 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
           _batches[batch.id] = batch;
         }
       });
+      for (final batch in batches) {
+        _publishStatus(batch);
+      }
     } on Object catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
@@ -201,20 +250,73 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
 
   Future<void> _downloadSelected() async {
     if (_downloading || _downloader == null || _client == null) return;
+    final selectedPanoramas = _panoramas
+        .where((panorama) => _selected.contains(panorama.id))
+        .toList();
     setState(() {
       _downloading = true;
       _error = null;
+      _activePanoramaTitle = selectedPanoramas.isEmpty
+          ? null
+          : selectedPanoramas.first.title;
     });
+    for (final panorama in selectedPanoramas) {
+      widget.onTransferStatus?.call(
+        DwarfTransferStatus(
+          batchId: _batchId(panorama),
+          title: panorama.title,
+          state: DwarfDownloadState.queued,
+          completedBytes: 0,
+          totalBytes: 0,
+          completedFiles: 0,
+          totalFiles: _originals[panorama.id]?.length ?? 0,
+        ),
+      );
+    }
+    final startedIds = <String>{};
     try {
-      for (final panorama in _panoramas.where(
-        (pano) => _selected.contains(pano.id),
-      )) {
+      for (final panorama in selectedPanoramas) {
+        if (mounted) setState(() => _activePanoramaTitle = panorama.title);
         final id = _batchId(panorama);
+        startedIds.add(id);
+        _activeBatchId = id;
+        _activeBatchIds.add(id);
+        if (mounted) setState(() {});
         final originals =
             _originals[panorama.id] ?? await _client!.listOriginals(panorama);
-        if (!mounted) return;
-        setState(() => _originals[panorama.id] = originals);
-        setState(() => _activeBatchIds.add(id));
+        if (mounted) setState(() => _originals[panorama.id] = originals);
+        if (_backgroundPaused) {
+          _activeBatchIds.remove(id);
+          widget.onTransferStatus?.call(
+            DwarfTransferStatus(
+              batchId: id,
+              title: panorama.title,
+              state: DwarfDownloadState.paused,
+              completedBytes: 0,
+              totalBytes: originals.fold<int>(
+                0,
+                (sum, original) => sum + (original.size ?? 0),
+              ),
+              completedFiles: 0,
+              totalFiles: originals.length,
+            ),
+          );
+          break;
+        }
+        widget.onTransferStatus?.call(
+          DwarfTransferStatus(
+            batchId: id,
+            title: panorama.title,
+            state: DwarfDownloadState.downloading,
+            completedBytes: 0,
+            totalBytes: originals.fold<int>(
+              0,
+              (sum, original) => sum + (original.size ?? 0),
+            ),
+            completedFiles: 0,
+            totalFiles: originals.length,
+          ),
+        );
         late final DwarfDownloadBatch batch;
         try {
           batch = await _downloader!.downloadBatch(
@@ -234,30 +336,113 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
         } finally {
           _activeBatchIds.remove(id);
         }
-        if (!mounted) return;
-        setState(() {
-          _batches[id] = batch;
-          if (batch.isComplete) _importSelected.add(id);
-        });
+        _batches[id] = batch;
+        if (batch.isComplete) _importSelected.add(id);
+        if (mounted) {
+          setState(() {});
+        }
+        _publishStatus(batch, title: panorama.title);
         if (batch.state == DwarfDownloadState.cancelled) break;
       }
+      if (_importSelected.isNotEmpty) {
+        await _queueCompleted(openFirstTask: true);
+      }
     } on Object catch (error) {
+      final failedId = _activeBatchId;
+      if (failedId != null) {
+        widget.onTransferStatus?.call(
+          DwarfTransferStatus(
+            batchId: failedId,
+            title: _activePanoramaTitle ?? failedId,
+            state: DwarfDownloadState.failed,
+            completedBytes: 0,
+            totalBytes: 0,
+            completedFiles: 0,
+            totalFiles: 0,
+          ),
+        );
+      }
       if (mounted) setState(() => _error = error.toString());
     } finally {
-      if (mounted) setState(() => _downloading = false);
+      for (final panorama in selectedPanoramas) {
+        final id = _batchId(panorama);
+        if (!startedIds.contains(id)) {
+          widget.onTransferStatus?.call(
+            DwarfTransferStatus(
+              batchId: id,
+              title: panorama.title,
+              state: DwarfDownloadState.paused,
+              completedBytes: 0,
+              totalBytes: 0,
+              completedFiles: 0,
+              totalFiles: _originals[panorama.id]?.length ?? 0,
+            ),
+          );
+        }
+      }
+      if (_activeBatchId != null) {
+        _activeBatchIds.remove(_activeBatchId);
+      }
+      _downloading = false;
+      if (mounted) {
+        setState(() {
+          _activePanoramaTitle = null;
+        });
+      }
+      _activeBatchId = null;
+      _closeOwnedDownloaderIfIdle();
     }
   }
 
   void _onProgress(DwarfDownloadProgress progress) {
-    if (!mounted) return;
-    setState(() => _progress[progress.batchId] = progress);
+    String? title;
+    for (final panorama in _panoramas) {
+      if (_batchId(panorama) == progress.batchId) {
+        title = panorama.title;
+        break;
+      }
+    }
+    if (mounted) {
+      setState(() => _progress[progress.batchId] = progress);
+    }
+    widget.onTransferStatus?.call(
+      DwarfTransferStatus(
+        batchId: progress.batchId,
+        title: title ?? progress.batchId,
+        state: DwarfDownloadState.downloading,
+        completedBytes: progress.fileBytes,
+        totalBytes: progress.fileSize,
+        completedFiles: progress.completedFiles,
+        totalFiles: progress.totalFiles,
+      ),
+    );
+  }
+
+  void _publishStatus(DwarfDownloadBatch batch, {String? title}) {
+    final savedTitle = batch.metadata['title'];
+    widget.onTransferStatus?.call(
+      DwarfTransferStatus(
+        batchId: batch.id,
+        title: title ?? (savedTitle is String ? savedTitle : batch.id),
+        state: batch.state,
+        completedBytes: batch.completedBytes,
+        totalBytes: batch.totalBytes,
+        completedFiles: batch.files.where((file) => file.complete).length,
+        totalFiles: batch.files.length,
+      ),
+    );
   }
 
   Future<void> _pause(String batchId) async {
     try {
       await _downloader?.cancelBatch(batchId);
       final batch = await _downloader?.loadBatch(batchId);
-      if (mounted && batch != null) setState(() => _batches[batchId] = batch);
+      if (batch != null) {
+        if (mounted) {
+          setState(() => _batches[batchId] = batch);
+        }
+        _publishStatus(batch);
+      }
     } on Object catch (error) {
       if (mounted) setState(() => _error = error.toString());
     }
@@ -269,6 +454,20 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
       _downloading = true;
       _error = null;
     });
+    _activeBatchId = batchId;
+    final savedTitle = _batches[batchId]?.metadata['title'];
+    _activePanoramaTitle = savedTitle is String ? savedTitle : batchId;
+    widget.onTransferStatus?.call(
+      DwarfTransferStatus(
+        batchId: batchId,
+        title: _activePanoramaTitle!,
+        state: DwarfDownloadState.downloading,
+        completedBytes: _batches[batchId]?.completedBytes ?? 0,
+        totalBytes: _batches[batchId]?.totalBytes ?? 0,
+        completedFiles: 0,
+        totalFiles: _batches[batchId]?.files.length ?? 0,
+      ),
+    );
     try {
       _activeBatchIds.add(batchId);
       late final DwarfDownloadBatch batch;
@@ -279,29 +478,73 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
         );
       } finally {
         _activeBatchIds.remove(batchId);
+        _activeBatchId = null;
       }
-      if (mounted) setState(() => _batches[batchId] = batch);
+      _batches[batchId] = batch;
+      if (batch.isComplete) _importSelected.add(batchId);
+      _publishStatus(batch);
+      if (mounted) setState(() {});
+      if (batch.isComplete) await _queueCompleted(openFirstTask: true);
     } on Object catch (error) {
+      widget.onTransferStatus?.call(
+        DwarfTransferStatus(
+          batchId: batchId,
+          title: _activePanoramaTitle ?? batchId,
+          state: DwarfDownloadState.failed,
+          completedBytes: _batches[batchId]?.completedBytes ?? 0,
+          totalBytes: _batches[batchId]?.totalBytes ?? 0,
+          completedFiles: 0,
+          totalFiles: _batches[batchId]?.files.length ?? 0,
+        ),
+      );
       if (mounted) setState(() => _error = error.toString());
     } finally {
-      if (mounted) setState(() => _downloading = false);
+      _downloading = false;
+      if (mounted) setState(() => _activePanoramaTitle = null);
+      _activeBatchId = null;
+      _closeOwnedDownloaderIfIdle();
     }
   }
 
-  Future<void> _queueCompleted() async {
+  Future<String?> _queueCompleted({bool openFirstTask = false}) async {
     final batches = _batches.values
         .where(
           (batch) => batch.isComplete && _importSelected.contains(batch.id),
         )
         .toList();
-    if (batches.isEmpty || _importing) return;
-    setState(() => _importing = true);
+    if (batches.isEmpty || _importing) return null;
+    batches.sort((left, right) {
+      final leftTitle = left.metadata['title'] as String? ?? left.id;
+      final rightTitle = right.metadata['title'] as String? ?? right.id;
+      final leftPanoramaIndex = _panoramas.indexWhere(
+        (panorama) => _batchId(panorama) == left.id,
+      );
+      final rightPanoramaIndex = _panoramas.indexWhere(
+        (panorama) => _batchId(panorama) == right.id,
+      );
+      if (leftPanoramaIndex >= 0 && rightPanoramaIndex >= 0) {
+        return leftPanoramaIndex.compareTo(rightPanoramaIndex);
+      }
+      return leftTitle.compareTo(rightTitle);
+    });
+    if (mounted) setState(() => _importing = true);
+    String? firstTaskId;
     try {
       await widget.settingsController?.ready;
       await widget.queueController.addCompletedPanoramas(
         batches,
         settings: widget.settingsController?.settings,
       );
+      final bySource = <String, String>{};
+      for (final queue in widget.queueController.queues) {
+        for (final item in queue.items) {
+          final taskId = item.taskId;
+          if (taskId != null) bySource[item.sourceDirectory] = taskId;
+        }
+      }
+      for (final batch in batches) {
+        firstTaskId ??= bySource[batch.directory];
+      }
       if (mounted && widget.queueController.error == null) {
         setState(() {
           _importSelected.removeAll(batches.map((batch) => batch.id));
@@ -309,12 +552,25 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
       }
       if (mounted && widget.queueController.error != null) {
         setState(() => _error = widget.queueController.error);
+        firstTaskId = null;
       }
     } on Object catch (error) {
       if (mounted) setState(() => _error = error.toString());
     } finally {
-      if (mounted) setState(() => _importing = false);
+      _importing = false;
+      if (mounted) setState(() {});
+      _closeOwnedDownloaderIfIdle();
     }
+    if (openFirstTask && firstTaskId != null) {
+      if (mounted &&
+          ModalRoute.of(context)?.isCurrent == true &&
+          Navigator.of(context).canPop()) {
+        Navigator.of(context).pop<String>(firstTaskId);
+      } else {
+        await widget.onTaskReady?.call(firstTaskId);
+      }
+    }
+    return firstTaskId;
   }
 
   Future<void> _openWifi() async {
@@ -343,18 +599,27 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    for (final id in _activeBatchIds.toList()) {
-      // Cancelling preserves each manifest and partial file for a later resume.
-      final downloader = _downloader;
-      if (downloader != null) {
-        unawaited(downloader.cancelBatch(id).catchError((Object _) {}));
-      }
+    if (_downloading || _importing) {
+      _closeOwnedDownloaderWhenIdle = true;
+    } else {
+      WidgetsBinding.instance.removeObserver(this);
     }
-    if (_ownsClient) _client?.close(force: true);
-    if (_ownsDownloader) _downloader?.close(force: false);
+    if (_ownsClient && !_downloading && !_importing) {
+      _client?.close(force: true);
+    }
+    if (_ownsDownloader && !_downloading && !_importing) {
+      _downloader?.close(force: false);
+    }
     _host.dispose();
     super.dispose();
+  }
+
+  void _closeOwnedDownloaderIfIdle() {
+    if (!_closeOwnedDownloaderWhenIdle || _downloading || _importing) return;
+    WidgetsBinding.instance.removeObserver(this);
+    if (_ownsClient) _client?.close(force: true);
+    if (_ownsDownloader) _downloader?.close(force: false);
+    _closeOwnedDownloaderWhenIdle = false;
   }
 
   @override
@@ -367,137 +632,172 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
         .length;
     return Scaffold(
       appBar: AppBar(title: Text(l10n.dwarfDeviceTitle)),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
+      body: Column(
         children: [
-          TextField(
-            controller: _host,
-            keyboardType: TextInputType.url,
-            decoration: InputDecoration(
-              labelText: l10n.dwarfHost,
-              hintText: l10n.dwarfDefaultHostHint,
-              border: const OutlineInputBorder(),
+          if (_error != null)
+            MaterialBanner(
+              key: const Key('dwarf-device-error-banner'),
+              content: Text(l10n.dwarfDeviceError(_error!)),
+              leading: const Icon(Icons.error_outline),
+              actions: [
+                TextButton(
+                  onPressed: () => setState(() => _error = null),
+                  child: Text(l10n.dwarfDismissError),
+                ),
+              ],
             ),
-            onSubmitted: (_) => _connect(),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                TextField(
+                  controller: _host,
+                  keyboardType: TextInputType.url,
+                  decoration: InputDecoration(
+                    labelText: l10n.dwarfHost,
+                    hintText: l10n.dwarfDefaultHostHint,
+                    border: const OutlineInputBorder(),
+                  ),
+                  onSubmitted: (_) => _connect(),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _connecting ? null : _connect,
+                      icon: _connecting
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.link),
+                      label: Text(
+                        _client == null
+                            ? l10n.dwarfConnect
+                            : l10n.dwarfReconnect,
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _opening ? null : _openWifi,
+                      icon: const Icon(Icons.wifi),
+                      label: Text(l10n.dwarfOpenWifi),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(l10n.dwarfConnectHint),
+                if (_device != null) ...[
+                  const SizedBox(height: 12),
+                  Card(
+                    child: ListTile(
+                      leading: const Icon(Icons.camera_alt_outlined),
+                      title: Text(_device!.deviceName),
+                      subtitle: Text(
+                        _device!.serialNumber ?? _host.text.trim(),
+                      ),
+                      trailing: _device!.sdCardAvailable == false
+                          ? const Icon(Icons.sd_card_alert_outlined)
+                          : const Icon(Icons.check_circle_outline),
+                    ),
+                  ),
+                ],
+                if (_panoramas.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    l10n.dwarfSelectPanoramas,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  for (final panorama in _panoramas) _panoramaTile(panorama),
+                  const SizedBox(height: 8),
+                  FilledButton.icon(
+                    onPressed: _selected.isEmpty || _downloading
+                        ? null
+                        : _downloadSelected,
+                    icon: _downloading
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.download),
+                    label: Text(
+                      _downloading
+                          ? l10n.dwarfDownloading
+                          : l10n.dwarfDownloadSelected,
+                    ),
+                  ),
+                  if (_downloading) ...[
+                    const SizedBox(height: 8),
+                    Card(
+                      key: const Key('dwarf-download-status'),
+                      child: ListTile(
+                        leading: const Icon(Icons.downloading_outlined),
+                        title: Text(l10n.dwarfDownloading),
+                        subtitle: Text(
+                          '${_activePanoramaTitle ?? l10n.dwarfWaiting}\n${l10n.dwarfForegroundPowerHint}',
+                        ),
+                      ),
+                    ),
+                  ],
+                ] else if (_client != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Center(child: Text(l10n.dwarfNoPanoramas)),
+                  ),
+                if (_batches.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Text(
+                    l10n.dwarfDownloadRestored,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  for (final batch in _batches.values.where(
+                    (value) => value.isComplete,
+                  ))
+                    CheckboxListTile(
+                      value: _importSelected.contains(batch.id),
+                      onChanged: (selected) => setState(() {
+                        if (selected == true) {
+                          _importSelected.add(batch.id);
+                        } else {
+                          _importSelected.remove(batch.id);
+                        }
+                      }),
+                      title: Text(
+                        batch.metadata['title'] as String? ??
+                            p.basename(batch.directory),
+                      ),
+                      subtitle: Text(
+                        '${batch.files.length} ${l10n.dwarfOriginalCount.toLowerCase()} · ${batch.metadata['deviceName'] ?? batch.metadata['host'] ?? p.basename(batch.directory)}',
+                      ),
+                      secondary: const Icon(Icons.check_circle_outline),
+                    ),
+                  for (final batch in _batches.values.where(
+                    (value) => !value.isComplete,
+                  ))
+                    _savedBatchTile(batch),
+                ],
+                if (completeCount > 0) ...[
+                  const SizedBox(height: 12),
+                  FilledButton.icon(
+                    onPressed: _importing ? null : _queueCompleted,
+                    icon: _importing
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.playlist_add),
+                    label: Text(
+                      '${l10n.dwarfQueueCompleted} · ${l10n.dwarfDownloadedCount(completeCount)}',
+                    ),
+                  ),
+                ],
+              ],
+            ),
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              FilledButton.icon(
-                onPressed: _connecting ? null : _connect,
-                icon: _connecting
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.link),
-                label: Text(
-                  _client == null ? l10n.dwarfConnect : l10n.dwarfReconnect,
-                ),
-              ),
-              OutlinedButton.icon(
-                onPressed: _opening ? null : _openWifi,
-                icon: const Icon(Icons.wifi),
-                label: Text(l10n.dwarfOpenWifi),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(l10n.dwarfConnectHint),
-          if (_device != null) ...[
-            const SizedBox(height: 12),
-            Card(
-              child: ListTile(
-                leading: const Icon(Icons.camera_alt_outlined),
-                title: Text(_device!.deviceName),
-                subtitle: Text(_device!.serialNumber ?? _host.text.trim()),
-                trailing: _device!.sdCardAvailable == false
-                    ? const Icon(Icons.sd_card_alert_outlined)
-                    : const Icon(Icons.check_circle_outline),
-              ),
-            ),
-          ],
-          if (_panoramas.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(
-              l10n.dwarfSelectPanoramas,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            for (final panorama in _panoramas) _panoramaTile(panorama),
-            const SizedBox(height: 8),
-            FilledButton.icon(
-              onPressed: _selected.isEmpty || _downloading
-                  ? null
-                  : _downloadSelected,
-              icon: const Icon(Icons.download),
-              label: Text(l10n.dwarfDownloadSelected),
-            ),
-          ] else if (_client != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 24),
-              child: Center(child: Text(l10n.dwarfNoPanoramas)),
-            ),
-          if (_batches.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Text(
-              l10n.dwarfDownloadRestored,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            for (final batch in _batches.values.where(
-              (value) => value.isComplete,
-            ))
-              CheckboxListTile(
-                value: _importSelected.contains(batch.id),
-                onChanged: (selected) => setState(() {
-                  if (selected == true) {
-                    _importSelected.add(batch.id);
-                  } else {
-                    _importSelected.remove(batch.id);
-                  }
-                }),
-                title: Text(
-                  batch.metadata['title'] as String? ??
-                      p.basename(batch.directory),
-                ),
-                subtitle: Text(
-                  '${batch.files.length} ${l10n.dwarfOriginalCount.toLowerCase()} · ${batch.metadata['deviceName'] ?? batch.metadata['host'] ?? p.basename(batch.directory)}',
-                ),
-                secondary: const Icon(Icons.check_circle_outline),
-              ),
-            for (final batch in _batches.values.where(
-              (value) => !value.isComplete,
-            ))
-              _savedBatchTile(batch),
-          ],
-          if (completeCount > 0) ...[
-            const SizedBox(height: 12),
-            FilledButton.icon(
-              onPressed: _importing ? null : _queueCompleted,
-              icon: _importing
-                  ? const SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.playlist_add),
-              label: Text(
-                '${l10n.dwarfQueueCompleted} · ${l10n.dwarfDownloadedCount(completeCount)}',
-              ),
-            ),
-          ],
-          if (_error != null) ...[
-            const SizedBox(height: 12),
-            Card(
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(l10n.dwarfDeviceError(_error!)),
-              ),
-            ),
-          ],
         ],
       ),
     );

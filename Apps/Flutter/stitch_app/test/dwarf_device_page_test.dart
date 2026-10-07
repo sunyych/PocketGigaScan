@@ -5,6 +5,8 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/dwarf_device_page.dart';
 import 'package:stitch_app/l10n/stitch_localizations.dart';
+import 'package:stitch_app/models/app_settings.dart';
+import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/models/dwarf_download.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/device_network_service.dart';
@@ -43,6 +45,42 @@ class _NoopJobApi implements JobApi {
   }) async => const {};
   @override
   Future<Map<String, Object?>> status(String jobId) async => const {};
+}
+
+class _FixtureQueueController extends BatchQueueController {
+  _FixtureQueueController() : super(api: _NoopJobApi());
+
+  final admitted = <DwarfDownloadBatch>[];
+  List<BatchQueue> fixtureQueues = const [];
+
+  @override
+  List<BatchQueue> get queues => fixtureQueues;
+
+  @override
+  Future<void> addCompletedPanoramas(
+    List<DwarfDownloadBatch> completedBatches, {
+    AppSettings? settings,
+  }) async {
+    admitted.addAll(completedBatches);
+    fixtureQueues = [
+      BatchQueue(
+        id: 'fixture-queue',
+        createdAt: DateTime.utc(2026),
+        parentDirectory: 'fixture-download-root',
+        outputDirectory: 'fixture-output',
+        items: [
+          for (final batch in completedBatches)
+            BatchQueueItem(
+              id: batch.id,
+              name: batch.metadata['title'] as String? ?? batch.id,
+              sourceDirectory: batch.directory,
+              state: BatchItemState.completed,
+              taskId: 'task-${batch.id}',
+            ),
+        ],
+      ),
+    ];
+  }
 }
 
 class _FixtureClient extends DwarfDeviceClient {
@@ -84,8 +122,10 @@ class _FixtureDownloader extends DwarfDownloadService {
 
   final List<DwarfDownloadBatch> _saved;
   final Completer<DwarfDownloadBatch> transfer = Completer();
+  Object? downloadFailure;
   bool downloadStarted = false;
   bool resumeStarted = false;
+  bool cancelCalled = false;
   DwarfDownloadProgress? lastProgress;
   DwarfDownloadBatch? lastBatch;
 
@@ -109,6 +149,7 @@ class _FixtureDownloader extends DwarfDownloadService {
     void Function(DwarfDownloadProgress progress)? onProgress,
   }) {
     downloadStarted = true;
+    if (downloadFailure != null) return Future.error(downloadFailure!);
     lastBatch = DwarfDownloadBatch(
       id: batchId,
       directory: 'fixture-download-root/panorama',
@@ -145,6 +186,7 @@ class _FixtureDownloader extends DwarfDownloadService {
 
   @override
   Future<void> cancelBatch(String batchId) async {
+    cancelCalled = true;
     final current = lastBatch;
     if (current == null || transfer.isCompleted) return;
     lastBatch = _withState(current, DwarfDownloadState.cancelled);
@@ -192,7 +234,12 @@ DwarfDownloadBatch completed(DwarfDownloadBatch batch) => _withState(
       .toList(),
 );
 
-Widget _app(Widget child, Locale locale) => MaterialApp(
+Widget _app(
+  Widget child,
+  Locale locale, {
+  GlobalKey<NavigatorState>? navigatorKey,
+}) => MaterialApp(
+  navigatorKey: navigatorKey,
   locale: locale,
   supportedLocales: StitchLocalizations.supportedLocales,
   localizationsDelegates: const [
@@ -269,10 +316,178 @@ void main() {
     queue.dispose();
   });
 
+  testWidgets('download progress survives returning to the task screen', (
+    tester,
+  ) async {
+    final navigatorKey = GlobalKey<NavigatorState>();
+    final queue = _FixtureQueueController();
+    final client = _FixtureClient();
+    final downloader = _FixtureDownloader();
+    final statuses = <DwarfTransferStatus>[];
+    await tester.pumpWidget(
+      _app(
+        Scaffold(
+          body: Center(
+            child: FilledButton(
+              onPressed: () => navigatorKey.currentState!.push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => DwarfDevicePage(
+                    queueController: queue,
+                    downloader: downloader,
+                    client: client,
+                    networkService: _FixtureNetworkService(),
+                    onTransferStatus: statuses.add,
+                  ),
+                ),
+              ),
+              child: const Text('Open DWARF'),
+            ),
+          ),
+        ),
+        const Locale('en'),
+        navigatorKey: navigatorKey,
+      ),
+    );
+    await tester.tap(find.text('Open DWARF'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect to device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(CheckboxListTile).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Download selected panoramas'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byKey(const Key('dwarf-download-status')), findsOneWidget);
+    expect(statuses.last.state, DwarfDownloadState.downloading);
+
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+    expect(downloader.cancelCalled, isFalse);
+    expect(statuses.last.state, DwarfDownloadState.downloading);
+
+    downloader.transfer.complete(
+      _withState(downloader.lastBatch!, DwarfDownloadState.paused),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump();
+    expect(statuses.last.state, DwarfDownloadState.paused);
+    expect(queue.admitted, isEmpty);
+    queue.dispose();
+  });
+
+  testWidgets('completed download selects the first queued task after return', (
+    tester,
+  ) async {
+    final navigatorKey = GlobalKey<NavigatorState>();
+    final queue = _FixtureQueueController();
+    final downloader = _FixtureDownloader();
+    final openedTasks = <String>[];
+    await tester.pumpWidget(
+      _app(
+        Scaffold(
+          body: Center(
+            child: FilledButton(
+              onPressed: () => navigatorKey.currentState!.push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => DwarfDevicePage(
+                    queueController: queue,
+                    downloader: downloader,
+                    client: _FixtureClient(),
+                    networkService: _FixtureNetworkService(),
+                    onTaskReady: (taskId) async => openedTasks.add(taskId),
+                  ),
+                ),
+              ),
+              child: const Text('Open DWARF'),
+            ),
+          ),
+        ),
+        const Locale('en'),
+        navigatorKey: navigatorKey,
+      ),
+    );
+    await tester.tap(find.text('Open DWARF'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Connect to device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(CheckboxListTile).first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Download selected panoramas'));
+    await tester.pump();
+    await tester.pump();
+    navigatorKey.currentState!.pop();
+    await tester.pumpAndSettle();
+
+    downloader.transfer.complete(completed(downloader.lastBatch!));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump();
+
+    expect(queue.admitted, hasLength(1));
+    expect(openedTasks, ['task-${queue.admitted.single.id}']);
+    queue.dispose();
+  });
+
+  testWidgets(
+    'keeps download errors visible at the top in English and Chinese',
+    (tester) async {
+      for (final locale in [const Locale('en'), const Locale('zh')]) {
+        final queue = BatchQueueController(api: _NoopJobApi());
+        final downloader = _FixtureDownloader()
+          ..downloadFailure = StateError('Duplicate original filename');
+        await tester.pumpWidget(
+          _app(
+            DwarfDevicePage(
+              queueController: queue,
+              downloader: downloader,
+              client: _FixtureClient(),
+              networkService: _FixtureNetworkService(),
+            ),
+            locale,
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.text(locale.languageCode == 'zh' ? '连接设备' : 'Connect to device'),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byType(CheckboxListTile).first);
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.text(
+            locale.languageCode == 'zh'
+                ? '下载所选全景'
+                : 'Download selected panoramas',
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          find.byKey(const Key('dwarf-device-error-banner')),
+          findsOneWidget,
+        );
+        expect(
+          find.textContaining(
+            locale.languageCode == 'zh'
+                ? '重复的原片文件名'
+                : 'Duplicate original filename',
+          ),
+          findsOneWidget,
+        );
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        queue.dispose();
+      }
+    },
+  );
+
   testWidgets('restores a paused offline transfer with Resume action', (
     tester,
   ) async {
-    final queue = BatchQueueController(api: _NoopJobApi());
+    final queue = _FixtureQueueController();
     final saved = DwarfDownloadBatch(
       id: 'saved-panorama',
       directory: 'fixture-download-root/saved',
@@ -292,12 +507,14 @@ void main() {
       metadata: const {'title': 'Saved panorama', 'host': '192.168.88.1'},
     );
     final downloader = _FixtureDownloader(saved: [saved]);
+    String? openedTaskId;
     await tester.pumpWidget(
       _app(
         DwarfDevicePage(
           queueController: queue,
           downloader: downloader,
           networkService: _FixtureNetworkService(),
+          onTaskReady: (taskId) => openedTaskId = taskId,
         ),
         const Locale('en'),
       ),
@@ -308,12 +525,8 @@ void main() {
     await tester.tap(find.text('Resume download'));
     await tester.pumpAndSettle();
     expect(downloader.resumeStarted, isTrue);
-    await tester.tap(find.byType(CheckboxListTile).first);
-    await tester.pumpAndSettle();
-    expect(
-      find.textContaining('Add downloaded panoramas to stitch queue'),
-      findsOneWidget,
-    );
+    expect(queue.admitted, hasLength(1));
+    expect(openedTaskId, 'task-saved-panorama');
 
     await tester.pumpWidget(const SizedBox.shrink());
     queue.dispose();

@@ -200,9 +200,38 @@ void main() {
           }
           request.response.headers.contentType = ContentType.json;
           request.response.write(jsonEncode({'code': 0, 'data': data}));
+        } else if (request.method == 'HEAD') {
+          if (request.uri.path.contains('/large/')) {
+            request.response.contentLength = 4000;
+          } else {
+            request.response.statusCode = HttpStatus.methodNotAllowed;
+          }
+          await request.response.close();
+          return;
+        } else if (request.method == 'GET' &&
+            request.uri.path.toLowerCase().endsWith('.jpg')) {
+          request.response.statusCode = HttpStatus.partialContent;
+          request.response.headers.set(
+            HttpHeaders.contentRangeHeader,
+            'bytes 0-0/1000',
+          );
+          request.response.contentLength = 1;
+          request.response.add([0]);
+        } else if (request.uri.path.endsWith('/large/')) {
+          request.response.headers.contentType = ContentType.html;
+          request.response.write(
+            '<table><tr><td><a href="00_00.jpg">00_00.jpg</a></td>'
+            '<td>today</td><td>4K</td></tr></table>',
+          );
         } else {
           request.response.headers.contentType = ContentType.html;
           request.response.write(
+            '<table><tr><td><a href="00_00.jpg">00_00.jpg</a></td>'
+            '<td>today</td><td>1K</td></tr></table>'
+            '<a href="large/">large</a>'
+            '<a href="Thumbnail/00_00.jpg">thumbnail</a>'
+            '<a href="panorama_thumbnail.jpg">panorama preview</a>'
+            '<a href="unclassified_source.jpg">original</a>'
             '<a href="0_0.jpg">0_0.jpg</a>'
             '<a href="preview.jpg">preview.jpg</a>'
             '<a href="DWARF_PANORAMA_01.jpg">DWARF_PANORAMA_01.jpg</a>'
@@ -227,10 +256,19 @@ void main() {
       expect(panoramas, hasLength(1));
       expect(requestsUsedExpectedHeaders, isTrue);
       final originals = await client.listOriginals(panoramas.single);
-      expect(originals.map((source) => source.name), ['0_0.jpg']);
+      expect(originals.map((source) => source.name), [
+        '00_00.jpg',
+        '0_0.jpg',
+        'unclassified_source.jpg',
+      ]);
       expect(
-        originals.single.url,
-        contains('/DWARF3/Panoramas/DWARF_PANORAMA_01/0_0.jpg'),
+        originals.first.url,
+        contains('/DWARF3/Panoramas/DWARF_PANORAMA_01/large/00_00.jpg'),
+      );
+      expect(originals.first.size, 4000);
+      expect(
+        originals.map((source) => source.name),
+        contains('unclassified_source.jpg'),
       );
     },
   );

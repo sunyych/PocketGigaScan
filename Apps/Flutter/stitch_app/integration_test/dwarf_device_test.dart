@@ -63,7 +63,60 @@ void main() {
         if (panoramas.isNotEmpty) {
           final originals = await camera.listOriginals(panoramas.first);
           expect(originals, isNotEmpty);
+          expect(
+            originals.any(
+              (o) => o.name.toLowerCase() == 'panorama_thumbnail.jpg',
+            ),
+            isFalse,
+          );
+          expect(
+            originals.map((o) => o.name.toLowerCase()).toSet().length,
+            originals.length,
+          );
+          expect(
+            originals.every(
+              (o) => !Uri.parse(o.url).path
+                  .toLowerCase()
+                  .split('/')
+                  .any(
+                    (segment) => const {
+                      'thumbnail',
+                      'thumbnails',
+                      'thumb',
+                      'preview',
+                      'previews',
+                    }.contains(segment),
+                  ),
+            ),
+            isTrue,
+          );
           debugPrint('First package enumerated originals: ${originals.length}');
+          final support = await getApplicationSupportDirectory();
+          final downloader = DwarfDownloadService(
+            rootDirectory: p.join(
+              support.path,
+              'dwarf-real-transfer-validation',
+            ),
+          );
+          try {
+            final batch = await downloader.downloadBatch(
+              batchId: 'real-original-${DateTime.now().microsecondsSinceEpoch}',
+              originals: [originals.first],
+            );
+            expect(batch.isComplete, isTrue, reason: batch.error);
+            final photo = batch.files.single;
+            expect(photo.bytes, greaterThan(0));
+            expect(
+              photo.sha256,
+              sha256.convert(await File(photo.path).readAsBytes()).toString(),
+            );
+            debugPrint(
+              'Real original JPEG downloaded and verified: ${photo.bytes} bytes',
+            );
+            // Retain this camera original in app storage; never clean it up.
+          } finally {
+            downloader.close(force: true);
+          }
         }
       } finally {
         camera.close(force: true);

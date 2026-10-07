@@ -279,8 +279,46 @@ class DwarfDeviceClient {
       visited: <String>{},
       depth: 0,
     );
-    final result = collected.values.toList()
-      ..sort((a, b) => _naturalCompare(a.name, b.name));
+    final byName = <String, List<DwarfOriginal>>{};
+    for (final original in collected.values) {
+      byName
+          .putIfAbsent(original.name.toLowerCase(), () => <DwarfOriginal>[])
+          .add(original);
+    }
+    final result = <DwarfOriginal>[];
+    for (final candidates in byName.values) {
+      if (candidates.length == 1) {
+        result.add(candidates.single);
+        continue;
+      }
+      final sized = <DwarfOriginal>[];
+      for (final candidate in candidates) {
+        final size = await _verifiedRemoteSize(candidate.url);
+        if (size != null) {
+          sized.add(
+            DwarfOriginal(
+              id: candidate.id,
+              name: candidate.name,
+              url: candidate.url,
+              size: size,
+            ),
+          );
+        }
+      }
+      if (sized.length != candidates.length) {
+        throw FormatException(
+          'Could not verify file sizes for duplicate original ${candidates.first.name}',
+        );
+      }
+      sized.sort((a, b) => b.size!.compareTo(a.size!));
+      if (sized.length > 1 && sized[0].size == sized[1].size) {
+        throw FormatException(
+          'Could not distinguish same-size copies of ${sized.first.name}',
+        );
+      }
+      result.add(sized.first);
+    }
+    result.sort((a, b) => _naturalCompare(a.name, b.name));
     if (result.isEmpty) {
       throw const FormatException(
         'No original JPEGs were found in the DWARF panorama directory listing',
@@ -362,10 +400,9 @@ class DwarfDeviceClient {
         '',
       );
       final packageName = root.split('/').where((s) => s.isNotEmpty).last;
-      if (targetPath
-              .split('/')
-              .any((segment) => segment.toLowerCase() == 'thumbnail') ||
+      if (targetPath.split('/').any(_isThumbnailDirectory) ||
           nameWithoutExtension == packageName ||
+          nameWithoutExtension.toLowerCase() == 'panorama_thumbnail' ||
           const {
             'preview',
             'thumbnail',
@@ -377,7 +414,12 @@ class DwarfDeviceClient {
       if (name.toLowerCase().endsWith('.jpg') ||
           name.toLowerCase().endsWith('.jpeg')) {
         final url = target.toString();
-        found[url] = DwarfOriginal(id: url, name: name, url: url, size: null);
+        found[url] = DwarfOriginal(
+          id: url,
+          name: name,
+          url: url,
+          size: _listedFileSize(body, match),
+        );
       } else if (href.endsWith('/') ||
           match.group(3)!.toLowerCase().contains('directory')) {
         if (depth == 4) {
@@ -394,6 +436,69 @@ class DwarfDeviceClient {
         );
       }
     }
+  }
+
+  bool _isThumbnailDirectory(String segment) => const {
+    'thumbnail',
+    'thumbnails',
+    'thumb',
+    'preview',
+    'previews',
+  }.contains(segment.toLowerCase());
+
+  int? _listedFileSize(String body, RegExpMatch anchor) {
+    final rowStart = body.lastIndexOf('<tr', anchor.start);
+    final rowEnd = body.indexOf('</tr', anchor.end);
+    if (rowStart < 0 || rowEnd < 0) return null;
+    final row = body.substring(rowStart, rowEnd);
+    final cells = RegExp(
+      r'<(?:td|th)\b[^>]*>(.*?)</(?:td|th)\s*>',
+      caseSensitive: false,
+      dotAll: true,
+    ).allMatches(row);
+    if (cells.length < 3) return null;
+    final raw = _decodeHtml(
+      cells.elementAt(2).group(1)!,
+    ).replaceAll(RegExp(r'<[^>]*>'), '').trim();
+    // Human-readable Apache sizes (for example, 1K) are rounded and must not
+    // be used as an exact download length. Only a plain byte count is exact.
+    return int.tryParse(raw);
+  }
+
+  Future<int?> _verifiedRemoteSize(String url) async {
+    final uri = Uri.parse(url);
+    final request = await _http
+        .headUrl(uri)
+        .timeout(const Duration(seconds: 15));
+    request.followRedirects = false;
+    final response = await request.close().timeout(const Duration(seconds: 20));
+    final headSize = response.contentLength;
+    await response.listen((_) {}).cancel();
+    if (response.statusCode == HttpStatus.ok && headSize >= 0) {
+      return headSize;
+    }
+
+    final rangeRequest = await _http
+        .getUrl(uri)
+        .timeout(const Duration(seconds: 15));
+    rangeRequest.followRedirects = false;
+    rangeRequest.headers.set(HttpHeaders.rangeHeader, 'bytes=0-0');
+    final rangeResponse = await rangeRequest.close().timeout(
+      const Duration(seconds: 20),
+    );
+    final contentRange = rangeResponse.headers.value(
+      HttpHeaders.contentRangeHeader,
+    );
+    final match = contentRange == null
+        ? null
+        : RegExp(
+            r'^bytes\s+0-0/(\d+)$',
+            caseSensitive: false,
+          ).firstMatch(contentRange.trim());
+    final total = match == null ? null : int.tryParse(match.group(1)!);
+    await rangeResponse.listen((_) {}).cancel();
+    if (rangeResponse.statusCode == HttpStatus.partialContent) return total;
+    return null;
   }
 
   bool _isPanoramaDirectory(String path) =>

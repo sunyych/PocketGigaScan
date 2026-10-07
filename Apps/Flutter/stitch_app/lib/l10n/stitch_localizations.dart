@@ -24,6 +24,10 @@ class StitchLocalizations {
   String get compositionInfoLogs => text('合成信息 / 日志');
   String get stitchDetails => text('合成详情');
   String get stitchingLog => text('合成日志');
+  String get stitchingProgressTitle => text('Stitching progress');
+  String get stitchingForegroundPowerHint => text(
+    'Keep the app open and connect power while stitching. Background work may pause; reopen the app to continue.',
+  );
   String get timelineDurationUnknown => text('总用时未知（旧任务没有时间记录）');
   String get timelineTimeUnknown => text('未知');
   String get timelineInProgress => text('进行中');
@@ -159,6 +163,9 @@ class StitchLocalizations {
   String get dwarfBackgroundPause => text(
     'Downloads paused when the app entered the background. Resume while the app is open.',
   );
+  String get dwarfForegroundPowerHint => text(
+    'Keep this page open and connect power. The screen stays awake while downloading; background downloads pause safely.',
+  );
   String get dwarfPauseDownload => text('Pause download');
   String get dwarfResumeDownload => text('Resume download');
   String get dwarfRetryDownload => text('Retry failed downloads');
@@ -173,6 +180,12 @@ class StitchLocalizations {
       : '${text('DWARF operation failed:')} ${_localizedDwarfError(error)}';
   String _localizedDwarfError(String error) {
     if (!isChinese) return error;
+    final normalizedError = error.toLowerCase();
+    if (normalizedError.contains('duplicate') ||
+        normalizedError.contains('already exists') ||
+        normalizedError.contains('same name')) {
+      return '设备返回了重复的原片文件名，请刷新全景列表后重试。';
+    }
     const messages = <String, String>{
       'The DWARF SD card is unavailable': 'DWARF 存储卡不可用，请检查设备存储卡。',
       'No original JPEGs were found': '所选全景目录中没有找到原始 JPEG 照片。',
@@ -222,6 +235,8 @@ class StitchLocalizations {
   String get dwarfDownloadRestored =>
       text('Recoverable device downloads found');
   String get dwarfDownloading => text('Downloading');
+  String get dwarfDismissError => text('Dismiss');
+  String get dwarfDeviceTransfers => text('DWARF transfers');
   String get dwarfWaiting => text('Waiting to download');
   String folderSelectionFailed(String error) => '${text('无法选择文件夹：')}$error';
   String get retryOutputCopy => text('重试复制到输出文件夹');
@@ -543,6 +558,8 @@ class StitchLocalizations {
     'Download paused': 'Download paused',
     'Downloads paused when the app entered the background. Resume while the app is open.':
         'Downloads paused when the app entered the background. Resume while the app is open.',
+    'Keep this page open and connect power. The screen stays awake while downloading; background downloads pause safely.':
+        'Keep this page open and connect power. The screen stays awake while downloading; background downloads pause safely.',
     'Download failed': 'Download failed',
     'Pause download': 'Pause download',
     'Resume download': 'Resume download',
@@ -578,6 +595,8 @@ class StitchLocalizations {
     'Size unknown': 'Size unknown',
     'Recoverable device downloads found': 'Recoverable device downloads found',
     'Downloading': 'Downloading',
+    'Dismiss': 'Dismiss',
+    'DWARF transfers': 'DWARF transfers',
     'Waiting to download': 'Waiting to download',
     '应用内存预算': 'App memory budget',
     '无法确认资源预算': 'Could not verify the resource budget',
@@ -1146,6 +1165,13 @@ class StitchLocalizations {
     'Download paused': '下载已暂停',
     'Downloads paused when the app entered the background. Resume while the app is open.':
         '应用进入后台后已暂停下载。请在应用保持打开时继续下载。',
+    'Keep this page open and connect power. The screen stays awake while downloading; background downloads pause safely.':
+        '请保持此页面打开并连接电源。下载时屏幕会保持常亮；应用进入后台后会安全暂停下载。',
+    'Stitching progress': '合成进度',
+    'Stitching': '合成中',
+    'Exporting': '导出中',
+    'Keep the app open and connect power while stitching. Background work may pause; reopen the app to continue.':
+        '合成期间请保持应用打开并连接电源。进入后台后任务可能暂停；返回应用即可继续。',
     'Download failed': '下载失败',
     'Pause download': '暂停下载',
     'Resume download': '继续下载',
@@ -1168,6 +1194,8 @@ class StitchLocalizations {
     'Size unknown': '大小未知',
     'Recoverable device downloads found': '发现可恢复的设备下载',
     'Downloading': '正在下载',
+    'Dismiss': '关闭',
+    'DWARF transfers': 'DWARF 传输',
     'Waiting to download': '等待下载',
     '设置': '设置',
     '语言': '语言',

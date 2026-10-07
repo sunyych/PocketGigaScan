@@ -14,6 +14,7 @@ import 'batch_queue_page.dart';
 import 'dwarf_device_page.dart';
 import 'models/batch_queue.dart';
 import 'models/imported_photo.dart';
+import 'models/dwarf_download.dart';
 import 'models/performance_options.dart';
 import 'models/stitch_task.dart';
 import 'models/stitch_quality.dart';
@@ -23,6 +24,7 @@ import 'services/photo_importer.dart';
 import 'services/power_service.dart';
 import 'services/mobile_storage_service.dart';
 import 'services/mobile_runtime_service.dart';
+import 'services/dwarf_download_service.dart';
 import 'services/memory_budget_policy.dart';
 import 'services/spherical_request.dart';
 import 'services/serial_task_write_queue.dart';
@@ -182,6 +184,13 @@ class _StitchHomePageState extends State<StitchHomePage>
   late final bool _android = widget.androidOverride ?? Platform.isAndroid;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
+  late final Future<DwarfDownloadService> _deviceDownloader = () async {
+    final support = await getApplicationSupportDirectory();
+    return DwarfDownloadService(
+      rootDirectory: p.join(support.path, 'dwarf-downloads'),
+    );
+  }();
+  final Map<String, DwarfTransferStatus> _deviceTransfers = {};
   late final MobileRuntimeService? _runtime = _mobile
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
@@ -199,6 +208,8 @@ class _StitchHomePageState extends State<StitchHomePage>
   late final PowerGate _power = widget.powerGate ?? PlatformPowerGate();
   late final ForegroundWorkLock _lock =
       widget.foregroundWorkLock ?? PlatformForegroundWorkLock();
+  Future<void> _foregroundLockTail = Future<void>.value();
+  bool? _foregroundLockRequested;
   StitchTask? _task;
   List<StitchTask> _tasks = [];
   Timer? _poll;
@@ -309,7 +320,49 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   void _onBatchQueueChanged() {
     if (mounted) setState(() {});
+    unawaited(_syncForegroundLock());
     unawaited(_acknowledgeConfirmedQueueTimeouts());
+  }
+
+  bool get _needsForegroundLock {
+    const singleActive = {
+      StitchPhase.queued,
+      StitchPhase.running,
+      StitchPhase.pausing,
+      StitchPhase.exporting,
+    };
+    const batchActive = {BatchItemState.running, BatchItemState.exporting};
+    return (_task != null &&
+            singleActive.contains(_task!.phase) &&
+            (_task!.phase != StitchPhase.queued ||
+                _task!.nativeJobId != null)) ||
+        _deviceTransfers.values.any(
+          (status) => status.state == DwarfDownloadState.downloading,
+        ) ||
+        (_batchController?.queues.any(
+              (queue) =>
+                  queue.items.any((item) => batchActive.contains(item.state)),
+            ) ??
+            false);
+  }
+
+  Future<void> _syncForegroundLock() {
+    final next = _foregroundLockTail.then((_) async {
+      final requested = mounted && _needsForegroundLock;
+      if (_foregroundLockRequested == requested) return;
+      try {
+        if (requested) {
+          await _lock.enable();
+        } else {
+          await _lock.disable();
+        }
+        _foregroundLockRequested = requested;
+      } catch (_) {
+        // Foreground lock is best effort; status and job ownership continue.
+      }
+    });
+    _foregroundLockTail = next.catchError((Object _) {});
+    return next;
   }
 
   Future<void> _acknowledgeConfirmedQueueTimeouts() async {
@@ -1175,6 +1228,13 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = _mobile && state != AppLifecycleState.resumed;
+    if (_background && _deviceTransfers.isNotEmpty) {
+      for (final transfer in _deviceTransfers.values.where(
+        (value) => value.state == DwarfDownloadState.downloading,
+      )) {
+        unawaited(_pauseDeviceTransfer(transfer.batchId));
+      }
+    }
     if (_background &&
         _hasActiveJob &&
         _task!.phase != StitchPhase.paused &&
@@ -1183,6 +1243,41 @@ class _StitchHomePageState extends State<StitchHomePage>
             !_runtimeGuardedJobs.contains(_task!.nativeJobId))) {
       unawaited(_requestPause('应用进入后台，已请求暂停；等待核心确认'));
     }
+  }
+
+  Future<void> _pauseDeviceTransfer(String batchId) async {
+    try {
+      final downloader = await _deviceDownloader;
+      await downloader.cancelBatch(batchId);
+      final batch = await downloader.loadBatch(batchId);
+      if (batch == null || !mounted) return;
+      _updateDeviceTransfer(
+        DwarfTransferStatus(
+          batchId: batch.id,
+          title: batch.metadata['title'] as String? ?? batch.id,
+          state: batch.state,
+          completedBytes: batch.completedBytes,
+          totalBytes: batch.totalBytes,
+          completedFiles: batch.files.where((file) => file.complete).length,
+          totalFiles: batch.files.length,
+        ),
+      );
+    } on Object {
+      // The DWARF page keeps the partial manifest and surfaces transfer errors.
+    }
+  }
+
+  void _updateDeviceTransfer(DwarfTransferStatus status) {
+    if (!mounted) return;
+    setState(() => _deviceTransfers[status.batchId] = status);
+    unawaited(_syncForegroundLock());
+  }
+
+  Future<void> _openImportedDeviceTask(String taskId) async {
+    final task = await _repository.loadById(taskId);
+    if (!mounted || task == null) return;
+    await _refreshTasks();
+    if (mounted) await _selectTask(task);
   }
 
   @override
@@ -1210,7 +1305,18 @@ class _StitchHomePageState extends State<StitchHomePage>
     _verticalOverlap.dispose();
     _memory.dispose();
     _workers.dispose();
-    unawaited(_lock.disable());
+    final shutdown = _foregroundLockTail.then((_) async {
+      if (_foregroundLockRequested == true) {
+        try {
+          await _lock.disable();
+        } catch (_) {
+          // Widget teardown must not leave an unhandled platform error.
+        }
+      }
+      _foregroundLockRequested = false;
+    });
+    _foregroundLockTail = shutdown.catchError((Object _) {});
+    unawaited(shutdown);
     super.dispose();
   }
 
@@ -1835,7 +1941,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       await _persist(active);
       try {
-        await _lock.enable();
+        await _syncForegroundLock();
       } on Object catch (error) {
         if (_mobile) {
           _pauseRequested = true;
@@ -1917,7 +2023,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         _runtimeGuardedJobs.remove(task.nativeJobId!);
         await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
-      if (updated.phase == StitchPhase.paused) await _lock.disable();
+      if (updated.phase == StitchPhase.paused) await _syncForegroundLock();
       setState(() => _message = reason);
       _beginPolling();
     } on Object catch (error) {
@@ -2237,7 +2343,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         );
       }
       try {
-        await _lock.enable();
+        await _syncForegroundLock();
       } on Object catch (error) {
         if (_mobile) {
           _pauseRequested = true;
@@ -2248,7 +2354,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       _beginPolling();
     } on Object catch (error) {
-      await _lock.disable();
+      await _syncForegroundLock();
       await _persist(
         exportIntentTask.copyWith(
           phase: StitchPhase.completed,
@@ -2556,6 +2662,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         _tasks = next;
       }
     });
+    unawaited(_syncForegroundLock());
   }
 
   bool _isCurrentSelection(int generation, String taskId) =>
@@ -2753,7 +2860,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           phase == StitchPhase.cancelled ||
           phase == StitchPhase.failed) {
         _poll?.cancel();
-        await _lock.disable();
+        await _syncForegroundLock();
         if (phase == StitchPhase.completed) {
           await _loadManifest(
             updated,
@@ -2987,6 +3094,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _message = null;
       _diagnosticsPanelGeneration++;
     });
+    unawaited(_syncForegroundLock());
     if (task.phase == StitchPhase.completed) {
       await _loadManifest(
         task,
@@ -3168,14 +3276,20 @@ class _StitchHomePageState extends State<StitchHomePage>
                 final navigator = Navigator.of(context);
                 await widget.settingsController?.ready;
                 if (!mounted) return;
-                await navigator.push(
-                  MaterialPageRoute<void>(
+                final downloader = await _deviceDownloader;
+                if (!mounted) return;
+                final taskId = await navigator.push<String>(
+                  MaterialPageRoute<String>(
                     builder: (_) => DwarfDevicePage(
                       queueController: controller,
                       settingsController: widget.settingsController,
+                      downloader: downloader,
+                      onTransferStatus: _updateDeviceTransfer,
+                      onTaskReady: _openImportedDeviceTask,
                     ),
                   ),
                 );
+                if (taskId != null) await _openImportedDeviceTask(taskId);
               },
               icon: const Icon(Icons.camera_alt_outlined),
             ),
@@ -3185,8 +3299,9 @@ class _StitchHomePageState extends State<StitchHomePage>
               final navigator = Navigator.of(context);
               await widget.settingsController?.ready;
               if (!mounted) return;
-              await navigator.push(
-                MaterialPageRoute<void>(
+              final downloader = _mobile ? await _deviceDownloader : null;
+              final taskId = await navigator.push<String>(
+                MaterialPageRoute<String>(
                   builder: (_) => BatchQueuePage(
                     api: _api,
                     controller: _batchController,
@@ -3196,9 +3311,13 @@ class _StitchHomePageState extends State<StitchHomePage>
                     runtimeService: _runtime,
                     resourceBudget: _resourceBudget,
                     settingsController: widget.settingsController,
+                    deviceDownloader: downloader,
+                    onTransferStatus: _updateDeviceTransfer,
+                    onDeviceTaskReady: _openImportedDeviceTask,
                   ),
                 ),
               );
+              if (taskId != null) await _openImportedDeviceTask(taskId);
             },
             icon: const Icon(Icons.queue),
           ),
@@ -3302,6 +3421,44 @@ class _StitchHomePageState extends State<StitchHomePage>
     padding: const EdgeInsets.all(8),
     children: [
       const ListTile(title: Text('本地任务'), leading: Icon(Icons.folder_open)),
+      if (_deviceTransfers.isNotEmpty) ...[
+        ListTile(
+          leading: const Icon(Icons.downloading_outlined),
+          title: Text(StitchLocalizations.of(context).dwarfDeviceTransfers),
+        ),
+        for (final transfer in _deviceTransfers.values)
+          ListTile(
+            key: Key('device-transfer-${transfer.batchId}'),
+            leading: Icon(switch (transfer.state) {
+              DwarfDownloadState.completed => Icons.check_circle_outline,
+              DwarfDownloadState.failed => Icons.error_outline,
+              DwarfDownloadState.paused ||
+              DwarfDownloadState.cancelled => Icons.pause_circle_outline,
+              _ => Icons.downloading_outlined,
+            }),
+            title: Text(transfer.title),
+            subtitle: Text(
+              '${StitchLocalizations.of(context).dwarfDownloadState(transfer.state.name)} · '
+              '${transfer.completedFiles}/${transfer.totalFiles} · '
+              '${StitchLocalizations.of(context).dwarfByteProgress(transfer.completedBytes, transfer.totalBytes)}',
+            ),
+            trailing:
+                transfer.state == DwarfDownloadState.downloading ||
+                    transfer.state == DwarfDownloadState.queued
+                ? SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      value: transfer.totalBytes > 0
+                          ? (transfer.completedBytes / transfer.totalBytes)
+                                .clamp(0.0, 1.0)
+                          : null,
+                    ),
+                  )
+                : null,
+          ),
+      ],
       for (final task in _tasks)
         ListTile(
           key: Key('task-row-${task.id}'),
@@ -3349,267 +3506,312 @@ class _StitchHomePageState extends State<StitchHomePage>
         StitchPhase.exporting,
       }.contains(_task!.phase);
 
-  Widget _statusCard(StitchTask? task) => Card(
-    child: Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            task == null
-                ? '导入照片，创建本地全景任务'
-                : '${task.photos.length} 张原片 · ${task.photos.isEmpty ? '' : '${task.photos.first.width}×${task.photos.first.height}'}',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 6),
-          if (task == null)
+  BatchQueueItem? _batchProgressForTask(StitchTask? task) {
+    if (task == null) return null;
+    for (final queue in _batchController?.queues ?? const <BatchQueue>[]) {
+      for (final item in queue.items) {
+        if (item.taskId == task.id &&
+            (item.state == BatchItemState.running ||
+                item.state == BatchItemState.exporting)) {
+          return item;
+        }
+      }
+    }
+    return null;
+  }
+
+  Widget _statusCard(StitchTask? task) {
+    final batchProgress = _batchProgressForTask(task);
+    final displayProgress = batchProgress?.progress ?? task?.progress ?? 0;
+    final batchOperationLabel = batchProgress == null
+        ? null
+        : StitchLocalizations.of(context).text(
+            batchProgress.state == BatchItemState.exporting
+                ? 'Exporting'
+                : 'Stitching',
+          );
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             Text(
-              _api.isAvailable
-                  ? '原生合成核心已加载'
-                  : _api.unavailableReason ?? '原生核心不可用',
-              style: TextStyle(
-                color: _api.isAvailable
-                    ? Colors.green.shade800
-                    : Colors.deepOrange.shade800,
-              ),
+              task == null
+                  ? '导入照片，创建本地全景任务'
+                  : '${task.photos.length} 张原片 · ${task.photos.isEmpty ? '' : '${task.photos.first.width}×${task.photos.first.height}'}',
+              style: Theme.of(context).textTheme.titleLarge,
             ),
-          if (task != null) ...[
-            if (!_api.isAvailable)
+            const SizedBox(height: 6),
+            if (task == null)
               Text(
-                _api.unavailableReason ?? '原生核心不可用',
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
+                _api.isAvailable
+                    ? '原生合成核心已加载'
+                    : _api.unavailableReason ?? '原生核心不可用',
+                style: TextStyle(
+                  color: _api.isAvailable
+                      ? Colors.green.shade800
+                      : Colors.deepOrange.shade800,
+                ),
               ),
-            if (task.phase != StitchPhase.completed) ...[
-              const SizedBox(height: 12),
-              LinearProgressIndicator(
-                value:
-                    task.progress == 0 &&
-                        const {
-                          StitchPhase.running,
-                          StitchPhase.pausing,
-                          StitchPhase.exporting,
-                        }.contains(task.phase)
-                    ? null
-                    : task.progress,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '${_stageLabel(task.stage)} · ${(task.progress * 100).round()}% · ${_phaseLabel(task.phase)}',
-              ),
-            ],
-            if (task.error != null)
-              Text(
-                task.error!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            if (task.publishError != null)
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            if (task != null) ...[
+              if (!_api.isAvailable)
+                Text(
+                  _api.unavailableReason ?? '原生核心不可用',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              if (task.phase != StitchPhase.completed ||
+                  batchProgress != null) ...[
+                const SizedBox(height: 12),
+                if (_mobile) ...[
+                  Text(
+                    StitchLocalizations.of(context).stitchingProgressTitle,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
+                  const SizedBox(height: 6),
+                ],
+                LinearProgressIndicator(
+                  value:
+                      batchProgress == null &&
+                          task.progress == 0 &&
+                          const {
+                            StitchPhase.running,
+                            StitchPhase.pausing,
+                            StitchPhase.exporting,
+                          }.contains(task.phase)
+                      ? null
+                      : displayProgress.clamp(0, 1).toDouble(),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  batchProgress == null
+                      ? '${_stageLabel(task.stage)} · ${(displayProgress * 100).round()}% · ${_phaseLabel(task.phase)}'
+                      : '$batchOperationLabel · ${(displayProgress * 100).round()}% · $batchOperationLabel',
+                ),
+                if (_mobile) ...[
+                  const SizedBox(height: 6),
                   Text(
                     StitchLocalizations.of(
                       context,
-                    ).outputCopyFailed(task.publishError!),
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
+                    ).stitchingForegroundPowerHint,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
-                  TextButton.icon(
-                    onPressed: _busy ? null : () => _retryPublish(task),
-                    icon: const Icon(Icons.refresh),
-                    label: Text(
-                      StitchLocalizations.of(context).retryOutputCopy,
+                ],
+              ],
+              if (task.error != null)
+                Text(
+                  task.error!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              if (task.publishError != null)
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      StitchLocalizations.of(
+                        context,
+                      ).outputCopyFailed(task.publishError!),
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
                     ),
+                    TextButton.icon(
+                      onPressed: _busy ? null : () => _retryPublish(task),
+                      icon: const Icon(Icons.refresh),
+                      label: Text(
+                        StitchLocalizations.of(context).retryOutputCopy,
+                      ),
+                    ),
+                  ],
+                ),
+              if (task.pauseReason != null && task.phase == StitchPhase.pausing)
+                Text(
+                  task.pauseReason!,
+                  style: const TextStyle(color: Colors.deepOrange),
+                ),
+              ExpansionTile(
+                key: ValueKey(
+                  'task-diagnostics-${task.id}-$_diagnosticsPanelGeneration',
+                ),
+                tilePadding: EdgeInsets.zero,
+                expandedAlignment: Alignment.centerLeft,
+                expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                title: Text(StitchLocalizations.of(context).stitchDetails),
+                children: [
+                  if (_api.isAvailable)
+                    Text(
+                      '原生合成核心已加载',
+                      style: TextStyle(color: Colors.green.shade800),
+                    ),
+                  if (task.phase == StitchPhase.completed &&
+                      task.stage == 'export-failed')
+                    const ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text('整图导出失败，可重试'),
+                    ),
+                  if ((task.autoExportOnCompletion &&
+                          task.phase == StitchPhase.completed) ||
+                      (task.phase == StitchPhase.exporting &&
+                          task.stage == 'auto-export'))
+                    Text('合成完成，正在导出 ${task.exportFormat.shortLabel}'),
+                  if (task.phase != StitchPhase.completed)
+                    Text('完成后自动导出：${task.exportFormat.shortLabel}'),
+                  if (task.resultStats case final stats?)
+                    ..._performanceStatsLines(stats),
+                  const Text('水平参考：以网格中心照片为准'),
+                ],
+              ),
+              ExpansionTile(
+                key: ValueKey(
+                  'task-stitch-log-${task.id}-$_diagnosticsPanelGeneration',
+                ),
+                tilePadding: EdgeInsets.zero,
+                expandedAlignment: Alignment.centerLeft,
+                expandedCrossAxisAlignment: CrossAxisAlignment.start,
+                title: Text(StitchLocalizations.of(context).stitchingLog),
+                children: [
+                  StitchingLog(
+                    timeline: task.timeline,
+                    eventLabel: _timelineEventLabel,
+                    totalLabel: _timelineTotal(task),
                   ),
                 ],
               ),
-            if (task.pauseReason != null && task.phase == StitchPhase.pausing)
-              Text(
-                task.pauseReason!,
-                style: const TextStyle(color: Colors.deepOrange),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  if (task.phase != StitchPhase.completed)
+                    FilledButton.icon(
+                      onPressed:
+                          _busy ||
+                              _isActivelyBatchOwned(task) ||
+                              !_canStart ||
+                              mappingErrorIsInvalid(task)
+                          ? null
+                          : () => _startOrResume(
+                              resume:
+                                  task.phase == StitchPhase.interrupted ||
+                                  task.phase == StitchPhase.paused,
+                            ),
+                      icon: const Icon(Icons.play_arrow),
+                      label: Text(
+                        task.phase == StitchPhase.paused ||
+                                task.phase == StitchPhase.interrupted
+                            ? '恢复'
+                            : task.phase == StitchPhase.imported
+                            ? '开始合成'
+                            : '新建合成任务',
+                      ),
+                    ),
+                  if (task.phase != StitchPhase.completed)
+                    OutlinedButton.icon(
+                      key: const Key('pause-task-action'),
+                      onPressed:
+                          _busy ||
+                              _isActivelyBatchOwned(task) ||
+                              task.nativeJobId == null ||
+                              !_hasRunningJob
+                          ? null
+                          : () => _requestPause('已请求暂停；等待核心确认'),
+                      icon: const Icon(Icons.pause),
+                      label: const Text('暂停'),
+                    ),
+                  if (task.phase != StitchPhase.completed)
+                    OutlinedButton.icon(
+                      key: const Key('cancel-task-action'),
+                      onPressed:
+                          _busy ||
+                              _isActivelyBatchOwned(task) ||
+                              task.nativeJobId == null ||
+                              !_hasRunningJob
+                          ? null
+                          : _cancel,
+                      icon: const Icon(Icons.stop),
+                      label: const Text('取消'),
+                    ),
+                  if (task.phase != StitchPhase.completed ||
+                      task.stage == 'export-failed' ||
+                      task.exportPath == null)
+                    OutlinedButton.icon(
+                      key: const Key('export-task-action'),
+                      onPressed:
+                          _busy ||
+                              _isActivelyBatchOwned(task) ||
+                              task.nativeJobId == null ||
+                              task.phase != StitchPhase.completed ||
+                              (_mobile &&
+                                  !_android &&
+                                  !task.exportFormat.supportedOnMobile) ||
+                              (task.exportFormat == ExportFormat.jpegXl &&
+                                  !_jpegXlAvailable)
+                          ? null
+                          : _export,
+                      icon: const Icon(Icons.save_alt),
+                      label: Text(
+                        '${task.stage == 'export-failed' ? '重试' : '导出'}完整 ${task.exportFormat.shortLabel}',
+                      ),
+                    ),
+                  if (task.exportPath != null && (!_mobile || _android))
+                    OutlinedButton.icon(
+                      key: const Key('open-exported-image'),
+                      onPressed: _busy ? null : () => _openExportViewer(task),
+                      icon: const Icon(Icons.zoom_in),
+                      label: Text(
+                        task.phase == StitchPhase.completed
+                            ? '打开全景查看器'
+                            : '查看上次成功输出',
+                      ),
+                    ),
+                  if ((task.phase == StitchPhase.completed || !_editable) &&
+                      !_hasRunningJob)
+                    TextButton.icon(
+                      key: const Key('new-run-copy-action'),
+                      onPressed: _busy || _isActivelyBatchOwned(task)
+                          ? null
+                          : _newRunCopy,
+                      icon: const Icon(Icons.copy),
+                      label: const Text('新建副本重新合成'),
+                    ),
+                  if (task.phase == StitchPhase.completed)
+                    Text(
+                      StitchLocalizations.of(
+                        context,
+                      ).duplicateBeforeEditingSettings,
+                    ),
+                  if (task.phase == StitchPhase.failed)
+                    FilledButton.tonalIcon(
+                      onPressed: _busy || _isActivelyBatchOwned(task)
+                          ? null
+                          : _forceGridRetry,
+                      icon: const Icon(Icons.grid_on),
+                      label: const Text('按手动参数强制网格重试'),
+                    ),
+                ],
               ),
-            ExpansionTile(
-              key: ValueKey(
-                'task-diagnostics-${task.id}-$_diagnosticsPanelGeneration',
-              ),
-              tilePadding: EdgeInsets.zero,
-              expandedAlignment: Alignment.centerLeft,
-              expandedCrossAxisAlignment: CrossAxisAlignment.start,
-              title: Text(StitchLocalizations.of(context).stitchDetails),
-              children: [
-                if (_api.isAvailable)
-                  Text(
-                    '原生合成核心已加载',
-                    style: TextStyle(color: Colors.green.shade800),
-                  ),
-                if (task.phase == StitchPhase.completed &&
-                    task.stage == 'export-failed')
-                  const ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text('整图导出失败，可重试'),
-                  ),
-                if ((task.autoExportOnCompletion &&
-                        task.phase == StitchPhase.completed) ||
-                    (task.phase == StitchPhase.exporting &&
-                        task.stage == 'auto-export'))
-                  Text('合成完成，正在导出 ${task.exportFormat.shortLabel}'),
-                if (task.phase != StitchPhase.completed)
-                  Text('完成后自动导出：${task.exportFormat.shortLabel}'),
-                if (task.resultStats case final stats?)
-                  ..._performanceStatsLines(stats),
-                const Text('水平参考：以网格中心照片为准'),
-              ],
-            ),
-            ExpansionTile(
-              key: ValueKey(
-                'task-stitch-log-${task.id}-$_diagnosticsPanelGeneration',
-              ),
-              tilePadding: EdgeInsets.zero,
-              expandedAlignment: Alignment.centerLeft,
-              expandedCrossAxisAlignment: CrossAxisAlignment.start,
-              title: Text(StitchLocalizations.of(context).stitchingLog),
-              children: [
-                StitchingLog(
-                  timeline: task.timeline,
-                  eventLabel: _timelineEventLabel,
-                  totalLabel: _timelineTotal(task),
+              if (task.exportPath != null) ...[
+                Text(
+                  '上次成功整图 ${ExportFormat.fromPath(task.exportPath!).shortLabel}：${task.exportPath}',
+                ),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _shareExport,
+                  icon: const Icon(Icons.ios_share),
+                  label: Text(_mobile ? '分享 / 保存图像' : '在文件夹中显示图像'),
                 ),
               ],
-            ),
-            Wrap(
-              spacing: 8,
-              runSpacing: 6,
-              children: [
-                if (task.phase != StitchPhase.completed)
-                  FilledButton.icon(
-                    onPressed:
-                        _busy ||
-                            _isActivelyBatchOwned(task) ||
-                            !_canStart ||
-                            mappingErrorIsInvalid(task)
-                        ? null
-                        : () => _startOrResume(
-                            resume:
-                                task.phase == StitchPhase.interrupted ||
-                                task.phase == StitchPhase.paused,
-                          ),
-                    icon: const Icon(Icons.play_arrow),
-                    label: Text(
-                      task.phase == StitchPhase.paused ||
-                              task.phase == StitchPhase.interrupted
-                          ? '恢复'
-                          : task.phase == StitchPhase.imported
-                          ? '开始合成'
-                          : '新建合成任务',
-                    ),
-                  ),
-                if (task.phase != StitchPhase.completed)
-                  OutlinedButton.icon(
-                    key: const Key('pause-task-action'),
-                    onPressed:
-                        _busy ||
-                            _isActivelyBatchOwned(task) ||
-                            task.nativeJobId == null ||
-                            !_hasRunningJob
-                        ? null
-                        : () => _requestPause('已请求暂停；等待核心确认'),
-                    icon: const Icon(Icons.pause),
-                    label: const Text('暂停'),
-                  ),
-                if (task.phase != StitchPhase.completed)
-                  OutlinedButton.icon(
-                    key: const Key('cancel-task-action'),
-                    onPressed:
-                        _busy ||
-                            _isActivelyBatchOwned(task) ||
-                            task.nativeJobId == null ||
-                            !_hasRunningJob
-                        ? null
-                        : _cancel,
-                    icon: const Icon(Icons.stop),
-                    label: const Text('取消'),
-                  ),
-                if (task.phase != StitchPhase.completed ||
-                    task.stage == 'export-failed' ||
-                    task.exportPath == null)
-                  OutlinedButton.icon(
-                    key: const Key('export-task-action'),
-                    onPressed:
-                        _busy ||
-                            _isActivelyBatchOwned(task) ||
-                            task.nativeJobId == null ||
-                            task.phase != StitchPhase.completed ||
-                            (_mobile &&
-                                !_android &&
-                                !task.exportFormat.supportedOnMobile) ||
-                            (task.exportFormat == ExportFormat.jpegXl &&
-                                !_jpegXlAvailable)
-                        ? null
-                        : _export,
-                    icon: const Icon(Icons.save_alt),
-                    label: Text(
-                      '${task.stage == 'export-failed' ? '重试' : '导出'}完整 ${task.exportFormat.shortLabel}',
-                    ),
-                  ),
-                if (task.exportPath != null && (!_mobile || _android))
-                  OutlinedButton.icon(
-                    key: const Key('open-exported-image'),
-                    onPressed: _busy ? null : () => _openExportViewer(task),
-                    icon: const Icon(Icons.zoom_in),
-                    label: Text(
-                      task.phase == StitchPhase.completed
-                          ? '打开全景查看器'
-                          : '查看上次成功输出',
-                    ),
-                  ),
-                if ((task.phase == StitchPhase.completed || !_editable) &&
-                    !_hasRunningJob)
-                  TextButton.icon(
-                    key: const Key('new-run-copy-action'),
-                    onPressed: _busy || _isActivelyBatchOwned(task)
-                        ? null
-                        : _newRunCopy,
-                    icon: const Icon(Icons.copy),
-                    label: const Text('新建副本重新合成'),
-                  ),
-                if (task.phase == StitchPhase.completed)
-                  Text(
-                    StitchLocalizations.of(
-                      context,
-                    ).duplicateBeforeEditingSettings,
-                  ),
-                if (task.phase == StitchPhase.failed)
-                  FilledButton.tonalIcon(
-                    onPressed: _busy || _isActivelyBatchOwned(task)
-                        ? null
-                        : _forceGridRetry,
-                    icon: const Icon(Icons.grid_on),
-                    label: const Text('按手动参数强制网格重试'),
-                  ),
-              ],
-            ),
-            if (task.exportPath != null) ...[
-              Text(
-                '上次成功整图 ${ExportFormat.fromPath(task.exportPath!).shortLabel}：${task.exportPath}',
-              ),
-              OutlinedButton.icon(
-                onPressed: _busy ? null : _shareExport,
-                icon: const Icon(Icons.ios_share),
-                label: Text(_mobile ? '分享 / 保存图像' : '在文件夹中显示图像'),
+            ],
+            if (_message != null) ...[
+              const SizedBox(height: 8),
+              StitchStatusMessage(
+                message: _message!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
             ],
           ],
-          if (_message != null) ...[
-            const SizedBox(height: 8),
-            StitchStatusMessage(
-              message: _message!,
-              style: TextStyle(color: Theme.of(context).colorScheme.error),
-            ),
-          ],
-        ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 
   Widget _exportFormatCard(StitchTask? task) {
     final enabled =
