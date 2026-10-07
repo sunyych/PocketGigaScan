@@ -24,6 +24,19 @@ Failure correspondence files stay opaque and are referenced by hash/size.
 
 ## PG-057 explicit placement locks and 09_13 investigation
 
+On 2026-10-07 the user confirms that the remaining reported misalignment was
+caused by their pixel placement lock and that unlocking resolves it. The proposed
+additional pre-warp calibration scope is withdrawn. Luna native stops edits;
+Codex archives its draft locally and restores spherical.rs/job.rs to the already
+qualified baseline. Luna test/record reviewers made no corresponding changes.
+No extra solver stage, quality-gate change or automatic removal of legacy locks
+is included. This confirmation does not establish acceptance of unrelated seams
+or physical Android execution. The existing MR builds both completed successfully.
+
+The separately authorized DeepSeek bilingual patch is still absent from this
+shared worktree. It must be reviewed against its actual changes before a combined
+commit; baseline localization review is not a substitute for patch review.
+
 The user supplies a real DWARF photo and requests eight-neighbor texture
 matching, joint global pose optimization, bounded local correction and final
 fusion. The existing pipeline already follows that order. The preserved task
