@@ -189,7 +189,7 @@ impl PlacementConstraintOrigin {
     }
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct InputPlacementConstraint {
     kind: PlacementConstraintKind,
@@ -6583,7 +6583,7 @@ mod tests {
                     })
                 }
             };
-        let mut checkpoint = |_| Ok(());
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
         let failure =
             align_with_precision_recovery(request, true, &mut checkpoint, &mut runner).unwrap_err();
         assert_eq!(calls, 2);
@@ -6636,7 +6636,7 @@ mod tests {
                     diagnostics: failure.diagnostics.clone(),
                 })
             };
-            let mut checkpoint = |_| Ok(());
+            let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
             assert!(align_with_precision_recovery(
                 request.clone(),
                 true,
@@ -6653,7 +6653,7 @@ mod tests {
                 calls += 1;
                 Err(precision_quality_failure())
             };
-        let mut checkpoint = |_| Ok(());
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
         assert!(align_with_precision_recovery(
             request.clone(),
             false,
