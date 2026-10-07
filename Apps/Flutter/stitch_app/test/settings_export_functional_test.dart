@@ -45,8 +45,13 @@ class _ExportApi implements JobApi {
     required int workers,
   }) async => throw UnimplementedError();
   @override
-  Future<Map<String, Object?>> status(String jobId) async =>
-      throw UnimplementedError();
+  Future<Map<String, Object?>> status(String jobId) async => {
+    'ok': true,
+    'jobId': jobId,
+    'state': 'completed',
+    'operation': 'render',
+    'memoryBudgetMiB': 128,
+  };
   @override
   Future<Map<String, Object?>> pause(String jobId) async =>
       throw UnimplementedError();

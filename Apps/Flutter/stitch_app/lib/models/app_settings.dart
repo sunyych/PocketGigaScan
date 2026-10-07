@@ -9,6 +9,8 @@ enum AppThemeMode { system, light, dark }
 
 enum AppAccent { teal, blue, purple, orange }
 
+enum MemoryBudgetMode { automatic, manual }
+
 class AppSettings {
   const AppSettings({
     this.language = AppLanguage.system,
@@ -18,6 +20,8 @@ class AppSettings {
     this.refineGridNeighbors = true,
     this.seamBlendMode = SeamBlendMode.deghost,
     this.localTextureWarp = true,
+    this.memoryBudgetMode = MemoryBudgetMode.automatic,
+    this.totalMemoryBudgetMiB = 512,
     this.performance = const PerformanceOptions(),
     this.outputDirectory,
   });
@@ -29,6 +33,8 @@ class AppSettings {
   final bool refineGridNeighbors;
   final SeamBlendMode seamBlendMode;
   final bool localTextureWarp;
+  final MemoryBudgetMode memoryBudgetMode;
+  final int totalMemoryBudgetMiB;
   final PerformanceOptions performance;
 
   /// Filesystem path on desktop or a platform document URI on Android.
@@ -51,6 +57,8 @@ class AppSettings {
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
     bool? localTextureWarp,
+    MemoryBudgetMode? memoryBudgetMode,
+    int? totalMemoryBudgetMiB,
     PerformanceOptions? performance,
     String? outputDirectory,
     bool clearOutputDirectory = false,
@@ -62,6 +70,8 @@ class AppSettings {
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
+    memoryBudgetMode: memoryBudgetMode ?? this.memoryBudgetMode,
+    totalMemoryBudgetMiB: totalMemoryBudgetMiB ?? this.totalMemoryBudgetMiB,
     performance: performance ?? this.performance,
     outputDirectory: clearOutputDirectory
         ? null
@@ -77,6 +87,8 @@ class AppSettings {
     'refineGridNeighbors': refineGridNeighbors,
     'seamBlendMode': seamBlendMode.name,
     'localTextureWarp': localTextureWarp,
+    'memoryBudgetMode': memoryBudgetMode.name,
+    'totalMemoryBudgetMiB': totalMemoryBudgetMiB,
     'performance': performance.toJson(),
     'outputDirectory': outputDirectory,
   };
@@ -111,6 +123,12 @@ class AppSettings {
           ? SeamBlendMode.fromSavedValue(json['seamBlendMode'])
           : SeamBlendMode.deghost,
       localTextureWarp: json['localTextureWarp'] as bool? ?? true,
+      memoryBudgetMode: enumValue(
+        MemoryBudgetMode.values,
+        json['memoryBudgetMode'],
+        MemoryBudgetMode.automatic,
+      ),
+      totalMemoryBudgetMiB: _integer(json['totalMemoryBudgetMiB']) ?? 512,
       performance: PerformanceOptions.fromJson(
         (json['performance'] as Map?)?.cast<String, Object?>(),
       ),
@@ -120,4 +138,14 @@ class AppSettings {
 
   static AppSettings decode(String value) =>
       AppSettings.fromJson((jsonDecode(value) as Map).cast<String, Object?>());
+
+  static int? _integer(Object? value) => switch (value) {
+    int result when result > 0 => result,
+    num result
+        when result.isFinite &&
+            result > 0 &&
+            result == result.roundToDouble() =>
+      result.toInt(),
+    _ => null,
+  };
 }

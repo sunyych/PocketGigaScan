@@ -95,6 +95,24 @@ class StitchLocalizations {
   String timelineTransition(String state, String subject) =>
       '$subject · $state';
   String get settingsTitle => text('设置');
+  String memoryBudgetAdmission(
+    String operation,
+    int requested,
+    int limit,
+    int held,
+  ) => isChinese
+      ? '$operation需要${requested.toString()}MiB；当前共享预算${limit.toString()}MiB中已有${held.toString()}MiB被占用。'
+      : '$operation needs $requested MiB; $held MiB of the $limit MiB shared budget is already reserved.';
+  String memoryConcurrencyAdmission(String operation, int active, int limit) =>
+      isChinese
+      ? '$operation暂缓：共享并发上限为 $limit 个任务，当前已有 $active 个原生任务占用名额。'
+      : '$operation is deferred: the shared concurrency limit is $limit jobs, with $active native job(s) currently using a slot.';
+  String resourceBudgetStatusFailed(String operation, String error) => isChinese
+      ? '${text('无法确认资源预算')}（$operation）：$error'
+      : '${text('无法确认资源预算')} for $operation: $error';
+  String pendingLegacyGridLocks(int count) => isChinese
+      ? '有 $count 个旧网格锁定位置无法关联到当前照片；它们不会固定其他照片。请检查照片映射，并使用锁定按钮明确固定正确原片。'
+      : '$count legacy grid lock position(s) cannot be matched to a photo. They will not lock another photo. Review the mapping and use the lock button on the intended source photo.';
   String get language => text('语言');
   String get appearance => text('外观');
   String get accentColor => text('强调色');
@@ -413,6 +431,24 @@ class StitchLocalizations {
   }
 
   static const _en = <String, String>{
+    '应用内存预算': 'App memory budget',
+    '无法确认资源预算': 'Could not verify the resource budget',
+    '恢复任务': 'Resume task',
+    '启动任务': 'Start task',
+    '整图导出': 'Full-image export',
+    '为整个应用设置共享预算；不会预先占用所选内存，也不代表操作系统硬内存限制。':
+        'Set the shared app-wide managed reservation and cache budget. It does not allocate memory up front or impose an operating-system RSS limit.',
+    '自动分配': 'Automatic',
+    '根据当前可用内存自动推荐。': 'Recommended from currently available memory.',
+    '手动设置': 'Manual',
+    '限制所有并行任务共享的总预算。':
+        'Sets the aggregate managed reservation and cache budget shared by concurrent tasks.',
+    '已选': 'Selected',
+    '总内存': 'Total memory',
+    '可用': 'Available',
+    '推荐': 'Recommended',
+    '本次上限': 'Current maximum',
+    '使用保守回退值': 'Using conservative fallback',
     '设置': 'Settings',
     '语言': 'Language',
     '外观': 'Appearance',
@@ -649,8 +685,11 @@ class StitchLocalizations {
     'GPU 加速': 'GPU acceleration',
     '当前 CPU 原生包未提供 GPU 后端。':
         'The current CPU native package does not provide a GPU backend.',
-    '照片不可从网格移除；点按照片切换“强制按网格放置”。完整文件名可长按查看。':
-        'Photos cannot be removed from the grid. Tap a photo to toggle forced grid placement. Long press to see the full filename.',
+    '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。':
+        'Photos stay in the grid. Use the lock button on a photo to fix its grid position. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Tapping the photo itself does not change the lock; long-press to see the full filename.',
+    '锁定网格位置': 'Lock grid position',
+    '解除网格位置锁定': 'Unlock grid position',
+    '旧任务锁定位置来源未知；点按可解除锁定': 'Legacy grid lock; origin unknown. Tap to unlock.',
     '修正排列方式后查看网格预览。': 'Correct the grid order to preview the layout.',
     '金字塔清单无效：': 'Invalid pyramid manifest: ',
     '读取进度失败：': 'Could not read progress: ',
@@ -748,22 +787,20 @@ class StitchLocalizations {
         'Limits local deformation in neighboring overlaps to reduce texture misalignment.',
     '选项会随任务保存；正在处理或等待恢复的任务使用已提交参数。最终整图仍使用全部原片和完整分辨率。':
         'Options are saved with each task. Running or resumable tasks use their submitted settings. Final output uses all source photos at full resolution.',
-    '中心照片提供水平/垂直估算；启用精细校正后，此项用于四邻照片配准。':
-        'Center photos provide horizontal and vertical estimates. With neighbor refinement enabled, this option applies to four-direction alignment.',
-    '自动网格只估算中心相邻照片；启用精细校正后可并行四邻照片配准。':
-        'Automatic grid mode estimates overlap from center neighbors only. Neighbor refinement can align four-direction pairs in parallel.',
+    '中心照片提供水平/垂直估算；启用精细校正后，此项用于八个方向相邻照片配准。':
+        'Center photos provide horizontal and vertical estimates. With neighbor refinement enabled, this option applies to the eight neighboring directions.',
+    '自动网格只估算中心相邻照片；启用精细校正后可并行配准八个方向的相邻照片。':
+        'Automatic grid mode estimates overlap from center neighbors only. Neighbor refinement can align pairs in all eight directions in parallel.',
     '自动网格使用固定的中心相邻照片估算；此项在自动模式下暂停使用。':
         'Automatic grid mode uses fixed center-neighbor estimates. This option is paused in automatic mode.',
     '精细校正会固定检查四个方向的相邻照片；关闭精细校正后可恢复此项设置。':
         'Neighbor refinement always checks all four directions. Turn it off to restore this setting.',
-    '中心重叠估算固定使用 SIFT/BF；此项用于启用中的四邻照片配准。':
-        'Center overlap estimation always uses SIFT/BF. This option applies to enabled four-direction alignment.',
-    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻照片配准。':
-        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with four-direction alignment.',
+    '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。':
+        'Center overlap estimation always uses SIFT/BF. This option applies to enabled eight-direction alignment.',
+    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。':
+        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with eight-direction alignment.',
     'ORB 使用 BF 匹配；FLANN 已关闭。': 'ORB uses BF matching; FLANN is disabled.',
     '默认使用 SIFT 特征。': 'SIFT features are used by default.',
-    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻配准。':
-        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with four-direction alignment.',
     'ORB 模式不可用；请先切回 SIFT。':
         'ORB mode is unavailable. Switch back to SIFT first.',
     '默认使用 BF 精确匹配。': 'BF exact matching is used by default.',
@@ -899,8 +936,8 @@ class StitchLocalizations {
         'When automatic overlap is off, unmatched directions use focal length or field of view and manual overlap to estimate grid positions.',
     '从中间照片估算水平/垂直重叠并按网格合成':
         'Estimate horizontal and vertical overlap from center photos, then stitch the grid',
-    '结合四邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。':
-        'Refines placement from reliable matches in the four neighboring directions; unreliable matches have less influence. This may take longer.',
+    '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。':
+        'Refines placement from reliable matches in all eight neighboring directions; unreliable matches have less influence. This may take longer.',
     '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。':
         'Prefers sharper photo sources in overlaps to reduce ghosting; original coverage is kept when no sharper neighbor exists. Turn off to compare feather blending.',
     '缓存保存在任务输入目录旁的应用任务目录中。':
@@ -920,7 +957,7 @@ class StitchLocalizations {
     '行列必须是有效整数。': 'Rows and columns must be valid integers.',
     '水平视角需介于 1° 与 179°。':
         'Horizontal field of view must be between 1° and 179°.',
-    '渲染内存预算需为 128–4096 MiB。': 'Render memory budget must be 128–4096 MiB.',
+    '渲染内存预算需为 128–131072 MiB。': 'Render memory budget must be 128–131072 MiB.',
     '配准并行数需为 1–32。': 'Alignment worker count must be 1–32.',
     '水平与垂直重叠率需分别为 15%–80%。':
         'Horizontal and vertical overlap must each be 15%–80%.',

@@ -70,7 +70,10 @@ class PerformanceOptions {
   String get matcherType => flannMatching && !orbFeatures ? 'flann' : 'bf';
   bool get effectiveFlannMatching => flannMatching && !orbFeatures;
   double get registrationMegapixels => fastRegistration ? 0.6 : 2.0;
-  String get neighborMode => fourNeighborFirst ? 'adaptive' : 'eight';
+
+  /// The stitcher always uses all eight immediate neighbors. Keep the legacy
+  /// preference field readable/writable so older task settings still decode.
+  String get neighborMode => 'eight';
   PerformanceOptions get normalized =>
       orbFeatures && flannMatching ? copyWith(flannMatching: false) : this;
 }

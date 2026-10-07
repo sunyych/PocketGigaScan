@@ -21,14 +21,14 @@ void main() {
     const english = StitchLocalizations(Locale('en'));
     const chinese = StitchLocalizations(Locale('zh'));
 
-    const registration = '结合四邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。';
+    const registration = '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。';
     const deghost = '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。';
 
     expect(chinese.text(registration), registration);
     expect(chinese.text(deghost), deghost);
     expect(
       english.text(registration),
-      'Refines placement from reliable matches in the four neighboring directions; unreliable matches have less influence. This may take longer.',
+      'Refines placement from reliable matches in all eight neighboring directions; unreliable matches have less influence. This may take longer.',
     );
     expect(
       english.text(deghost),
@@ -41,6 +41,58 @@ void main() {
     expect(
       english.neighborReliabilitySummary(adjustedEdges: 2, ambiguousEdges: 1),
       'Neighbor match weights adjusted: 2; edges in inconsistent loops: 1.',
+    );
+    expect(
+      chinese.memoryBudgetAdmission('启动任务', 16 * 1024, 32 * 1024, 16 * 1024),
+      '启动任务需要16384MiB；当前共享预算32768MiB中已有16384MiB被占用。',
+    );
+    expect(
+      english.memoryBudgetAdmission(
+        'Start task',
+        16 * 1024,
+        32 * 1024,
+        16 * 1024,
+      ),
+      'Start task needs 16384 MiB; 16384 MiB of the 32768 MiB shared budget is already reserved.',
+    );
+    expect(
+      chinese.memoryConcurrencyAdmission('启动任务', 3, 1),
+      '启动任务暂缓：共享并发上限为 1 个任务，当前已有 3 个原生任务占用名额。',
+    );
+    expect(
+      english.memoryConcurrencyAdmission('Start task', 3, 1),
+      'Start task is deferred: the shared concurrency limit is 1 jobs, with 3 native job(s) currently using a slot.',
+    );
+    expect(
+      english.resourceBudgetStatusFailed('Resume task', 'unavailable'),
+      'Could not verify the resource budget for Resume task: unavailable',
+    );
+  });
+
+  test('hard grid lock warning and controls are localized', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+    const warning =
+        '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。';
+
+    expect(chinese.text(warning), warning);
+    expect(
+      english.text(warning),
+      'Photos stay in the grid. Use the lock button on a photo to fix its grid position. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Tapping the photo itself does not change the lock; long-press to see the full filename.',
+    );
+    expect(english.text('锁定网格位置'), 'Lock grid position');
+    expect(english.text('解除网格位置锁定'), 'Unlock grid position');
+    expect(
+      english.text('旧任务锁定位置来源未知；点按可解除锁定'),
+      'Legacy grid lock; origin unknown. Tap to unlock.',
+    );
+    expect(
+      chinese.pendingLegacyGridLocks(2),
+      '有 2 个旧网格锁定位置无法关联到当前照片；它们不会固定其他照片。请检查照片映射，并使用锁定按钮明确固定正确原片。',
+    );
+    expect(
+      english.pendingLegacyGridLocks(2),
+      '2 legacy grid lock position(s) cannot be matched to a photo. They will not lock another photo. Review the mapping and use the lock button on the intended source photo.',
     );
   });
 

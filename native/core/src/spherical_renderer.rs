@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::Instant,
 };
@@ -862,10 +862,11 @@ fn render_layout_tiles_with_options_internal(
     mut checkpoint: impl FnMut(u64, u64) -> bool,
     sharpness_aware: bool,
 ) -> crate::Result<Value> {
-    if !(32..=4096).contains(&memory_budget_mib) {
-        return Err(crate::Error::Invalid(
-            "memoryBudgetMiB must be 32..=4096".into(),
-        ));
+    if !(32..=crate::job_resources::MAX_JOB_MEMORY_MIB).contains(&memory_budget_mib) {
+        return Err(crate::Error::Invalid(format!(
+            "memoryBudgetMiB must be 32..={}",
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     if !(1..=32).contains(&workers_requested) {
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
@@ -879,7 +880,8 @@ fn render_layout_tiles_with_options_internal(
     let total = u64::from(cols) * u64::from(rows);
     let mut completed = 0u64;
     let started = Instant::now();
-    let budget_bytes = (memory_budget_mib as u64) * 1024 * 1024;
+    let budget_bytes = crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+        .ok_or_else(|| crate::Error::Invalid("memoryBudgetMiB overflows byte accounting".into()))?;
     let mut source_bytes = Vec::with_capacity(sources.len());
     let mut max_decode = 0u64;
     for s in &sources {
@@ -893,7 +895,15 @@ fn render_layout_tiles_with_options_internal(
                 s.height
             )));
         }
-        let bytes = u64::from(iw) * u64::from(ih) * 4;
+        let bytes = u64::from(iw)
+            .checked_mul(u64::from(ih))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                crate::Error::Invalid(format!(
+                    "source byte size overflows memory accounting for {}",
+                    s.path.display()
+                ))
+            })?;
         source_bytes.push(bytes);
         max_decode = max_decode.max(bytes.saturating_mul(2));
     }
@@ -906,10 +916,19 @@ fn render_layout_tiles_with_options_internal(
     };
     let tile_reserve = u64::from(TILE) * u64::from(TILE) * tile_bytes_per_pixel;
     let source_quality_map_reserve = if blend_mode == BlendMode::Deghost {
-        sources.len() as u64
-            * (SourceQualityMap::byte_len()
-                + std::mem::size_of::<SourceQualityMap>() as u64
-                + std::mem::size_of::<Arc<SourceQualityMap>>() as u64)
+        let per_source = SourceQualityMap::byte_len()
+            .checked_add(std::mem::size_of::<SourceQualityMap>() as u64)
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<Arc<SourceQualityMap>>() as u64)
+            })
+            .ok_or_else(|| {
+                crate::Error::Invalid("source quality map accounting overflowed".into())
+            })?;
+        per_source
+            .checked_mul(sources.len() as u64)
+            .ok_or_else(|| {
+                crate::Error::Invalid("source quality map accounting overflowed".into())
+            })?
     } else {
         0
     };
@@ -918,25 +937,64 @@ fn render_layout_tiles_with_options_internal(
     } else {
         0
     };
-    let one_worker = tile_reserve + max_decode / 2 + source_quality_refs_per_worker;
-    if one_worker + max_decode / 2 + source_quality_map_reserve > budget_bytes {
+    let worker_base = tile_reserve
+        .checked_add(max_decode / 2)
+        .and_then(|bytes| bytes.checked_add(source_quality_refs_per_worker))
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer worker memory accounting overflowed".into())
+        })?;
+    let decode_slot_bytes = max_decode / 2;
+    let one_worker = worker_base.checked_add(decode_slot_bytes).ok_or_else(|| {
+        crate::Error::Invalid("renderer decode memory accounting overflowed".into())
+    })?;
+    let fixed_reserve = source_quality_map_reserve;
+    if one_worker
+        .checked_add(fixed_reserve)
+        .map_or(true, |bytes| bytes > budget_bytes)
+    {
         return Err(crate::Error::Invalid(format!(
             "one tile worker and source decode exceed memoryBudgetMiB={memory_budget_mib}"
         )));
     }
-    let affordable =
-        ((budget_bytes - max_decode / 2 - source_quality_map_reserve) / one_worker).max(1) as usize;
-    let effective_workers = workers_requested.min(affordable).min(total as usize).max(1);
-    let active_reserve =
-        one_worker * effective_workers as u64 + max_decode / 2 + source_quality_map_reserve;
-    let cache_limit = if use_source_cache {
-        budget_bytes.saturating_sub(active_reserve)
+    let requested_cache_min = if use_source_cache {
+        source_bytes.iter().copied().min().unwrap_or(0)
     } else {
         0
     };
-    let cache = Arc::new(Mutex::new(DecodeCache::new(cache_limit)));
+    let requested_total = one_worker
+        .checked_add(fixed_reserve)
+        .and_then(|bytes| bytes.checked_add(requested_cache_min));
+    let cache_min_reserve = if requested_total.map_or(false, |bytes| bytes <= budget_bytes) {
+        requested_cache_min
+    } else {
+        0
+    };
+    let affordable =
+        ((budget_bytes - fixed_reserve - cache_min_reserve) / one_worker).max(1) as usize;
+    let effective_workers = workers_requested.min(affordable).min(total as usize).max(1);
+    let decode_slot_reserve = decode_slot_bytes
+        .checked_mul(effective_workers as u64)
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer decode slot reservation overflowed".into())
+        })?;
+    let active_reserve = worker_base
+        .checked_mul(effective_workers as u64)
+        .and_then(|bytes| bytes.checked_add(decode_slot_reserve))
+        .and_then(|bytes| bytes.checked_add(source_quality_map_reserve))
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer active memory reservation overflowed".into())
+        })?;
+    let cache_limit = if use_source_cache {
+        budget_bytes
+            .saturating_sub(active_reserve)
+            .max(cache_min_reserve)
+    } else {
+        0
+    };
+    let cache = Arc::new(DecodeCache::new(cache_limit, effective_workers.max(1)));
     let hits = AtomicU64::new(0);
     let misses = AtomicU64::new(0);
+    let decodes = AtomicU64::new(0);
     let visits = AtomicU64::new(0);
     let active_workers = AtomicU64::new(0);
     let peak_workers = AtomicU64::new(0);
@@ -966,6 +1024,7 @@ fn render_layout_tiles_with_options_internal(
             tasks.push((row as u32, col as u32));
         }
     }
+    tasks = spatial_block_order(tasks, cols as u32, rows as u32, 4);
     for batch in tasks.chunks(effective_workers) {
         if !checkpoint(completed, total) {
             return Err(crate::Error::Cancelled);
@@ -976,6 +1035,7 @@ fn render_layout_tiles_with_options_internal(
                 let cache = cache.clone();
                 let hits = &hits;
                 let misses = &misses;
+                let decodes = &decodes;
                 let visits = &visits;
                 let active_workers = &active_workers;
                 let peak_workers = &peak_workers;
@@ -997,6 +1057,7 @@ fn render_layout_tiles_with_options_internal(
                         &cache,
                         &hits,
                         &misses,
+                        &decodes,
                         &visits,
                         &active_workers,
                         &peak_workers,
@@ -1025,30 +1086,119 @@ fn render_layout_tiles_with_options_internal(
             }
         }
     }
-    let cache_guard = cache.lock().expect("decode cache lock");
+    let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"estimatedActiveMemoryBytes":active_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":misses.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"estimatedActiveMemoryBytes":active_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"schedule":"2d-block","scheduleBlockSize":4,"renderMs":render_ms}),
     )
 }
 
 struct DecodeCache {
+    state: Mutex<DecodeCacheState>,
+    flights: Mutex<HashMap<usize, Arc<DecodeFlight>>>,
+    decode_slots: Mutex<usize>,
+    decode_ready: Condvar,
+    decode_limit: usize,
+    active_decode_slots: AtomicU64,
+    peak_decode_slots: AtomicU64,
+    decode_waits: AtomicU64,
+    decode_errors: AtomicU64,
+}
+struct DecodeCacheState {
     map: HashMap<usize, Arc<RgbaImage>>,
     lru: VecDeque<usize>,
     bytes: u64,
     limit: u64,
     peak_bytes: u64,
 }
-impl DecodeCache {
-    fn new(limit: u64) -> Self {
-        Self {
-            map: HashMap::new(),
-            lru: VecDeque::new(),
-            bytes: 0,
-            limit,
-            peak_bytes: 0,
+struct DecodeFlight {
+    result: Mutex<Option<std::result::Result<Arc<RgbaImage>, String>>>,
+    ready: Condvar,
+}
+struct DecodeSlotGuard<'a> {
+    cache: &'a DecodeCache,
+}
+impl Drop for DecodeSlotGuard<'_> {
+    fn drop(&mut self) {
+        self.cache
+            .active_decode_slots
+            .fetch_sub(1, Ordering::Relaxed);
+        let mut slots = self.cache.decode_slots.lock().expect("decode gate lock");
+        *slots = slots.saturating_sub(1);
+        self.cache.decode_ready.notify_one();
+    }
+}
+struct DecodeFlightGuard<'a> {
+    cache: &'a DecodeCache,
+    source_index: usize,
+    flight: Arc<DecodeFlight>,
+    completed: bool,
+}
+impl DecodeFlightGuard<'_> {
+    fn complete(&mut self, result: std::result::Result<Arc<RgbaImage>, String>) {
+        *self
+            .flight
+            .result
+            .lock()
+            .expect("decode flight result lock") = Some(result);
+        self.completed = true;
+        self.flight.ready.notify_all();
+        self.cache
+            .flights
+            .lock()
+            .expect("decode flights lock")
+            .remove(&self.source_index);
+    }
+}
+impl Drop for DecodeFlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cache.decode_errors.fetch_add(1, Ordering::Relaxed);
+            *self
+                .flight
+                .result
+                .lock()
+                .expect("decode flight result lock") =
+                Some(Err("source decode worker terminated unexpectedly".into()));
+            self.flight.ready.notify_all();
+            self.cache
+                .flights
+                .lock()
+                .expect("decode flights lock")
+                .remove(&self.source_index);
         }
     }
+}
+impl DecodeCache {
+    fn new(limit: u64, decode_limit: usize) -> Self {
+        Self {
+            state: Mutex::new(DecodeCacheState {
+                map: HashMap::new(),
+                lru: VecDeque::new(),
+                bytes: 0,
+                limit,
+                peak_bytes: 0,
+            }),
+            flights: Mutex::new(HashMap::new()),
+            decode_slots: Mutex::new(0),
+            decode_ready: Condvar::new(),
+            decode_limit: decode_limit.max(1),
+            active_decode_slots: AtomicU64::new(0),
+            peak_decode_slots: AtomicU64::new(0),
+            decode_waits: AtomicU64::new(0),
+            decode_errors: AtomicU64::new(0),
+        }
+    }
+}
+
+fn spatial_block_order(
+    mut tasks: Vec<(u32, u32)>,
+    _cols: u32,
+    _rows: u32,
+    block: u32,
+) -> Vec<(u32, u32)> {
+    tasks.sort_by_key(|(row, col)| ((row / block, col / block), *row, *col));
+    tasks
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1056,13 +1206,45 @@ fn source_image(
     source_index: usize,
     source: &Source,
     source_bytes: &[u64],
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     decode_micros: &AtomicU64,
     use_cache: bool,
 ) -> crate::Result<Arc<RgbaImage>> {
-    let mut state = cache.lock().expect("decode cache lock");
+    source_image_with(
+        source_index,
+        source,
+        source_bytes,
+        cache,
+        hits,
+        misses,
+        decodes,
+        decode_micros,
+        use_cache,
+        |source| {
+            image::open(&source.path)
+                .map(|image| Arc::new(image.into_rgba8()))
+                .map_err(|e| format!("failed to decode source {}: {e}", source.path.display()))
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_image_with(
+    source_index: usize,
+    source: &Source,
+    source_bytes: &[u64],
+    cache: &DecodeCache,
+    hits: &AtomicU64,
+    misses: &AtomicU64,
+    decodes: &AtomicU64,
+    decode_micros: &AtomicU64,
+    use_cache: bool,
+    decode_source: impl FnOnce(&Source) -> std::result::Result<Arc<RgbaImage>, String>,
+) -> crate::Result<Arc<RgbaImage>> {
+    let mut state = cache.state.lock().expect("decode cache lock");
     if let Some(image) = state.map.get(&source_index).cloned() {
         hits.fetch_add(1, Ordering::Relaxed);
         if let Some(pos) = state.lru.iter().position(|index| *index == source_index) {
@@ -1071,21 +1253,96 @@ fn source_image(
         state.lru.push_back(source_index);
         return Ok(image);
     }
-    misses.fetch_add(1, Ordering::Relaxed);
+    drop(state);
+    let (flight, leader) = {
+        let mut flights = cache.flights.lock().expect("decode flights lock");
+        if let Some(flight) = flights.get(&source_index) {
+            misses.fetch_add(1, Ordering::Relaxed);
+            cache.decode_waits.fetch_add(1, Ordering::Relaxed);
+            (flight.clone(), false)
+        } else {
+            // A caller may have missed the resident map just before another
+            // decode completed. Recheck under the flight lock before creating
+            // another load; completion never holds the state and flight locks
+            // together, so this lock order cannot deadlock.
+            if use_cache {
+                let mut state = cache.state.lock().expect("decode cache lock");
+                if let Some(image) = state.map.get(&source_index).cloned() {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    if let Some(pos) = state.lru.iter().position(|index| *index == source_index) {
+                        state.lru.remove(pos);
+                    }
+                    state.lru.push_back(source_index);
+                    return Ok(image);
+                }
+            }
+            misses.fetch_add(1, Ordering::Relaxed);
+            let flight = Arc::new(DecodeFlight {
+                result: Mutex::new(None),
+                ready: Condvar::new(),
+            });
+            flights.insert(source_index, flight.clone());
+            (flight, true)
+        }
+    };
+    if !leader {
+        let mut result = flight.result.lock().expect("decode flight result lock");
+        while result.is_none() {
+            result = flight.ready.wait(result).expect("decode flight wait");
+        }
+        return result
+            .as_ref()
+            .unwrap()
+            .clone()
+            .map_err(crate::Error::Invalid);
+    }
+    let mut flight_guard = DecodeFlightGuard {
+        cache,
+        source_index,
+        flight: flight.clone(),
+        completed: false,
+    };
+    decodes.fetch_add(1, Ordering::Relaxed);
+    let mut slots = cache.decode_slots.lock().expect("decode gate lock");
+    while *slots >= cache.decode_limit {
+        cache.decode_waits.fetch_add(1, Ordering::Relaxed);
+        slots = cache.decode_ready.wait(slots).expect("decode gate wait");
+    }
+    *slots += 1;
+    let active = cache.active_decode_slots.fetch_add(1, Ordering::Relaxed) + 1;
+    cache.peak_decode_slots.fetch_max(active, Ordering::Relaxed);
+    drop(slots);
+    let slot_guard = DecodeSlotGuard { cache };
     let decode_started = Instant::now();
-    let image = Arc::new(image::open(&source.path)?.into_rgba8());
+    let decoded = decode_source(source);
     decode_micros.fetch_add(
         decode_started.elapsed().as_micros() as u64,
         Ordering::Relaxed,
     );
-    if image.width() != source.width || image.height() != source.height {
-        return Err(crate::Error::Invalid(format!(
-            "source dimensions changed for {}",
-            source.path.display()
-        )));
+    let decoded = decoded.and_then(|image| {
+        if image.width() != source.width || image.height() != source.height {
+            Err(format!(
+                "source dimensions changed for {}",
+                source.path.display()
+            ))
+        } else {
+            Ok(image)
+        }
+    });
+    drop(slot_guard);
+    if decoded.is_err() {
+        cache.decode_errors.fetch_add(1, Ordering::Relaxed);
     }
+    let image = match decoded {
+        Ok(image) => image,
+        Err(message) => {
+            flight_guard.complete(Err(message.clone()));
+            return Err(crate::Error::Invalid(message));
+        }
+    };
+    let mut state = cache.state.lock().expect("decode cache lock");
     if use_cache && state.limit > 0 && source_bytes[source_index] <= state.limit {
-        while state.bytes + source_bytes[source_index] > state.limit {
+        while state.bytes.saturating_add(source_bytes[source_index]) > state.limit {
             if let Some(old) = state.lru.pop_front() {
                 if let Some(old_image) = state.map.remove(&old) {
                     state.bytes -= u64::from(old_image.width()) * u64::from(old_image.height()) * 4;
@@ -1094,11 +1351,15 @@ fn source_image(
                 break;
             }
         }
-        state.bytes += u64::from(image.width()) * u64::from(image.height()) * 4;
+        state.bytes = state
+            .bytes
+            .saturating_add(u64::from(image.width()) * u64::from(image.height()) * 4);
         state.peak_bytes = state.peak_bytes.max(state.bytes);
         state.map.insert(source_index, image.clone());
         state.lru.push_back(source_index);
     }
+    drop(state);
+    flight_guard.complete(Ok(image.clone()));
     Ok(image)
 }
 
@@ -1107,9 +1368,10 @@ fn source_quality_map(
     source_index: usize,
     source: &Source,
     source_bytes: &[u64],
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     decode_micros: &AtomicU64,
     use_cache: bool,
 ) -> crate::Result<Arc<SourceQualityMap>> {
@@ -1124,6 +1386,7 @@ fn source_quality_map(
         cache,
         hits,
         misses,
+        decodes,
         decode_micros,
         use_cache,
     )?;
@@ -1148,9 +1411,10 @@ fn render_one_tile(
     sources: &[Source],
     source_bytes: &[u64],
     dir: &Path,
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     visits: &AtomicU64,
     active_workers: &AtomicU64,
     peak_workers: &AtomicU64,
@@ -1205,6 +1469,7 @@ fn render_one_tile(
                 cache,
                 hits,
                 misses,
+                decodes,
                 decode_micros,
                 use_cache,
             )?;
@@ -1292,6 +1557,7 @@ fn render_one_tile(
             cache,
             hits,
             misses,
+            decodes,
             decode_micros,
             use_cache,
         )?;
@@ -1396,17 +1662,20 @@ pub fn build_pyramid_levels_with_options(
     workers_requested: usize,
     mut checkpoint: impl FnMut(u64, u64) -> bool,
 ) -> crate::Result<(Vec<Value>, Value)> {
-    if !(32..=4096).contains(&memory_budget_mib) {
-        return Err(crate::Error::Invalid(
-            "memoryBudgetMiB must be 32..=4096".into(),
-        ));
+    if !(32..=crate::job_resources::MAX_JOB_MEMORY_MIB).contains(&memory_budget_mib) {
+        return Err(crate::Error::Invalid(format!(
+            "memoryBudgetMiB must be 32..={}",
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     if !(1..=32).contains(&workers_requested) {
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
     }
-    const WORKER_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
-    let memory_workers =
-        ((memory_budget_mib as u64 * 1024 * 1024) / WORKER_RESERVE_BYTES).max(1) as usize;
+    const WORKER_RESERVE_BYTES: u64 = crate::job_resources::PYRAMID_WORKER_RESERVE_BYTES;
+    let memory_workers = (crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+        .ok_or_else(|| crate::Error::Invalid("memoryBudgetMiB overflows byte accounting".into()))?
+        / WORKER_RESERVE_BYTES)
+        .max(1) as usize;
     let started = Instant::now();
     let mut levels = Vec::new();
     let mut peak_workers = 0usize;
@@ -1598,7 +1867,274 @@ fn render_pyramid_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    fn wait_for_decode_waiters(cache: &DecodeCache, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cache.decode_waits.load(Ordering::Relaxed) < expected {
+            assert!(
+                Instant::now() < deadline,
+                "decode waiters did not register before deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn cache_test_source(path: PathBuf) -> Source {
+        Source {
+            path,
+            width: 4,
+            height: 4,
+            fx: 1.0,
+            fy: 1.0,
+            cx: 1.5,
+            cy: 1.5,
+            camera_to_world: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            source_plane_warp: None,
+            quality_map: Arc::new(Mutex::new(None)),
+            center: [0.0, 0.0, 1.0],
+            cone_radius: 1.0,
+        }
+    }
+
+    #[test]
+    fn decode_single_flight_shares_success_and_failure_with_concurrent_waiters() {
+        for should_fail in [false, true] {
+            let cache = Arc::new(DecodeCache::new(1024, 4));
+            let source = cache_test_source(PathBuf::from("injected"));
+            let source_bytes = [64];
+            let hits = AtomicU64::new(0);
+            let misses = AtomicU64::new(0);
+            let decodes = AtomicU64::new(0);
+            let decode_micros = AtomicU64::new(0);
+            let decode_calls = AtomicU64::new(0);
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            std::thread::scope(|scope| {
+                let mut joins = Vec::new();
+                for _ in 0..8 {
+                    let cache = cache.clone();
+                    let barrier = barrier.clone();
+                    let source = &source;
+                    let source_bytes_ref = &source_bytes;
+                    let hits_ref = &hits;
+                    let misses_ref = &misses;
+                    let decodes_ref = &decodes;
+                    let decode_micros_ref = &decode_micros;
+                    let decode_calls_ref = &decode_calls;
+                    let cache_wait = cache.clone();
+                    joins.push(scope.spawn(move || {
+                        barrier.wait();
+                        source_image_with(
+                            0,
+                            source,
+                            source_bytes_ref,
+                            &cache,
+                            hits_ref,
+                            misses_ref,
+                            decodes_ref,
+                            decode_micros_ref,
+                            true,
+                            |_| {
+                                decode_calls_ref.fetch_add(1, Ordering::Relaxed);
+                                wait_for_decode_waiters(&cache_wait, 7);
+                                if should_fail {
+                                    Err("injected decode failure".into())
+                                } else {
+                                    Ok(Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255]))))
+                                }
+                            },
+                        )
+                    }));
+                }
+                let results = joins
+                    .into_iter()
+                    .map(|join| join.join().unwrap())
+                    .collect::<Vec<_>>();
+                if should_fail {
+                    assert!(results.iter().all(|result| result.is_err()));
+                    assert!(results.iter().all(|result| result
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("injected decode failure")));
+                    assert_eq!(cache.decode_errors.load(Ordering::Relaxed), 1);
+                } else {
+                    assert!(results.iter().all(|result| result.is_ok()));
+                    assert!(results
+                        .windows(2)
+                        .all(|pair| pair[0].as_ref().unwrap().as_raw()
+                            == pair[1].as_ref().unwrap().as_raw()));
+                }
+            });
+            assert_eq!(decode_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(decodes.load(Ordering::Relaxed), 1);
+            if should_fail {
+                assert!(cache.flights.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_panic_releases_slot_and_wakes_all_flight_waiters() {
+        let cache = Arc::new(DecodeCache::new(1024, 4));
+        let source = cache_test_source(PathBuf::from("panic-injected"));
+        let source_bytes = [64];
+        let hits = AtomicU64::new(0);
+        let misses = AtomicU64::new(0);
+        let decodes = AtomicU64::new(0);
+        let decode_micros = AtomicU64::new(0);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let results = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for _ in 0..8 {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                let source = &source;
+                let source_bytes_ref = &source_bytes;
+                let hits_ref = &hits;
+                let misses_ref = &misses;
+                let decodes_ref = &decodes;
+                let decode_micros_ref = &decode_micros;
+                let cache_wait = cache.clone();
+                joins.push(scope.spawn(move || {
+                    barrier.wait();
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        source_image_with(
+                            0,
+                            source,
+                            source_bytes_ref,
+                            &cache,
+                            hits_ref,
+                            misses_ref,
+                            decodes_ref,
+                            decode_micros_ref,
+                            true,
+                            |_| -> std::result::Result<Arc<RgbaImage>, String> {
+                                wait_for_decode_waiters(&cache_wait, 7);
+                                panic!("injected decoder panic");
+                            },
+                        )
+                    }))
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.as_ref().map_or(false, |value| value.is_err()))
+                .count(),
+            7
+        );
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .all(|result| {
+                result
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("terminated unexpectedly")
+            }));
+        assert_eq!(decodes.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.decode_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.active_decode_slots.load(Ordering::Relaxed), 0);
+        assert_eq!(*cache.decode_slots.lock().unwrap(), 0);
+        assert!(cache.flights.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_gate_bounds_distinct_source_loads() {
+        let cache = Arc::new(DecodeCache::new(0, 2));
+        let sources = (0..6)
+            .map(|index| cache_test_source(PathBuf::from(format!("{index}"))))
+            .collect::<Vec<_>>();
+        let source_bytes = vec![64; sources.len()];
+        let hits = AtomicU64::new(0);
+        let misses = AtomicU64::new(0);
+        let decodes = AtomicU64::new(0);
+        let decode_micros = AtomicU64::new(0);
+        let active = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+        let barrier = Arc::new(std::sync::Barrier::new(sources.len()));
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (index, source) in sources.iter().enumerate() {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                let source_bytes_ref = source_bytes.as_slice();
+                let hits_ref = &hits;
+                let misses_ref = &misses;
+                let decodes_ref = &decodes;
+                let decode_micros_ref = &decode_micros;
+                let active_ref = &active;
+                let peak_ref = &peak;
+                joins.push(scope.spawn(move || {
+                    barrier.wait();
+                    source_image_with(
+                        index,
+                        source,
+                        source_bytes_ref,
+                        &cache,
+                        hits_ref,
+                        misses_ref,
+                        decodes_ref,
+                        decode_micros_ref,
+                        false,
+                        |_| {
+                            let current = active_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                            peak_ref.fetch_max(current, Ordering::Relaxed);
+                            std::thread::sleep(Duration::from_millis(30));
+                            active_ref.fetch_sub(1, Ordering::Relaxed);
+                            Ok(Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255]))))
+                        },
+                    )
+                    .unwrap()
+                }));
+            }
+            for join in joins {
+                join.join().unwrap();
+            }
+        });
+        assert_eq!(decodes.load(Ordering::Relaxed), 6);
+        let decode_peak = cache.peak_decode_slots.load(Ordering::Relaxed);
+        assert!((1..=2).contains(&decode_peak));
+        assert!(peak.load(Ordering::Relaxed) <= 2);
+    }
+
+    #[test]
+    fn spatial_schedule_visits_each_tile_once_inside_bounded_two_dimensional_blocks() {
+        let tasks = (0..9)
+            .flat_map(|row| (0..11).map(move |col| (row, col)))
+            .collect();
+        let ordered = spatial_block_order(tasks, 11, 9, 4);
+        assert_eq!(ordered.len(), 99);
+        let unique = ordered
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 99);
+        for block_row in 0..3 {
+            for block_col in 0..3 {
+                let group = ordered
+                    .iter()
+                    .copied()
+                    .filter(|(row, col)| row / 4 == block_row && col / 4 == block_col)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    group.len(),
+                    (9 - block_row * 4).min(4) as usize * (11 - block_col * 4).min(4) as usize
+                );
+                assert!(group
+                    .iter()
+                    .all(|(row, col)| *row / 4 == block_row && *col / 4 == block_col));
+            }
+        }
+    }
 
     #[test]
     fn sampler_uses_shader_pixel_center_and_srgb_interpolation_order() {
@@ -2698,6 +3234,17 @@ mod tests {
                 .unwrap();
         assert_eq!(low["workersEffective"].as_u64(), Some(1));
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
+        assert_eq!(parallel["sourceDecodes"].as_u64(), Some(1));
+        assert_eq!(parallel["sourceDecodeErrors"].as_u64(), Some(0));
+        assert!(
+            parallel["sourceDecodePeakInFlight"].as_u64().unwrap()
+                <= parallel["reservedDecodeSlots"].as_u64().unwrap()
+        );
+        assert!(parallel["decodeSlotReserveBytes"].as_u64().unwrap() > 0);
+        assert!(
+            parallel["peakSourceCacheBytes"].as_u64().unwrap()
+                <= parallel["sourceCacheLimitBytes"].as_u64().unwrap()
+        );
         for row in 0..1 {
             for col in 0..3 {
                 let name = format!("level-0/{row}-{col}.png");

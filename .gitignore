@@ -67,6 +67,8 @@ __pycache__/
 !/docs/superpowers/specs/2026-10-06-settings-timeline-design.md
 /docs/superpowers/plans/*
 !/docs/superpowers/plans/2026-10-06-settings-timeline.md
+!/docs/superpowers/plans/2026-10-06-dwarf-render-performance.md
+!/docs/superpowers/plans/2026-10-06-task-traceability.md
 /docs/gigascan/*
 !/docs/gigascan/COLLABORATION.md
 !/docs/gigascan/ROADMAP.md
@@ -76,6 +78,7 @@ __pycache__/
 !/docs/gigascan/ANDROID-STITCH-PLAN.md
 !/docs/gigascan/BLUR-REPAIR-PLAN.md
 !/docs/gigascan/LOOP-REGRESSION-PLAN.md
+!/docs/gigascan/DWARF-PERFORMANCE-DESIGN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md
@@ -87,15 +90,18 @@ __pycache__/
 !/docs/gigascan/evidence/BLUR-REPAIR-2026-10-06.md
 !/docs/gigascan/evidence/SETTINGS-TIMELINE-2026-10-06.md
 !/docs/gigascan/evidence/LOOP-REGRESSION-2026-10-06.md
+!/docs/gigascan/evidence/DWARF-PERFORMANCE-2026-10-06.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
 !/scripts/build-stitch-android-core.ps1
 !/scripts/test-build-stitch-android-core.Tests.ps1
 !/scripts/verify-spherical-seam-alignment.py
+!/scripts/benchmark-dwarf-render.py
 !/scripts/tests/
 /scripts/tests/*
 !/scripts/tests/test_verify_spherical_seam_alignment.py
+!/scripts/tests/test_benchmark_dwarf_render.py
 /Apps/Flutter/stitch_app/ios/
 /Apps/Flutter/stitch_app/macos/
 /Apps/Flutter/stitch_app/APPLE-BUILD.md

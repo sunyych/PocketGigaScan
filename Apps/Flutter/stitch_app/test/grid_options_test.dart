@@ -84,8 +84,7 @@ void main() {
       contains('正整数'),
     );
     expect(
-      const GridOptions(rows: 0x7fffffffffffffff, columns: 2)
-          .validationError,
+      const GridOptions(rows: 0x7fffffffffffffff, columns: 2).validationError,
       contains('乘积'),
     );
   });
@@ -110,6 +109,137 @@ void main() {
     final mappedIndex = rightBottomSnake.sequenceCells().indexOf(moved.single);
     expect(photos[mappedIndex].originalName, 'photo1.jpg');
   });
+
+  test('grid lock provenance follows photo identity through remapping', () {
+    final photos = [for (var i = 0; i < 6; i++) photo('photo$i.jpg', i)];
+    const oldOptions = GridOptions(
+      mode: GridMode.sequence,
+      rows: 2,
+      columns: 3,
+    );
+    final locked = oldOptions.setPhotoLock(
+      const GridCell(0, 1),
+      photos[1].storedPath,
+      locked: true,
+    );
+    const reordered = GridOptions(
+      mode: GridMode.sequence,
+      rows: 2,
+      columns: 3,
+      startCorner: StartCorner.bottomRight,
+      serpentine: true,
+    );
+
+    final moved = remapGridLocksByPhoto(
+      photos: photos,
+      oldMapping: oldOptions.sequenceCells(),
+      oldOptions: locked,
+      nextOptions: reordered,
+      newMapping: reordered.sequenceCells(),
+      oldMappingValid: true,
+      newMappingValid: true,
+    );
+
+    expect(moved.forceGridCells, {const GridCell(1, 1)});
+    expect(
+      moved.lockedPhotoOrigins[photos[1].storedPath],
+      GridConstraintOrigin.operatorAction,
+    );
+    expect(moved.placementFor(photos[1], const GridCell(1, 1)).toJson(), {
+      'kind': 'hardGridLock',
+      'origin': 'operator',
+    });
+  });
+
+  test('invalid mapping keeps coordinate-only legacy locks pending', () {
+    final photos = [for (var i = 0; i < 4; i++) photo('photo$i.jpg', i)];
+    final legacy = GridOptions(
+      mode: GridMode.sequence,
+      rows: 1,
+      columns: 4,
+      forceGridCells: {const GridCell(0, 2)},
+    );
+    const invalidNext = GridOptions(
+      mode: GridMode.sequence,
+      rows: 2,
+      columns: 3,
+    );
+    final pending = remapGridLocksByPhoto(
+      photos: photos,
+      oldMapping: const [],
+      oldOptions: legacy,
+      nextOptions: invalidNext,
+      newMapping: const [],
+      oldMappingValid: false,
+      newMappingValid: false,
+    );
+
+    expect(pending.forceGridCells, {const GridCell(0, 2)});
+    expect(pending.pendingForceGridCells, {const GridCell(0, 2)});
+    expect(
+      pending.forceGridCellOrigins[const GridCell(0, 2)],
+      GridConstraintOrigin.legacyUnknown,
+    );
+  });
+
+  test(
+    'shrink then expand remaps mapped locks without locking another photo',
+    () {
+      final photos = [for (var i = 0; i < 4; i++) photo('photo$i.jpg', i)];
+      const full = GridOptions(mode: GridMode.sequence, rows: 2, columns: 2);
+      final locked = full.setPhotoLock(
+        const GridCell(1, 1),
+        photos[3].storedPath,
+        locked: true,
+      );
+      const shrunk = GridOptions(mode: GridMode.sequence, rows: 1, columns: 2);
+      final invalidStage = remapGridLocksByPhoto(
+        photos: photos,
+        oldMapping: full.sequenceCells(),
+        oldOptions: locked,
+        nextOptions: shrunk,
+        newMapping: const [],
+        oldMappingValid: true,
+        newMappingValid: false,
+      );
+      const expanded = GridOptions(
+        mode: GridMode.sequence,
+        rows: 2,
+        columns: 2,
+        startCorner: StartCorner.bottomRight,
+      );
+      final restored = remapGridLocksByPhoto(
+        photos: photos,
+        oldMapping: const [],
+        oldOptions: invalidStage,
+        nextOptions: expanded,
+        newMapping: expanded.sequenceCells(),
+        oldMappingValid: false,
+        newMappingValid: true,
+      );
+      final restoredMapping = expanded.sequenceCells();
+      final correctPhotoCell = restoredMapping[3];
+      final unrelatedAtFormerLockCell = restoredMapping.indexOf(
+        const GridCell(1, 1),
+      );
+
+      expect(restored.pendingForceGridCells, isEmpty);
+      expect(restored.placementFor(photos[3], correctPhotoCell).toJson(), {
+        'kind': 'hardGridLock',
+        'origin': 'operator',
+      });
+      expect(
+        restored
+            .placementFor(
+              photos[unrelatedAtFormerLockCell],
+              const GridCell(1, 1),
+            )
+            .toJson(),
+        {'kind': 'gridPrior', 'origin': 'systemFallback'},
+      );
+      expect(restored.toJson()['pendingForceGridCells'], isEmpty);
+    },
+  );
 
   test(
     'gapped or mixed-base filenames fail mapping without excluding selected photos',

@@ -67,8 +67,14 @@ pub(crate) fn export_level0_tiff(
     checkpoint: &mut dyn FnMut(u32, u32) -> Result<()>,
     begin_commit: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Value> {
-    if !(16..=4096).contains(&memory_budget_mib) {
-        return Err(invalid("memoryBudgetMiB must be 16..=4096"));
+    if !(crate::job_resources::MIN_EXPORT_MEMORY_MIB..=crate::job_resources::MAX_JOB_MEMORY_MIB)
+        .contains(&memory_budget_mib)
+    {
+        return Err(invalid(format!(
+            "memoryBudgetMiB must be {}..={} MiB",
+            crate::job_resources::MIN_EXPORT_MEMORY_MIB,
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     let grid = spherical_export::validate_level0(job_dir, manifest, MAX_PIXELS, "TIFF")?;
     let strip_rows = rows_per_strip(grid.width, grid.height);
@@ -296,6 +302,38 @@ mod tests {
         assert_eq!(stats["sampleFormat"], "RGBA8");
         assert_eq!(stats["alpha"], "unassociated");
         assert_eq!(checkpoint_count, 3 + 513);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sixteen_gib_export_matches_128_mib_without_preallocating_budget() {
+        let root = test_dir();
+        write_tile(&root, 0, 0, 512, 512, [22, 44, 88, 255]);
+        write_tile(&root, 0, 1, 1, 512, [90, 80, 70, 255]);
+        write_tile(&root, 1, 1, 1, 1, [1, 2, 3, 128]);
+        let manifest = test_manifest();
+        let low = root.join("low-budget.tif");
+        let high = root.join("high-budget.tif");
+        let mut checkpoint = |_: u32, _: u32| -> Result<()> { Ok(()) };
+        let low_stats =
+            export_level0_tiff(&root, &manifest, &low, 128, &mut checkpoint, &mut || Ok(()))
+                .unwrap();
+        let high_stats = export_level0_tiff(
+            &root,
+            &manifest,
+            &high,
+            16 * 1024,
+            &mut |_, _| Ok(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(low_stats["memoryBudgetMiB"], 128);
+        assert_eq!(high_stats["memoryBudgetMiB"], 16 * 1024);
+        assert_eq!(fs::read(&low).unwrap(), fs::read(&high).unwrap());
+        assert_eq!(
+            image::open(&high).unwrap().into_rgba8().dimensions(),
+            (513, 513)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

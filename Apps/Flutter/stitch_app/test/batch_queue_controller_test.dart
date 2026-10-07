@@ -991,6 +991,51 @@ void main() {
   );
 
   test(
+    'completed batch export waits for raised shared memory budget',
+    () async {
+      await _makeFolder(parent, 'memory-export-pending', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1);
+      final job = api.jobs.values.single;
+
+      controller.desiredMemoryBudgetMiB = 256;
+      await api.finishRender(job.id);
+      await controller.tick();
+      await _waitUntil(
+        () =>
+            controller.queues.single.items.single.state == BatchItemState.ready,
+      );
+      final deferred = (await tasks.loadById(item.id))!;
+      expect(deferred.phase, StitchPhase.completed);
+      expect(deferred.stage, 'export-pending');
+      expect(api.exports, 0);
+
+      controller.desiredMemoryBudgetMiB = 1024;
+      await controller.tick();
+      await _waitUntil(() => api.exports == 1);
+      expect(job.operation, 'export');
+      await api.finishExport(job.id);
+      await controller.tick();
+      await _waitUntil(
+        () =>
+            controller.queues.single.items.single.state ==
+            BatchItemState.completed,
+      );
+      expect((await tasks.loadById(item.id))!.phase, StitchPhase.completed);
+      expect(api.exports, 1);
+    },
+  );
+
+  test(
     'Android runtime guard failure defers a batch start without creating output',
     () async {
       const channel = MethodChannel('test.batch-runtime-guard');

@@ -114,7 +114,16 @@ fn default_local_texture_warp() -> bool {
     true
 }
 fn default_neighbor_mode() -> String {
-    "four".into()
+    "eight".into()
+}
+
+fn normalize_neighbor_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        // These values were persisted by older builds. They remain readable,
+        // but all product execution now uses the fixed eight-neighbor graph.
+        "four" | "eight" | "adaptive" => Some("eight"),
+        _ => None,
+    }
 }
 fn default_seam_blend_mode() -> String {
     "feather".into()
@@ -141,6 +150,120 @@ struct InputTile {
     path: String,
     #[serde(default, rename = "forceGrid")]
     force_grid: bool,
+    #[serde(default, rename = "placementConstraint")]
+    placement_constraint: Option<InputPlacementConstraint>,
+}
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PlacementConstraintKind {
+    GridPrior,
+    HardGridLock,
+}
+
+impl PlacementConstraintKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GridPrior => "gridPrior",
+            Self::HardGridLock => "hardGridLock",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PlacementConstraintOrigin {
+    Operator,
+    SystemFallback,
+    LegacyUnknown,
+}
+
+impl PlacementConstraintOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::SystemFallback => "systemFallback",
+            Self::LegacyUnknown => "legacyUnknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputPlacementConstraint {
+    kind: PlacementConstraintKind,
+    origin: PlacementConstraintOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedPlacementConstraint {
+    kind: Option<PlacementConstraintKind>,
+    origin: Option<PlacementConstraintOrigin>,
+}
+
+impl ResolvedPlacementConstraint {
+    fn none() -> Self {
+        Self {
+            kind: None,
+            origin: None,
+        }
+    }
+
+    fn hard_grid_lock(origin: PlacementConstraintOrigin) -> Self {
+        Self {
+            kind: Some(PlacementConstraintKind::HardGridLock),
+            origin: Some(origin),
+        }
+    }
+
+    fn is_hard_grid_lock(self) -> bool {
+        self.kind == Some(PlacementConstraintKind::HardGridLock)
+    }
+
+    fn diagnostic(self) -> Value {
+        json!({
+            "kind":self.kind.map(PlacementConstraintKind::as_str).unwrap_or("none"),
+            "origin":self.origin.map(PlacementConstraintOrigin::as_str)
+        })
+    }
+}
+
+impl InputTile {
+    fn resolved_placement_constraint(&self) -> Result<ResolvedPlacementConstraint> {
+        match (self.force_grid, self.placement_constraint) {
+            (
+                true,
+                Some(InputPlacementConstraint {
+                    kind: PlacementConstraintKind::GridPrior,
+                    ..
+                }),
+            ) => Err(Error::Invalid(
+                "forceGrid cannot be combined with placementConstraint.kind gridPrior".into(),
+            )),
+            (
+                true,
+                Some(InputPlacementConstraint {
+                    kind: PlacementConstraintKind::HardGridLock,
+                    origin,
+                }),
+            ) => Ok(ResolvedPlacementConstraint::hard_grid_lock(origin)),
+            (true, None) => Ok(ResolvedPlacementConstraint::hard_grid_lock(
+                PlacementConstraintOrigin::LegacyUnknown,
+            )),
+            (false, Some(constraint)) => Ok(ResolvedPlacementConstraint {
+                kind: Some(constraint.kind),
+                origin: Some(constraint.origin),
+            }),
+            (false, None) => Ok(ResolvedPlacementConstraint::none()),
+        }
+    }
+}
+
+fn placement_constraint_diagnostics(constraints: &[ResolvedPlacementConstraint]) -> Value {
+    json!({
+        "tiles":constraints.iter().map(|constraint| constraint.diagnostic()).collect::<Vec<_>>(),
+        "hardGridLockCount":constraints.iter().filter(|constraint| constraint.is_hard_grid_lock()).count(),
+        "gridPriorCount":constraints.iter().filter(|constraint| constraint.kind == Some(PlacementConstraintKind::GridPrior)).count()
+    })
 }
 #[derive(Clone)]
 struct Constraint {
@@ -3135,10 +3258,14 @@ pub fn reorient_layout_to_grid_center(layout: &mut Value) -> std::result::Result
 fn align_measured_grid_only(
     req: Request,
     tiles: Vec<CaptureTile>,
-    forced_grid_indices: Vec<bool>,
+    placement_constraints: Vec<ResolvedPlacementConstraint>,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     alignment_started: std::time::Instant,
 ) -> std::result::Result<Value, SphericalFailure> {
+    let forced_grid_indices = placement_constraints
+        .iter()
+        .map(|constraint| constraint.is_hard_grid_lock())
+        .collect::<Vec<_>>();
     let estimate = grid_overlap::estimate(
         req.rows,
         req.columns,
@@ -3164,16 +3291,15 @@ fn align_measured_grid_only(
         }),
     };
     if req.refine_grid_neighbors {
-        // Keep the measured central step as a grid fallback, while reusing the
-        // existing four-neighbor visual-ray solver for every usable adjacent
-        // pair. No all-pairs comparisons are introduced by this path.
+        // Keep the measured central step as a grid fallback while refining
+        // with the same fixed eight-neighbor visual-ray graph as manual mode.
         let central_overlap = estimate.report.clone();
         let mut refined_req = req;
         refined_req.auto_grid_overlap = false;
         refined_req.refine_grid_neighbors = false;
         refined_req.placement_mode = "grid-assisted".into();
         refined_req.allow_nominal_grid_fallback = true;
-        refined_req.neighbor_mode = "four".into();
+        refined_req.neighbor_mode = "eight".into();
         let horizontal_fov =
             2.0 * (f64::from(refined_req.source_width) / (2.0 * refined_req.fx)).atan();
         let vertical_fov =
@@ -3188,10 +3314,10 @@ fn align_measured_grid_only(
         layout["report"]["autoGridOverlap"] = json!(true);
         layout["report"]["refineGridNeighbors"] = json!(true);
         layout["report"]["gridOverlapEstimate"] = central_overlap.clone();
-        layout["report"]["geometryModel"] = json!("central-overlap+four-neighbor-visual-ray-grid");
+        layout["report"]["geometryModel"] = json!("central-overlap+eight-neighbor-visual-ray-grid");
         layout["report"]["gridNeighborRefinement"] = json!({
             "enabled": true,
-            "strategy": "existing-four-neighbor-visual-ray-solver",
+            "strategy": "fixed-eight-neighbor-visual-ray-solver",
             "allPairsMatching": false,
             "fallbackSource": "centralMeasuredOverlap",
             "visualTileCount": layout["report"]["visualTileCount"],
@@ -3286,6 +3412,7 @@ fn align_measured_grid_only(
         "gridEstimatedTileIndices":(0..tiles.len()).collect::<Vec<_>>(),
         "forcedGridTileCount":forced_grid_indices.iter().filter(|v| **v).count(),
         "forcedGridTileIndices":forced_grid_indices.iter().enumerate().filter_map(|(i,v)| v.then_some(i)).collect::<Vec<_>>(),
+        "placementConstraints":placement_constraint_diagnostics(&placement_constraints),
         "qualityStatus":"needs-visual-review",
         "qualityWarnings":["all grid positions are estimated from central overlap samples; inspect the complete panorama visually"],
         "estimatedPositionsVerified":false,
@@ -3321,7 +3448,8 @@ fn align_measured_grid_only(
     let layout_tiles = tiles.iter().enumerate().map(|(index, tile)| json!({
         "row":tile.row,"column":tile.column,"path":tile.path,
         "width":req.source_width,"height":req.source_height,"fx":req.fx,"fy":req.fy,"cx":req.cx,"cy":req.cy,
-        "cameraToWorld":poses[index],"positionSource":"gridEstimated","forceGrid":forced_grid_indices[index]
+        "cameraToWorld":poses[index],"positionSource":"gridEstimated","forceGrid":forced_grid_indices[index],
+        "placementConstraint":placement_constraints[index].diagnostic()
     })).collect::<Vec<_>>();
     let mut layout = json!({"schemaVersion":1,"projection":"spherical","tiles":layout_tiles,"renderBlendMode":req.seam_blend_mode,"report":report});
     reorient_layout_to_grid_center(&mut layout).map_err(|message| SphericalFailure {
@@ -4142,12 +4270,10 @@ fn validate(req: &Request) -> Result<()> {
             "placementMode must be visual or grid-assisted".into(),
         ));
     }
-    if req.neighbor_mode != "four"
-        && req.neighbor_mode != "eight"
-        && req.neighbor_mode != "adaptive"
-    {
+    if normalize_neighbor_mode(&req.neighbor_mode).is_none() {
         return Err(Error::Invalid(
-            "neighborMode must be 'four' or 'eight'".into(),
+            "neighborMode must be four, eight, or adaptive (legacy values are normalized to eight)"
+                .into(),
         ));
     }
     if !req.auto_grid_overlap {
@@ -4212,6 +4338,7 @@ fn validate(req: &Request) -> Result<()> {
     }
     let mut cells = vec![false; req.tiles.len()];
     for t in &req.tiles {
+        t.resolved_placement_constraint()?;
         if t.row >= req.rows || t.column >= req.columns || t.path.trim().is_empty() {
             return Err(Error::Invalid("tile cell/path is invalid".into()));
         }
@@ -4255,10 +4382,15 @@ fn align(
                 .unwrap_or(1),
         )
         .max(1);
-    let mut forced_grid_indices = vec![false; tiles.len()];
+    let mut placement_constraints = vec![ResolvedPlacementConstraint::none(); tiles.len()];
     for tile in &req.tiles {
-        forced_grid_indices[tile.row * req.columns + tile.column] = tile.force_grid;
+        placement_constraints[tile.row * req.columns + tile.column] =
+            tile.resolved_placement_constraint()?;
     }
+    let forced_grid_indices = placement_constraints
+        .iter()
+        .map(|constraint| constraint.is_hard_grid_lock())
+        .collect::<Vec<_>>();
     let mut job = StitchJob::new(StitchOptions {
         rows: req.rows,
         columns: req.columns,
@@ -4290,7 +4422,7 @@ fn align(
         return align_measured_grid_only(
             req,
             tiles,
-            forced_grid_indices,
+            placement_constraints,
             checkpoint,
             alignment_started,
         );
@@ -5020,6 +5152,7 @@ fn align(
         .enumerate()
         .filter_map(|(index, forced)| forced.then_some(index))
         .collect::<Vec<_>>());
+    report["placementConstraints"] = placement_constraint_diagnostics(&placement_constraints);
     report["connectedTileCount"] =
         json!(visual_seen.iter().filter(|connected| **connected).count());
     report["visualTileCount"] = json!(visual_seen.iter().filter(|connected| **connected).count());
@@ -5181,7 +5314,8 @@ fn align(
                 "visualComponentId":component_by_tile[i],
                 "visualConnectedToReference":visual_seen[i],
                 "gridBridgeRequired":!visual_seen[i],
-                "forceGrid":forced_grid_indices[i]
+                "forceGrid":forced_grid_indices[i],
+                "placementConstraint":placement_constraints[i].diagnostic()
             });
             if let Some(warp) = source_plane_warps
                 .get(i)
@@ -5222,11 +5356,14 @@ pub fn align_json_with_checkpoint(
     input: &str,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<Value, SphericalFailure> {
-    let request: Request = serde_json::from_str(input).map_err(|e| SphericalFailure {
+    let mut request: Request = serde_json::from_str(input).map_err(|e| SphericalFailure {
         code: "INVALID_REQUEST",
         message: format!("invalid spherical request JSON: {e}"),
         diagnostics: None,
     })?;
+    if let Some(normalized) = normalize_neighbor_mode(&request.neighbor_mode) {
+        request.neighbor_mode = normalized.into();
+    }
     align(request, checkpoint)
 }
 
@@ -6127,18 +6264,21 @@ mod tests {
                     column: 0,
                     path: "fixture-0".into(),
                     force_grid: false,
+                    placement_constraint: None,
                 },
                 InputTile {
                     row: 0,
                     column: 1,
                     path: "fixture-1".into(),
                     force_grid: false,
+                    placement_constraint: None,
                 },
                 InputTile {
                     row: 0,
                     column: 2,
                     path: "fixture-2".into(),
                     force_grid: false,
+                    placement_constraint: None,
                 },
             ],
             fx: 1000.0,
@@ -6373,7 +6513,7 @@ mod tests {
             "solverParameters":current_pixel_solver_parameters(),
             "grid":{"rows":1,"columns":2},
             "intrinsics":{"fx":100.0,"fy":100.0,"cx":50.0,"cy":50.0,"sourceWidth":100,"sourceHeight":100},
-            "matchingParameters":{"featureType":"sift","matcherType":"bf","registrationMegapixels":2.0,"neighborMode":"four"},
+            "matchingParameters":{"featureType":"sift","matcherType":"bf","registrationMegapixels":2.0,"neighborMode":"eight"},
             "warmStartPoses":[],
             "sourceIdentities":[{"tileIndex":0,"sha256":"a".repeat(64)},{"tileIndex":1,"sha256":"b".repeat(64)}],
             "acceptedVisualEdges":[]
@@ -6410,7 +6550,7 @@ mod tests {
         );
 
         let mut mismatched_matching = base;
-        mismatched_matching["matchingParameters"]["neighborMode"] = json!("eight");
+        mismatched_matching["matchingParameters"]["neighborMode"] = json!("four");
         rehash_snapshot(&mut mismatched_matching);
         assert!(
             refine_correspondence_snapshot_json(&request, &mismatched_matching.to_string())
@@ -6923,6 +7063,7 @@ mod tests {
                         column,
                         path: "fixture.png".into(),
                         force_grid: false,
+                        placement_constraint: None,
                     })
                 })
                 .collect(),
@@ -7397,7 +7538,7 @@ mod tests {
             "fx":100.0,"fy":100.0,"cx":50.0,"cy":50.0,"sourceWidth":100,"sourceHeight":100
         });
         let legacy: Request = serde_json::from_value(request.clone()).unwrap();
-        assert_eq!(legacy.neighbor_mode, "four");
+        assert_eq!(legacy.neighbor_mode, "eight");
         assert_eq!(legacy.workers, 1);
         let eight: Request = serde_json::from_value(serde_json::json!({
             "rows":1,"columns":2,"tiles":request["tiles"],"fx":100,"fy":100,"cx":50,"cy":50,
@@ -7427,12 +7568,10 @@ mod tests {
     #[test]
     fn eight_neighbor_edge_counts_and_order_are_stable() {
         use crate::pipeline::spherical_neighbor_pairs;
-        let four = spherical_neighbor_pairs(16, 24, false);
-        let eight = spherical_neighbor_pairs(16, 24, true);
-        assert_eq!(four.len(), 728);
+        let eight = spherical_neighbor_pairs(16, 24);
         assert_eq!(eight.len(), 1418);
         assert_eq!(&eight[..4], &[(0, 1), (0, 24), (0, 25), (1, 2)]);
-        assert_eq!(spherical_neighbor_pairs(1, 3, true), vec![(0, 1), (1, 2)]);
+        assert_eq!(spherical_neighbor_pairs(1, 3), vec![(0, 1), (1, 2)]);
         assert!(eight.iter().all(|(from, to)| {
             let fr = from / 24;
             let fc = from % 24;
@@ -7451,6 +7590,47 @@ mod tests {
     }
 
     #[test]
+    fn fixed_eight_neighbor_pairs_have_exact_local_unique_counts_at_boundaries() {
+        use crate::pipeline::spherical_neighbor_pairs;
+        for (rows, columns) in [(1, 1), (1, 7), (8, 1), (2, 2), (3, 4), (16, 24)] {
+            let pairs = spherical_neighbor_pairs(rows, columns);
+            let expected = rows * columns.saturating_sub(1)
+                + columns * rows.saturating_sub(1)
+                + 2 * rows.saturating_sub(1) * columns.saturating_sub(1);
+            assert_eq!(pairs.len(), expected, "{rows}x{columns}");
+            let unique = pairs
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(unique.len(), pairs.len());
+            assert!(pairs.iter().all(|&(a, b)| {
+                a < b
+                    && a < rows * columns
+                    && b < rows * columns
+                    && (a / columns).abs_diff(b / columns) <= 1
+                    && (a % columns).abs_diff(b % columns) <= 1
+            }));
+        }
+        assert_eq!(spherical_neighbor_pairs(2, 2).len(), 6);
+    }
+
+    #[test]
+    fn legacy_manual_and_auto_refined_neighbor_spellings_normalize_to_fixed_eight() {
+        assert_eq!(normalize_neighbor_mode("four"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("adaptive"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("eight"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("six"), None);
+        // The auto-refined entry path rebuilds a request internally; its
+        // product mode is fixed explicitly before it enters align().
+        let mut refined = grid_request(2, 2);
+        refined.neighbor_mode = "four".into();
+        refined.neighbor_mode = normalize_neighbor_mode(&refined.neighbor_mode)
+            .unwrap()
+            .into();
+        assert_eq!(refined.neighbor_mode, "eight");
+    }
+
+    #[test]
     fn force_grid_removes_incident_visual_edges_but_retains_the_cell() {
         let mut forced = vec![false; 9];
         forced[4] = true;
@@ -7465,7 +7645,56 @@ mod tests {
         let parsed: Request = serde_json::from_value(request).unwrap();
         assert!(parsed.tiles[1].force_grid);
         assert!(!parsed.tiles[0].force_grid);
+        assert_eq!(
+            parsed.tiles[1].resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint::hard_grid_lock(PlacementConstraintOrigin::LegacyUnknown)
+        );
+        assert_eq!(
+            parsed.tiles[0].resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint::none()
+        );
         assert_eq!(parsed.tiles.len(), 2);
+    }
+
+    #[test]
+    fn typed_placement_constraint_resolves_soft_prior_and_hard_lock() {
+        let soft: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"soft.png",
+            "placementConstraint":{"kind":"gridPrior","origin":"operator"}
+        }))
+        .unwrap();
+        assert_eq!(
+            soft.resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint {
+                kind: Some(PlacementConstraintKind::GridPrior),
+                origin: Some(PlacementConstraintOrigin::Operator),
+            }
+        );
+
+        let hard: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"hard.png",
+            "placementConstraint":{"kind":"hardGridLock","origin":"systemFallback"}
+        }))
+        .unwrap();
+        assert!(hard
+            .resolved_placement_constraint()
+            .unwrap()
+            .is_hard_grid_lock());
+        assert_eq!(
+            hard.resolved_placement_constraint().unwrap().origin,
+            Some(PlacementConstraintOrigin::SystemFallback)
+        );
+
+        let contradictory: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"contradictory.png","forceGrid":true,
+            "placementConstraint":{"kind":"gridPrior","origin":"operator"}
+        }))
+        .unwrap();
+        assert!(contradictory
+            .resolved_placement_constraint()
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined"));
     }
 
     fn rx(a: f64) -> Mat {

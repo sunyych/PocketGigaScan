@@ -20,6 +20,7 @@ import 'mobile_runtime_service.dart';
 import 'mobile_storage_service.dart';
 import 'spherical_request.dart';
 import 'task_repository.dart';
+import 'task_record_service.dart';
 
 class BatchQueueController extends ChangeNotifier {
   BatchQueueController({
@@ -47,6 +48,9 @@ class BatchQueueController extends ChangeNotifier {
   final MobileStorageService? storageService;
   MobileResourceBudget? resourceBudget;
   bool resourceConfigurationReady = true;
+  int? desiredMemoryBudgetMiB;
+  int? desiredMaxConcurrentJobs;
+  int newTaskMemoryBudgetMiB = 512;
 
   /// Native jobs whose Android foreground-service timeout still needs a
   /// quiescent checkpoint. Populate this before [initialize].
@@ -1017,7 +1021,7 @@ class BatchQueueController extends ChangeNotifier {
         photos: imported.photos,
         grid: imported.grid,
         horizontalFovDegrees: imported.fovDegrees ?? 45,
-        memoryBudgetMiB: 512,
+        memoryBudgetMiB: newTaskMemoryBudgetMiB,
         workers: 1,
         phase: StitchPhase.imported,
         cameraProfileId: imported.cameraProfileId,
@@ -1944,6 +1948,17 @@ class BatchQueueController extends ChangeNotifier {
       );
       return;
     }
+    if (!await _completedExportFitsMemoryBudget(task)) {
+      await _deferCompletedExport(
+        queue,
+        item,
+        task,
+        BatchItemState.ready,
+        '等待共享内存预算释放后再导出整图',
+        generation,
+      );
+      return;
+    }
     if (requireLargeJobApproval && runtimeService != null) {
       if (!resourceConfigurationReady) {
         await _deferCompletedExport(
@@ -1993,6 +2008,17 @@ class BatchQueueController extends ChangeNotifier {
         return;
       }
     }
+    if (!await _completedExportFitsMemoryBudget(task)) {
+      await _deferCompletedExport(
+        queue,
+        item,
+        task,
+        BatchItemState.ready,
+        '共享资源预算已变化，等待释放后再导出整图',
+        generation,
+      );
+      return;
+    }
     _inFlight.add(item.id);
     await _replaceState(
       queue.id,
@@ -2036,6 +2062,17 @@ class BatchQueueController extends ChangeNotifier {
       await _saveTask(exportTask, guardItem: item.id, generation: generation);
       if (generation != _generation(item.id)) {
         _inFlight.remove(item.id);
+        return;
+      }
+      if (!await _completedExportFitsMemoryBudget(task)) {
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.ready,
+          '共享资源预算已变化，等待释放后再导出整图',
+          generation,
+        );
         return;
       }
       final response = await _api.export(task.nativeJobId!, destination.path);
@@ -2169,6 +2206,35 @@ class BatchQueueController extends ChangeNotifier {
         BatchItemState.failed,
         message: '整图导出失败：$exception',
       );
+    }
+  }
+
+  Future<bool> _completedExportFitsMemoryBudget(StitchTask task) async {
+    final jobId = task.nativeJobId;
+    if (jobId == null) return false;
+    try {
+      final status = await _api.status(jobId);
+      final capsResponse = await _api.capabilities();
+      final caps =
+          capsResponse['capabilities'] as Map<String, Object?>? ?? const {};
+      final requested =
+          (status['memoryBudgetMiB'] as num? ?? task.memoryBudgetMiB).toInt();
+      final nativeLimit = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+          .toInt();
+      final effectiveLimit = desiredMemoryBudgetMiB == null
+          ? nativeLimit
+          : math.min(nativeLimit, desiredMemoryBudgetMiB!);
+      final held = (caps['reservedMemoryMiB'] as num? ?? 0).toInt();
+      final activeJobs = (caps['activeJobs'] as num? ?? 0).toInt();
+      final configuredJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+      final slotLimit = desiredMaxConcurrentJobs == null
+          ? configuredJobs
+          : math.min(configuredJobs, desiredMaxConcurrentJobs!);
+      return requested <= effectiveLimit &&
+          held + requested <= effectiveLimit &&
+          activeJobs < slotLimit;
+    } on Object {
+      return false;
     }
   }
 
@@ -2440,13 +2506,40 @@ class BatchQueueController extends ChangeNotifier {
       if (!_disposed) notifyListeners();
       return;
     }
+    final configuredMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+        .toInt();
+    final configuredJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    if (desiredMemoryBudgetMiB != null &&
+        (configuredMemory != desiredMemoryBudgetMiB ||
+            (desiredMaxConcurrentJobs != null &&
+                configuredJobs != desiredMaxConcurrentJobs))) {
+      try {
+        final updated = await _api.configureResources(
+          totalCpuWorkers: (caps['totalCpuWorkers'] as num? ?? 1).toInt(),
+          totalMemoryBudgetMiB: desiredMemoryBudgetMiB!,
+          maxConcurrentJobs: desiredMaxConcurrentJobs ?? configuredJobs,
+        );
+        caps = updated['capabilities'] as Map<String, Object?>? ?? caps;
+      } on NativeJobException catch (exception) {
+        if (exception.code != 'RESOURCE_BUSY') rethrow;
+        // Keep active reservations. The desired cap below prevents any new
+        // starts until it can be applied on a later queue tick.
+      }
+    }
     var reservedWorkers = (caps['reservedWorkers'] as num? ?? 0).toInt();
     final totalWorkers = (caps['totalCpuWorkers'] as num? ?? 1).toInt();
     final logical = (caps['logicalCpuCount'] as num? ?? 1).toInt();
     var reservedMemory = (caps['reservedMemoryMiB'] as num? ?? 0).toInt();
-    final totalMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024).toInt();
+    final configuredTotalMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+        .toInt();
+    final totalMemory = desiredMemoryBudgetMiB == null
+        ? configuredTotalMemory
+        : math.min(configuredTotalMemory, desiredMemoryBudgetMiB!);
     var activeJobs = (caps['activeJobs'] as num? ?? 0).toInt();
-    final maxJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    final configuredMaxJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    final maxJobs = desiredMaxConcurrentJobs == null
+        ? configuredMaxJobs
+        : math.min(configuredMaxJobs, desiredMaxConcurrentJobs!);
     final maxWorkers = (caps['maxWorkersPerJob'] as num? ?? 32).toInt();
     final candidates = [
       for (final queue in _queues)
@@ -2633,13 +2726,17 @@ class BatchQueueController extends ChangeNotifier {
       final requestedMemory = resuming
           ? ((nativeOperationStatus['memoryBudgetMiB'] as num?)?.toInt() ??
                 task.memoryBudgetMiB)
-          : task.memoryBudgetMiB.clamp(128, 4096).toInt();
+          : task.memoryBudgetMiB.clamp(128, 128 * 1024).toInt();
       final budget = resourceBudget;
-      final memory = requireLargeJobApproval && budget != null
+      final mobileMemory =
+          !resuming && requireLargeJobApproval && budget != null
           ? math
                 .min(requestedMemory, budget.recommendedTotalMemoryBudgetMiB)
                 .toInt()
           : requestedMemory;
+      final memory = !resuming && desiredMemoryBudgetMiB != null
+          ? math.min(mobileMemory, desiredMemoryBudgetMiB!).toInt()
+          : mobileMemory;
       final availableWorkers = totalWorkers - reservedWorkers;
       final requestedWorkers = resuming
           ? ((nativeOperationStatus['operationWorkers'] as num?)?.toInt() ??
@@ -2721,7 +2818,6 @@ class BatchQueueController extends ChangeNotifier {
             nativeJobId: output.path,
             phase: StitchPhase.queued,
             workers: workers,
-            memoryBudgetMiB: memory,
             stage: 'start-intent',
           );
           await _saveTask(intent, guardItem: item.id, generation: generation);
@@ -3054,6 +3150,9 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<StitchTask?> taskForItem(BatchQueueItem item) => _loadTask(item);
+
+  Future<TaskRecordSnapshot?> taskRecordFor(String taskId) =>
+      TaskRecordService(_taskRepository).loadRecord(taskId);
 
   ({int index, BatchQueue queue, BatchQueueItem item})? _find(
     String queueId,

@@ -17,8 +17,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|value| value.to_string_lossy().parse::<usize>())
         .transpose()?
         .unwrap_or(128);
-    if !(32..=4096).contains(&budget) {
-        return Err("memoryBudgetMiB must be 32..=4096".into());
+    if !(32..=lumia_gigascan_core::job_resources::MAX_JOB_MEMORY_MIB).contains(&budget) {
+        return Err(format!(
+            "memoryBudgetMiB must be 32..={} MiB",
+            lumia_gigascan_core::job_resources::MAX_JOB_MEMORY_MIB
+        )
+        .into());
     }
     let layout: Value = serde_json::from_slice(&fs::read(&layout_path)?)?;
     let width = u32::try_from(layout["width"].as_u64().ok_or("layout width is missing")?)?;

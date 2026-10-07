@@ -2,6 +2,7 @@ use image::{GrayImage, Luma};
 use lumia_gigascan_core::ffi::{lumia_gigascan_free, lumia_gigascan_spherical_json};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     ffi::{CStr, CString},
     fs,
     sync::atomic::{AtomicU64, Ordering},
@@ -119,7 +120,35 @@ fn serial_and_parallel_low_contrast_retry_preserve_edge_results() {
     }
     let serial_edges = edges(&serial);
     let parallel_edges = edges(&parallel);
-    assert_eq!(serial_edges.as_array().unwrap().len(), 4);
+    let serial_edge_list = serial_edges.as_array().unwrap();
+    assert_eq!(serial_edge_list.len(), 6);
+    let pairs = serial_edge_list
+        .iter()
+        .map(|edge| {
+            let from = edge["from"].as_u64().unwrap();
+            let to = edge["to"].as_u64().unwrap();
+            (from.min(to), from.max(to))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pairs.len(),
+        serial_edge_list.len(),
+        "neighbor pairs must be unique"
+    );
+    assert_eq!(
+        pairs,
+        [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+            .into_iter()
+            .collect(),
+        "a 2x2 grid has four cardinal pairs and both immediate diagonals"
+    );
+    assert_eq!(
+        pairs
+            .iter()
+            .filter(|(from, to)| (*from, *to) == (0, 3) || (*from, *to) == (1, 2))
+            .count(),
+        2
+    );
     assert_eq!(
         serial_edges
             .as_array()

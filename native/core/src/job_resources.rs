@@ -8,8 +8,169 @@ use std::{
 pub const MAX_CONCURRENT_JOBS: usize = 8;
 pub const MAX_WORKERS_PER_JOB: usize = 32;
 pub const MIN_JOB_MEMORY_MIB: usize = 128;
-pub const MAX_JOB_MEMORY_MIB: usize = 4096;
-pub const MAX_TOTAL_MEMORY_MIB: usize = 65_536;
+pub const MIN_EXPORT_MEMORY_MIB: usize = 16;
+/// Hard accounting ceiling; the UI recommends a lower value based on measured headroom.
+pub const MAX_JOB_MEMORY_MIB: usize = 131_072;
+pub const MAX_TOTAL_MEMORY_MIB: usize = 131_072;
+pub const PYRAMID_WORKER_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Convert a MiB reservation to bytes without relying on platform-sized multiplication.
+pub fn checked_memory_budget_bytes(memory_budget_mib: usize) -> Option<u64> {
+    u64::try_from(memory_budget_mib)
+        .ok()?
+        .checked_mul(1024 * 1024)
+}
+
+fn kibibytes_to_mib(kibibytes: u64) -> Option<usize> {
+    usize::try_from(kibibytes / 1024).ok()
+}
+
+/// Current physical memory and OS-reported available headroom, in MiB.
+/// Mobile callers should prefer the platform runtime's validated live reading.
+pub fn system_memory_mib() -> Option<(usize, usize)> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            memory_load: u32,
+            total_physical: u64,
+            available_physical: u64,
+            total_page_file: u64,
+            available_page_file: u64,
+            total_virtual: u64,
+            available_virtual: u64,
+            available_extended_virtual: u64,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+        }
+        let mut status = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_physical: 0,
+            available_physical: 0,
+            total_page_file: 0,
+            available_page_file: 0,
+            total_virtual: 0,
+            available_virtual: 0,
+            available_extended_virtual: 0,
+        };
+        // SAFETY: the status structure matches MEMORYSTATUSEX and is initialized with its size.
+        if unsafe { GlobalMemoryStatusEx(&mut status) } == 0 {
+            return None;
+        }
+        return Some((
+            kibibytes_to_mib(status.total_physical / 1024)?,
+            kibibytes_to_mib(status.available_physical / 1024)?,
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let contents = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let mut total_kib = None;
+        let mut available_kib = None;
+        for line in contents.lines() {
+            let (key, value) = line.split_once(':')?;
+            let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
+            match key {
+                "MemTotal" => total_kib = Some(kib),
+                "MemAvailable" => available_kib = Some(kib),
+                _ => {}
+            }
+        }
+        return Some((
+            kibibytes_to_mib(total_kib?)?,
+            kibibytes_to_mib(available_kib?)?,
+        ));
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
+
+#[cfg(test)]
+mod memory_budget_tests {
+    use super::*;
+
+    #[test]
+    fn memory_budget_conversion_uses_checked_mib_arithmetic() {
+        assert_eq!(checked_memory_budget_bytes(128), Some(128 * 1024 * 1024));
+        assert_eq!(
+            checked_memory_budget_bytes(65_536),
+            Some(65_536_u64 * 1024 * 1024)
+        );
+        assert_eq!(
+            checked_memory_budget_bytes(MAX_JOB_MEMORY_MIB),
+            Some(MAX_JOB_MEMORY_MIB as u64 * 1024 * 1024)
+        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(checked_memory_budget_bytes(usize::MAX), None);
+    }
+}
+
+#[cfg(test)]
+mod pending_limit_tests {
+    use super::*;
+
+    #[test]
+    fn pending_lower_limits_atomically_block_new_admissions_until_drain() {
+        let current = Limits {
+            total_cpu_workers: 8,
+            total_memory_mib: 32_768,
+            max_concurrent_jobs: 8,
+        };
+        let pending = Limits {
+            total_cpu_workers: 4,
+            total_memory_mib: 512,
+            max_concurrent_jobs: 1,
+        };
+        let effective = admission_limits(current, Some(pending));
+        assert_eq!(effective.total_cpu_workers, 4);
+        assert_eq!(effective.total_memory_mib, 512);
+        assert_eq!(effective.max_concurrent_jobs, 1);
+        assert!(!can_reserve(effective, 3, 3, 384, 1, 128));
+        assert!(!can_reserve(effective, 0, 0, 512, 1, 128));
+        assert!(can_reserve(effective, 0, 0, 0, 1, 128));
+    }
+
+    #[test]
+    fn pending_limits_apply_only_after_existing_reservations_fit() {
+        let current = Limits {
+            total_cpu_workers: 8,
+            total_memory_mib: 32_768,
+            max_concurrent_jobs: 8,
+        };
+        let pending = Limits {
+            total_cpu_workers: 4,
+            total_memory_mib: 512,
+            max_concurrent_jobs: 1,
+        };
+        let mut state = State {
+            limits: current,
+            pending_limits: Some(pending),
+            reservations: BTreeMap::from([(
+                PathBuf::from("held-job"),
+                Reservation {
+                    workers: 2,
+                    memory_mib: 1024,
+                    output: PathBuf::from("held-output"),
+                },
+            )]),
+        };
+        apply_pending_if_drained(&mut state);
+        assert_eq!(state.limits.total_memory_mib, current.total_memory_mib);
+        assert!(state.pending_limits.is_some());
+
+        state.reservations.clear();
+        apply_pending_if_drained(&mut state);
+        assert_eq!(state.limits.total_memory_mib, pending.total_memory_mib);
+        assert_eq!(state.limits.max_concurrent_jobs, 1);
+        assert!(state.pending_limits.is_none());
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -28,7 +189,61 @@ struct Reservation {
 #[derive(Debug)]
 struct State {
     limits: Limits,
+    pending_limits: Option<Limits>,
     reservations: BTreeMap<PathBuf, Reservation>,
+}
+
+fn admission_limits(current: Limits, pending: Option<Limits>) -> Limits {
+    let Some(pending) = pending else {
+        return current;
+    };
+    Limits {
+        total_cpu_workers: current.total_cpu_workers.min(pending.total_cpu_workers),
+        total_memory_mib: current.total_memory_mib.min(pending.total_memory_mib),
+        max_concurrent_jobs: current.max_concurrent_jobs.min(pending.max_concurrent_jobs),
+    }
+}
+
+fn usage_fits(limits: Limits, jobs: usize, workers: usize, memory_mib: usize) -> bool {
+    jobs <= limits.max_concurrent_jobs
+        && workers <= limits.total_cpu_workers
+        && memory_mib <= limits.total_memory_mib
+}
+
+fn can_reserve(
+    limits: Limits,
+    jobs: usize,
+    workers: usize,
+    memory_mib: usize,
+    requested_workers: usize,
+    requested_memory_mib: usize,
+) -> bool {
+    usage_fits(
+        limits,
+        jobs.saturating_add(1),
+        workers.saturating_add(requested_workers),
+        memory_mib.saturating_add(requested_memory_mib),
+    )
+}
+
+fn reservation_usage(state: &State) -> (usize, usize, usize) {
+    state
+        .reservations
+        .values()
+        .fold((0, 0, 0), |(jobs, workers, memory), item| {
+            (jobs + 1, workers + item.workers, memory + item.memory_mib)
+        })
+}
+
+fn apply_pending_if_drained(state: &mut State) {
+    let Some(pending) = state.pending_limits else {
+        return;
+    };
+    let (jobs, workers, memory) = reservation_usage(state);
+    if usage_fits(pending, jobs, workers, memory) {
+        state.limits = pending;
+        state.pending_limits = None;
+    }
 }
 
 fn logical_cpu_count() -> usize {
@@ -48,6 +263,7 @@ fn state() -> &'static Mutex<State> {
                 total_memory_mib: 1024,
                 max_concurrent_jobs: 2,
             },
+            pending_limits: None,
             reservations: BTreeMap::new(),
         })
     })
@@ -59,6 +275,13 @@ pub fn logical_cpus() -> usize {
 
 pub fn limits() -> Limits {
     state().lock().unwrap_or_else(|e| e.into_inner()).limits
+}
+
+pub fn pending_limits() -> Option<Limits> {
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .pending_limits
 }
 
 pub fn usage() -> (usize, usize, usize) {
@@ -91,21 +314,18 @@ pub fn configure(
         ));
     }
     let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
-    let (jobs, workers, memory) =
-        guard
-            .reservations
-            .values()
-            .fold((0, 0, 0), |(jobs, workers, memory), item| {
-                (jobs + 1, workers + item.workers, memory + item.memory_mib)
-            });
-    if total_cpu_workers < workers || total_memory_mib < memory || max_concurrent_jobs < jobs {
-        return Err(format!("requested limits are below active reservations (jobs={jobs}, workers={workers}, memoryMiB={memory})"));
-    }
-    guard.limits = Limits {
+    let requested = Limits {
         total_cpu_workers,
         total_memory_mib,
         max_concurrent_jobs,
     };
+    let (jobs, workers, memory) = reservation_usage(&guard);
+    if !usage_fits(requested, jobs, workers, memory) {
+        guard.pending_limits = Some(requested);
+        return Err(format!("requested limits are below active reservations (jobs={jobs}, workers={workers}, memoryMiB={memory})"));
+    }
+    guard.limits = requested;
+    guard.pending_limits = None;
     Ok(guard.limits)
 }
 
@@ -137,17 +357,16 @@ pub fn reserve(
     {
         return Err("output path conflicts with another active operation".into());
     }
-    let (jobs, workers_used, memory_used) =
-        guard
-            .reservations
-            .values()
-            .fold((0, 0, 0), |(jobs, workers, memory), item| {
-                (jobs + 1, workers + item.workers, memory + item.memory_mib)
-            });
-    if jobs >= guard.limits.max_concurrent_jobs
-        || workers_used.saturating_add(workers) > guard.limits.total_cpu_workers
-        || memory_used.saturating_add(memory_mib) > guard.limits.total_memory_mib
-    {
+    let (jobs, workers_used, memory_used) = reservation_usage(&guard);
+    let effective = admission_limits(guard.limits, guard.pending_limits);
+    if !can_reserve(
+        effective,
+        jobs,
+        workers_used,
+        memory_used,
+        workers,
+        memory_mib,
+    ) {
         return Err("native job resource pool is full".into());
     }
     guard.reservations.insert(
@@ -162,12 +381,10 @@ pub fn reserve(
 }
 
 pub fn release(job_id: &Path) -> bool {
-    state()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .reservations
-        .remove(&normalized(job_id))
-        .is_some()
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
+    let removed = guard.reservations.remove(&normalized(job_id)).is_some();
+    apply_pending_if_drained(&mut guard);
+    removed
 }
 
 fn normalized(path: &Path) -> PathBuf {
@@ -262,6 +479,41 @@ mod tests {
         assert!(reserve(&third, &third, 1, 128).is_ok());
         release(&second);
         release(&third);
+        configure(
+            original.total_cpu_workers,
+            original.total_memory_mib,
+            original.max_concurrent_jobs,
+        )
+        .unwrap();
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn sixteen_gib_jobs_respect_shared_pool_and_active_lowering() {
+        let _guard = lock();
+        if logical_cpus() < 2 {
+            return;
+        }
+        let base = root();
+        let original = limits();
+        configure(2, 32 * 1024, 2).unwrap();
+        let first = base.join("sixteen-gib-one");
+        let second = base.join("sixteen-gib-two");
+        let third = base.join("sixteen-gib-three");
+        assert!(reserve(&first, &first, 1, 16 * 1024).is_ok());
+        assert!(reserve(&second, &second, 1, 16 * 1024).is_ok());
+        assert!(reserve(&third, &third, 1, 16 * 1024).is_err());
+        assert_eq!(usage(), (2, 2, 32 * 1024));
+        assert!(configure(2, 16 * 1024, 2).is_err());
+        assert_eq!(usage(), (2, 2, 32 * 1024));
+        assert!(release(&first));
+        assert_eq!(usage(), (1, 1, 16 * 1024));
+        assert!(configure(2, 16 * 1024, 2).is_ok());
+        assert!(reserve(&third, &third, 1, 16 * 1024).is_err());
+        assert!(release(&second));
+        assert_eq!(usage(), (0, 0, 0));
+        assert!(reserve(&third, &third, 1, 16 * 1024).is_ok());
+        assert!(release(&third));
         configure(
             original.total_cpu_workers,
             original.total_memory_mib,

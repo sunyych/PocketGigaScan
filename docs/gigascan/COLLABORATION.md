@@ -1,5 +1,98 @@
 # PocketGigaScan collaboration ledger
 
+## PG-058 versioned task traceability
+
+The user explicitly adds a versioned per-task master file containing source
+identity, actual placement/correction models, diagnostics, outputs and timing,
+with atomic writes and old-task resume. Parameters absent from the renderer
+remain null/notApplied. Task removal deletes records without deleting photographs
+or exported images. Viewer tracing remains optional and collapsed by default.
+
+Luna renderer owns TaskRepository and the task record service/tests; Luna geometry
+owns output-source location and viewer diagnostics/tests; Luna UI integrates the
+viewer context. Codex owns independent review and serial qualification. See the
+[implementation plan](../superpowers/plans/2026-10-06-task-traceability.md).
+
+Independent real-file review catches two integration gaps before qualification:
+persisted Rust Snapshot fields use snake_case rather than API camelCase, and
+Windows canonical source paths can use extended drive/UNC prefixes. Luna adds
+normalization and actual-storage-shape fixtures. Native layout_hash must agree
+with the owned layout bytes before output geometry is reconciled. PNG/TIFF do
+not incur a full encoded-file SHA scan during task saves; the verified JXL
+producer receipt retains that scan because dimensions cannot be decoded here.
+Failure correspondence files stay opaque and are referenced by hash/size.
+
+## PG-057 explicit placement locks and 09_13 investigation
+
+The user supplies a real DWARF photo and requests eight-neighbor texture
+matching, joint global pose optimization, bounded local correction and final
+fusion. The existing pipeline already follows that order. The preserved task
+contains a per-photo hard grid flag, which excludes its eight incident visual
+constraints; storage does not establish the flag's origin.
+
+Luna perf_neighbors owns typed native placement constraints and synthetic tests.
+Luna neighbor_audit owns Flutter lock provenance, migration, explicit lock
+controls and EN/ZH tests. Luna perf_renderer owns an ignored real-crop helper.
+Codex independently reviews changes and owns serial real-photo registrations,
+pixel/crop inspection and release qualification. Production geometry is frozen
+until the PG-056 performance runtime is copied, keeping measurements stable.
+
+Original tasks retain their hard locks. A diagnostic copy alone clears the
+central flag. Grid priors continue visual matching; only hard locks suppress it.
+No quality gate is weakened and no all-pairs matching or feather-only remedy
+is introduced. Nine-photo evidence and complete-panorama evidence are separate.
+
+Full 364-photo diagnostic registration passes the unchanged 12px edge gate;
+all eight incident center constraints are accepted. Spatially held-out center
+cardinal RMS drops from 18–21px to 1.1–1.5px. Codex checks paired unscaled crops
+from a full-layout ROI at four edges and four corners and sees improvement in
+the right building frames. The sky reference still requires grid bridges; the
+center has direct visual evidence without reference connectivity. This is not
+all-seam or full new exported-panorama acceptance. Originals and legacy lock
+storage remain unchanged.
+
+## PG-056 fixed-eight DWARF performance and memory budget
+
+The user explicitly forwards an implementation scope from a side discussion:
+fixed eight immediate neighbors, faster full-resolution rendering/cache/decode,
+bounded ROI retries and controlled measurements. An additional request adds a
+persistent whole-app auto/manual memory slider, actual total/available memory,
+resource-dependent large desktop budgets and preserved mobile/aggregate limits.
+The idle-progress repair and current PR remain intact.
+
+Luna perf_renderer owns spherical_renderer.rs and renderer tests/helpers;
+Luna perf_neighbors owns spherical.rs, pipeline/register.rs and neighbor tests.
+The retained Luna neighbor_audit slot is repurposed for resources/settings and
+benchmark tooling because a new thread would exceed the retained agent limit;
+its old geometry scope is explicitly frozen. Codex owns the authorized scope,
+implementation plan, .gitignore allowlists, independent review and serial SDK
+execution. No agent runs simultaneous SDK or real-photo benchmarks.
+
+See [scope](DWARF-PERFORMANCE-DESIGN.md) and
+[plan](../superpowers/plans/2026-10-06-dwarf-render-performance.md).
+Existing 364-photo timing was collected during concurrent verification and must
+not be reported as an isolated GigaPan speed comparison. Later isolated runs
+below use the same preserved layout and final-output endpoint.
+
+The source-built baseline and frozen candidate replay the same preserved full
+layout with four workers at 512MiB. All 7742 decoded tile fingerprints match.
+Render time decreases 4.5%, complete render/pyramid/lossless-TIFF pipeline 3.2%,
+and source decodes fall from 3762 to 2076. A separate candidate16GiB run changes
+only memory budget and is isolated from SDK builds. It decodes each of the 364
+sources once but its complete pipeline is 5.6% slower than the new 512MiB run;
+all decoded tile pixels remain identical. Larger cache capacity does not establish
+a speed multiplier. Final timings, memory observations and TIFF checks appear
+in the [qualification record](evidence/DWARF-PERFORMANCE-2026-10-06.md).
+
+Independent UI review verifies the expected eight-neighbor control changes in
+desktop, narrow-window and mobile screenshot baselines. Root's targeted 63-test
+run covers idle EN/ZH progress, resource admission, duplicate start, automatic
+export retry, explicit placement locks and output-source projection. Luna repairs
+test-only fake-async filesystem stalls without extending their wall-clock limits
+or weakening source/layout/producer-receipt qualification. UI persistence tests
+use owned temporary files; resource fixtures use an in-memory settings repository.
+Android admission refreshes live readings instead of retaining the startup value.
+
 ## PG-055 idle task progress
 
 The user reports an animated progress bar before pressing Start stitching.

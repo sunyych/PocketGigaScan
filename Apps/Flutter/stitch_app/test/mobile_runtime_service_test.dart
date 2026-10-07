@@ -5,8 +5,7 @@ import 'package:stitch_app/services/mobile_runtime_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   const channel = MethodChannel('test/mobile-runtime');
-  const productionChannel =
-      MethodChannel('com.lumiaiq.pocketgigascan/runtime');
+  const productionChannel = MethodChannel('com.lumiaiq.pocketgigascan/runtime');
   final messenger =
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
 
@@ -84,7 +83,7 @@ void main() {
         'availableStorageMiB': 100000,
         'thermalStatus': 'none',
       });
-      expect(budget.recommendedTotalMemoryBudgetMiB, 4096);
+      expect(budget.recommendedTotalMemoryBudgetMiB, 50000 ~/ 3);
       expect(budget.recommendedTotalCpuWorkers, 32);
       expect(budget.recommendedMaxConcurrentJobs, 8);
     },
@@ -143,31 +142,36 @@ void main() {
     await service.dispose();
   });
 
-  test('pending timeout reads do not auto-ack and explicit ack sends exact ids', () async {
-    final service = MobileRuntimeService(channel: channel);
-    final calls = <MethodCall>[];
-    var pending = <String>['job-a', 'job-b'];
-    messenger.setMockMethodCallHandler(channel, (call) async {
-      calls.add(call);
-      if (call.method == 'readPendingTimeoutJobs') return pending;
-      if (call.method == 'acknowledgeTimeoutJobs') {
-        final ids = (call.arguments as Map)['jobIds'] as List<Object?>;
-        pending = pending.where((id) => !ids.contains(id)).toList();
-        return true;
-      }
-      return null;
-    });
+  test(
+    'pending timeout reads do not auto-ack and explicit ack sends exact ids',
+    () async {
+      final service = MobileRuntimeService(channel: channel);
+      final calls = <MethodCall>[];
+      var pending = <String>['job-a', 'job-b'];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call);
+        if (call.method == 'readPendingTimeoutJobs') return pending;
+        if (call.method == 'acknowledgeTimeoutJobs') {
+          final ids = (call.arguments as Map)['jobIds'] as List<Object?>;
+          pending = pending.where((id) => !ids.contains(id)).toList();
+          return true;
+        }
+        return null;
+      });
 
-    expect(await service.readPendingTimeoutJobs(), ['job-a', 'job-b']);
-    expect(pending, ['job-a', 'job-b']);
-    expect(await service.acknowledgeTimeoutJobs(['job-a']), isTrue);
-    expect(await service.readPendingTimeoutJobs(), ['job-b']);
-    expect(calls.map((call) => call.method), [
-      'readPendingTimeoutJobs',
-      'acknowledgeTimeoutJobs',
-      'readPendingTimeoutJobs',
-    ]);
-    expect(calls[1].arguments, {'jobIds': ['job-a']});
-    await service.dispose();
-  });
+      expect(await service.readPendingTimeoutJobs(), ['job-a', 'job-b']);
+      expect(pending, ['job-a', 'job-b']);
+      expect(await service.acknowledgeTimeoutJobs(['job-a']), isTrue);
+      expect(await service.readPendingTimeoutJobs(), ['job-b']);
+      expect(calls.map((call) => call.method), [
+        'readPendingTimeoutJobs',
+        'acknowledgeTimeoutJobs',
+        'readPendingTimeoutJobs',
+      ]);
+      expect(calls[1].arguments, {
+        'jobIds': ['job-a'],
+      });
+      await service.dispose();
+    },
+  );
 }

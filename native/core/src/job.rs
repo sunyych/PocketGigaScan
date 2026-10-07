@@ -17,11 +17,31 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 17;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 18;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
     JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Export a freshly rendered layout for the standalone layout benchmark.
+/// Callers must use a new output directory and retain the returned receipt.
+pub fn benchmark_export_level0_tiff(
+    job_dir: &Path,
+    manifest: &Value,
+    destination: &Path,
+    memory_budget_mib: usize,
+) -> crate::Result<Value> {
+    let mut checkpoint = |_: u32, _: u32| Ok(());
+    let mut begin_commit = || Ok(());
+    crate::tiff_export::export_level0_tiff(
+        job_dir,
+        manifest,
+        destination,
+        memory_budget_mib,
+        &mut checkpoint,
+        &mut begin_commit,
+    )
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -414,7 +434,8 @@ pub fn handle(input: &str) -> Value {
 }
 fn capabilities_value(limits: Limits) -> Value {
     let (active_jobs, reserved_workers, reserved_memory_mib) = job_resources::usage();
-    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
+    let pending = job_resources::pending_limits();
+    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
 }
 fn capabilities() -> Value {
     json!({"ok":true,"capabilities":capabilities_value(job_resources::limits())})
@@ -529,7 +550,14 @@ fn start(c: Command) -> Value {
     if !(job_resources::MIN_JOB_MEMORY_MIB..=job_resources::MAX_JOB_MEMORY_MIB)
         .contains(&c.memory_budget_mib)
     {
-        return fail("INVALID_REQUEST", "memoryBudgetMiB must be 128..=4096");
+        return fail(
+            "INVALID_REQUEST",
+            format!(
+                "memoryBudgetMiB must be {}..={} MiB",
+                job_resources::MIN_JOB_MEMORY_MIB,
+                job_resources::MAX_JOB_MEMORY_MIB
+            ),
+        );
     }
     if !(1..=job_resources::MAX_WORKERS_PER_JOB).contains(&c.workers) {
         return fail("INVALID_REQUEST", "workers must be 1..=32");
@@ -1779,8 +1807,8 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
-            alignment_cache_key_for_version(17, &request, &hashes),
-            "bounded source-plane warp geometry must use cache version 17"
+            alignment_cache_key_for_version(18, &request, &hashes),
+            "fixed-eight-neighbor alignment must use cache version 18"
         );
         assert_ne!(
             key,
@@ -1906,9 +1934,22 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.memory_budget_mib, 256);
 
-        let invalid: Command = serde_json::from_value(json!({
+        let high_budget: Command = serde_json::from_value(json!({
             "command": "start",
             "memoryBudgetMiB": 4097
+        }))
+        .unwrap();
+        assert_eq!(high_budget.memory_budget_mib, 4097);
+        let high_budget_result = start(high_budget);
+        assert_eq!(high_budget_result["error"]["code"], "INVALID_REQUEST");
+        assert_eq!(
+            high_budget_result["error"]["message"],
+            "request is required"
+        );
+
+        let invalid: Command = serde_json::from_value(json!({
+            "command": "start",
+            "memoryBudgetMiB": job_resources::MAX_JOB_MEMORY_MIB + 1
         }))
         .unwrap();
         let result = start(invalid);
@@ -1945,6 +1986,10 @@ mod tests {
         assert_eq!(current["capabilities"]["activeJobs"], 1);
         assert_eq!(current["capabilities"]["reservedWorkers"], 1);
         assert_eq!(current["capabilities"]["reservedMemoryMiB"], 256);
+        assert_eq!(
+            current["capabilities"]["pendingLimits"]["totalMemoryBudgetMiB"],
+            128
+        );
         let invalid = handle(
             r#"{"command":"configureResources","totalCpuWorkers":1,"totalMemoryBudgetMiB":128,"maxConcurrentJobs":9}"#,
         );
@@ -1956,6 +2001,75 @@ mod tests {
             original.max_concurrent_jobs,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn pending_resource_lowering_blocks_stale_and_racing_reservations() {
+        let _guard = lock_jobs();
+        let original = job_resources::limits();
+        let logical = job_resources::logical_cpus();
+        if logical < 3 {
+            return;
+        }
+        let workers = logical.min(8);
+        job_resources::configure(workers, 1024, 8).unwrap();
+        let held: Vec<PathBuf> = (0..3)
+            .map(|index| temp_dir(&format!("pending-held-{index}")))
+            .collect();
+        let initial_reservations_succeeded = held
+            .iter()
+            .all(|path| job_resources::reserve(path, path, 1, 128).is_ok());
+        let lowering = job_resources::configure(workers.min(4), 512, 1);
+        let old_limit_retained = job_resources::limits().max_concurrent_jobs == 8;
+        let pending_cap_blocks_fourth = job_resources::reserve(
+            &temp_dir("pending-fourth"),
+            &temp_dir("pending-fourth"),
+            1,
+            128,
+        )
+        .is_err();
+
+        job_resources::release(&held[0]);
+        job_resources::release(&held[1]);
+        let pending_applied_with_one_existing = job_resources::limits().max_concurrent_jobs == 1
+            && job_resources::pending_limits().is_none();
+        let pending_cap_blocks_while_one_remains = job_resources::reserve(
+            &temp_dir("pending-after-drain"),
+            &temp_dir("pending-after-drain"),
+            1,
+            128,
+        )
+        .is_err();
+        job_resources::release(&held[2]);
+
+        let race_a = temp_dir("pending-race-a");
+        let race_b = temp_dir("pending-race-b");
+        let (a, b) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| job_resources::reserve(&race_a, &race_a, 1, 128));
+            let second = scope.spawn(|| job_resources::reserve(&race_b, &race_b, 1, 128));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let exactly_one_racing_reservation = a.is_ok() ^ b.is_ok();
+        if a.is_ok() {
+            job_resources::release(&race_a);
+        }
+        if b.is_ok() {
+            job_resources::release(&race_b);
+        }
+        let applied_budget_restored = job_resources::configure(
+            original.total_cpu_workers,
+            original.total_memory_mib,
+            original.max_concurrent_jobs,
+        );
+
+        assert!(initial_reservations_succeeded);
+        assert!(lowering.is_err());
+        assert!(old_limit_retained);
+        assert!(pending_cap_blocks_fourth);
+        assert!(pending_applied_with_one_existing);
+        assert!(pending_cap_blocks_while_one_remains);
+        assert!(exactly_one_racing_reservation);
+        assert!(applied_budget_restored.is_ok());
     }
 
     fn test_control(root: &Path, source: &Path) -> Arc<Control> {
@@ -2695,5 +2809,92 @@ mod tests {
         control.worker_active.store(false, Ordering::SeqCst);
         let _ = fs::remove_file(source);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sixteen_gib_render_and_pyramid_match_128_mib_tiny_fixture() {
+        use image::{Rgba, RgbaImage};
+
+        let root = temp_dir("high-memory-render");
+        let source_dir = root.join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.png");
+        RgbaImage::from_fn(16, 16, |x, y| {
+            Rgba([(x * 13) as u8, (y * 11) as u8, 91, 255])
+        })
+        .save(&source)
+        .unwrap();
+        let layout = json!({
+            "schemaVersion":1,
+            "projection":"spherical",
+            "width":32,
+            "height":24,
+            "yawMinRad":-0.01,
+            "yawMaxRad":0.01,
+            "pitchMinRad":-0.01,
+            "pitchMaxRad":0.01,
+            "tiles":[{
+                "path":source.to_string_lossy(),
+                "width":16,
+                "height":16,
+                "fx":12.0,
+                "fy":12.0,
+                "cx":7.5,
+                "cy":7.5,
+                "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]
+            }]
+        });
+        let low = root.join("low-budget");
+        let high = root.join("high-budget");
+        let low_stats = spherical_renderer::render_layout_tiles_with_options(
+            &layout,
+            &low,
+            128,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        let high_stats = spherical_renderer::render_layout_tiles_with_options(
+            &layout,
+            &high,
+            16 * 1024,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(low_stats["workersEffective"], 1);
+        assert_eq!(high_stats["workersEffective"], 1);
+        assert_eq!(high_stats["memoryAccounting"], "conservativeEstimate");
+        assert!(high_stats["sourceCacheLimitBytes"].as_u64().unwrap() > 4 * 1024 * 1024 * 1024);
+        assert_eq!(
+            fs::read(low.join("level-0/0-0.png")).unwrap(),
+            fs::read(high.join("level-0/0-0.png")).unwrap()
+        );
+        let (low_levels, _) =
+            spherical_renderer::build_pyramid_levels_with_options(&low, 32, 24, 128, 1, |_, _| {
+                true
+            })
+            .unwrap();
+        let (high_levels, _) = spherical_renderer::build_pyramid_levels_with_options(
+            &high,
+            32,
+            24,
+            16 * 1024,
+            1,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(low_levels, high_levels);
+        for level in 0..low_levels.len() {
+            let tile = format!("level-{level}/0-0.png");
+            assert_eq!(
+                fs::read(low.join(&tile)).unwrap(),
+                fs::read(high.join(&tile)).unwrap(),
+                "pyramid pixels differ at {tile}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

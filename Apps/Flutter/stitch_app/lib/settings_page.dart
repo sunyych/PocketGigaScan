@@ -4,6 +4,7 @@ import 'models/app_settings.dart';
 import 'models/stitch_quality.dart';
 import 'services/settings_controller.dart';
 import 'services/mobile_storage_service.dart';
+import 'services/memory_budget_policy.dart';
 import 'l10n/stitch_localizations.dart';
 
 class SettingsPage extends StatefulWidget {
@@ -11,25 +12,48 @@ class SettingsPage extends StatefulWidget {
     super.key,
     required this.controller,
     this.android = false,
+    this.mobile = false,
+    this.memoryReading,
     this.mobileStorageService,
   });
   final SettingsController controller;
   final bool android;
+  final bool mobile;
+  final MemoryResourceReading? memoryReading;
   final MobileStorageService? mobileStorageService;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  int? _draggingMemoryMiB;
+
   @override
   Widget build(BuildContext context) {
     final l = StitchLocalizations.of(context);
+    final reading =
+        widget.memoryReading ??
+        MemoryResourceReading(
+          totalMemoryMiB: 0,
+          availableMemoryMiB: 0,
+          valid: false,
+          source: 'fallback',
+        );
     return Scaffold(
       appBar: AppBar(title: Text(l.settingsTitle)),
       body: ListenableBuilder(
         listenable: widget.controller,
         builder: (context, _) {
           final s = widget.controller.settings;
+          final memory = MemoryBudgetPolicy.evaluate(
+            s,
+            reading,
+            mobile: widget.mobile,
+          );
+          final memorySliderValue = MemoryBudgetPolicy.sliderValue(
+            _draggingMemoryMiB ?? memory.selectedMiB,
+            memory.maximumMiB,
+          );
           return ListView(
             children: [
               ListTile(
@@ -172,11 +196,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     (v) => s.performance.copyWith(useAlignmentCache: v),
                   ),
                   _toggle(
-                    l.fourNeighborFirst,
-                    s.performance.fourNeighborFirst,
-                    (v) => s.performance.copyWith(fourNeighborFirst: v),
-                  ),
-                  _toggle(
                     l.fastRegistration,
                     s.performance.fastRegistration,
                     (v) => s.performance.copyWith(fastRegistration: v),
@@ -202,6 +221,96 @@ class _SettingsPageState extends State<SettingsPage> {
                             ),
                           ),
                   ),
+                ],
+              ),
+              ExpansionTile(
+                title: Text(l.text('应用内存预算')),
+                subtitle: Text(l.text('为整个应用设置共享预算；不会预先占用所选内存，也不代表操作系统硬内存限制。')),
+                children: [
+                  RadioGroup<MemoryBudgetMode>(
+                    groupValue: s.memoryBudgetMode,
+                    onChanged: (mode) {
+                      if (mode != null) {
+                        _draggingMemoryMiB = null;
+                        widget.controller.updateWith(
+                          (latest) => latest.copyWith(memoryBudgetMode: mode),
+                        );
+                      }
+                    },
+                    child: Column(
+                      children: [
+                        RadioListTile<MemoryBudgetMode>(
+                          title: Text(l.text('自动分配')),
+                          subtitle: Text(l.text('根据当前可用内存自动推荐。')),
+                          value: MemoryBudgetMode.automatic,
+                        ),
+                        RadioListTile<MemoryBudgetMode>(
+                          title: Text(l.text('手动设置')),
+                          subtitle: Text(l.text('限制所有并行任务共享的总预算。')),
+                          value: MemoryBudgetMode.manual,
+                        ),
+                      ],
+                    ),
+                  ),
+                  ListTile(
+                    title: Text(
+                      '${l.text('已选')}: ${_memoryLabel(memory.selectedMiB)}, '
+                      '${l.text('总内存')}: ${_memoryLabel(reading.totalMemoryMiB)}, '
+                      '${l.text('可用')}: ${_memoryLabel(reading.availableMemoryMiB)}',
+                    ),
+                    subtitle: Text(
+                      '${l.text('推荐')}: ${_memoryLabel(memory.recommendedMiB)} · '
+                      '${l.text('本次上限')}: ${_memoryLabel(memory.maximumMiB)}'
+                      '${memory.readingValid ? '' : ' · ${l.text('使用保守回退值')}'}',
+                    ),
+                  ),
+                  if (s.memoryBudgetMode == MemoryBudgetMode.manual) ...[
+                    Slider(
+                      key: const Key('total-memory-budget-slider'),
+                      value: memorySliderValue.toDouble(),
+                      min: memory.minimumMiB.toDouble(),
+                      max: memory.maximumMiB.toDouble(),
+                      divisions: memory.maximumMiB > memory.minimumMiB
+                          ? ((memory.maximumMiB - memory.minimumMiB) ~/ 128)
+                                .clamp(1, 1000)
+                          : null,
+                      label: _memoryLabel(memorySliderValue),
+                      onChanged: memory.maximumMiB > memory.minimumMiB
+                          ? (value) => setState(
+                              () => _draggingMemoryMiB = value.round(),
+                            )
+                          : null,
+                      onChangeEnd: (value) {
+                        final snapped = (value / 128).round() * 128;
+                        _draggingMemoryMiB = null;
+                        widget.controller.updateWith(
+                          (latest) => latest.copyWith(
+                            memoryBudgetMode: MemoryBudgetMode.manual,
+                            totalMemoryBudgetMiB:
+                                MemoryBudgetPolicy.sliderValue(
+                                  snapped,
+                                  memory.maximumMiB,
+                                ),
+                          ),
+                        );
+                      },
+                    ),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        for (final mark in memory.markMiB)
+                          ActionChip(
+                            label: Text(_memoryLabel(mark)),
+                            onPressed: () => widget.controller.updateWith(
+                              (latest) => latest.copyWith(
+                                memoryBudgetMode: MemoryBudgetMode.manual,
+                                totalMemoryBudgetMiB: mark,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
                 ],
               ),
               ListTile(
@@ -267,6 +376,11 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
+
+  String _memoryLabel(int memoryMiB) =>
+      memoryMiB >= 1024 && memoryMiB % 1024 == 0
+      ? '${memoryMiB ~/ 1024} GiB'
+      : '$memoryMiB MiB';
 
   Widget _toggle(String label, bool value, dynamic Function(bool) update) =>
       SwitchListTile(

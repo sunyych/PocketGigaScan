@@ -416,6 +416,10 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       }
     }
     if (!mounted) return;
+    final traceRecord = await _controller
+        .taskRecordFor(task.id)
+        .catchError((Object _) => null);
+    if (!mounted) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ExportedImageViewer(
@@ -424,6 +428,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           expectedExportFingerprint: task.exportFingerprint,
           legacyTaskAssociationPresent: true,
           legacyTaskBindingVerified: nativeVerified,
+          traceRecord: traceRecord,
           mobileStorageService: _android ? _storage : null,
           exportMimeType: switch (task.exportFormat) {
             ExportFormat.png => 'image/png',

@@ -243,12 +243,9 @@ pub(crate) fn spherical_overlap_matches(
     Ok(output)
 }
 
-/// Stable row-major cell-index pairs; callers map cells to tile indices before matching.
-pub(crate) fn spherical_neighbor_pairs(
-    rows: usize,
-    columns: usize,
-    eight: bool,
-) -> Vec<(usize, usize)> {
+/// Stable row-major pairs for the fixed eight-neighbor grid graph. Each
+/// unordered immediate cardinal or diagonal pair is emitted once.
+pub(crate) fn spherical_neighbor_pairs(rows: usize, columns: usize) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for row in 0..rows {
         for column in 0..columns {
@@ -259,10 +256,10 @@ pub(crate) fn spherical_neighbor_pairs(
             if row + 1 < rows {
                 pairs.push((from, from + columns));
             }
-            if eight && row + 1 < rows && column + 1 < columns {
+            if row + 1 < rows && column + 1 < columns {
                 pairs.push((from, from + columns + 1));
             }
-            if eight && row + 1 < rows && column > 0 {
+            if row + 1 < rows && column > 0 {
                 pairs.push((from, from + columns - 1));
             }
         }
@@ -351,7 +348,7 @@ pub(crate) fn spherical_match_edges(
     maximum_pixels: usize,
     thread_limit: i32,
     retry_contrast_threshold: f64,
-    neighbor_mode: &str,
+    _neighbor_mode: &str,
     matching_workers: usize,
     feature_type: &str,
     matcher_type: &str,
@@ -395,7 +392,7 @@ pub(crate) fn spherical_match_edges(
         ));
     }
     let mut edges = Vec::new();
-    let pairs = spherical_neighbor_pairs(rows, columns, neighbor_mode == "eight");
+    let pairs = spherical_neighbor_pairs(rows, columns);
     let initial_match_started = std::time::Instant::now();
     let effective_matching_workers = matching_workers.min(pairs.len().max(1));
     let matching_guard = FeatureBatchGuard::begin()?;
@@ -431,70 +428,6 @@ pub(crate) fn spherical_match_edges(
         });
         for result in results {
             edges.push(result.map_err(|_| Error::Registration("matching worker panicked".into()))?);
-        }
-    }
-    if neighbor_mode == "adaptive" {
-        // Add only diagonal neighbors that join separate components of the
-        // accepted cardinal graph. This keeps recovery local to unresolved
-        // regions and avoids comparing unrelated tiles.
-        let mut parent = (0..tiles.len()).collect::<Vec<_>>();
-        fn root(parent: &mut [usize], mut index: usize) -> usize {
-            while parent[index] != index {
-                index = parent[index];
-            }
-            index
-        }
-        for edge in edges.iter().filter(|edge| edge.reason == 0) {
-            let (a, b) = (root(&mut parent, edge.from), root(&mut parent, edge.to));
-            if a != b {
-                parent[b] = a;
-            }
-        }
-        let diagonals = spherical_neighbor_pairs(rows, columns, true)
-            .into_iter()
-            .filter(|(a, b)| {
-                (a / columns).abs_diff(b / columns) == 1 && (a % columns).abs_diff(b % columns) == 1
-            })
-            .filter(|(a, b)| {
-                let from = cells[&(*a / columns, *a % columns)];
-                let to = cells[&(*b / columns, *b % columns)];
-                root(&mut parent, from) != root(&mut parent, to)
-            })
-            .collect::<Vec<_>>();
-        for batch in diagonals.chunks(effective_matching_workers) {
-            checkpoint("adaptive-diagonal-matching").map_err(|_| Error::Cancelled)?;
-            let results = std::thread::scope(|scope| {
-                batch
-                    .iter()
-                    .map(|&(a, b)| {
-                        let cells = &cells;
-                        let frames = &frames;
-                        let matcher_type = matcher_type;
-                        scope.spawn(move || {
-                            let from = cells[&(a / columns, a % columns)];
-                            let to = cells[&(b / columns, b % columns)];
-                            match_spherical_pair(
-                                from,
-                                to,
-                                &frames[from],
-                                &frames[to],
-                                0.015,
-                                false,
-                                matcher_type == "flann",
-                                matching_guard_token,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|handle| handle.join())
-                    .collect::<Vec<_>>()
-            });
-            for result in results {
-                edges.push(
-                    result.map_err(|_| Error::Registration("matching worker panicked".into()))?,
-                );
-            }
         }
     }
     drop(matching_guard);

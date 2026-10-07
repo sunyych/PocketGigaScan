@@ -1,12 +1,19 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:stitch_app/l10n/stitch_localizations.dart';
 import 'package:stitch_app/models/export_fingerprint.dart';
+import 'package:stitch_app/models/grid_options.dart';
+import 'package:stitch_app/models/imported_photo.dart';
+import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/services/mobile_storage_service.dart';
+import 'package:stitch_app/services/task_record_service.dart';
 import 'package:stitch_app/widgets/exported_image_viewer.dart';
 import 'support/chinese_test_app.dart';
 
@@ -175,6 +182,362 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.binding.setSurfaceSize(null);
     });
+
+    testWidgets(
+      'JPEG XL provenance inspection is disabled without verified raster dimensions',
+      (tester) async {
+        final task = StitchTask(
+          id: 'trace-task',
+          createdAt: DateTime.utc(2026),
+          sourceDirectory: '/input',
+          outputDirectory: root.path,
+          exportPath: output.path,
+          photos: const [
+            ImportedPhoto(
+              originalName: '0_0.jpg',
+              storedPath: '/input/0_0.jpg',
+              sha256: 'hash',
+              width: 100,
+              height: 100,
+              originalOrder: 0,
+            ),
+          ],
+          grid: const GridOptions(rows: 1, columns: 1),
+          horizontalFovDegrees: 90,
+          memoryBudgetMiB: 128,
+          workers: 1,
+          phase: StitchPhase.completed,
+        );
+        final snapshot = TaskRecordSnapshot(
+          task: task,
+          schemaVersion: 2,
+          record: {
+            'outputs': {
+              'sourceManifestAssociation': 'verified',
+              'exportPath': output.path,
+            },
+            'diagnostics': {},
+          },
+        );
+        await tester.pumpWidget(_viewer(traceRecord: snapshot));
+        await _pumpViewer(tester);
+        final button = tester.widget<IconButton>(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        expect(button.onPressed, isNotNull);
+        expect(find.textContaining('此格式无法独立核对实际输出尺寸'), findsNothing);
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          tester
+              .widgetList<SelectableText>(find.byType(SelectableText))
+              .map((widget) => widget.data)
+              .join(' '),
+          contains('此格式没有可验证的导出回执'),
+        );
+        await tester.pumpWidget(_englishViewer(traceRecord: snapshot));
+        await _pumpViewer(tester);
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        final englishReason = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .map((widget) => widget.data)
+            .join(' ');
+        expect(
+          englishReason,
+          contains('No verified export receipt is available'),
+        );
+        expect(englishReason, isNot(contains('来源追踪已停用')));
+      },
+    );
+
+    testWidgets(
+      'JPEG XL verified receipt traces while mismatched layout binding is refused',
+      (tester) async {
+        final fixture = await tester.runAsync(() async {
+          const sourceHash =
+              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+          const requestHash = 'verified-request';
+          const sourcePath = r'\\?\c:\input\0_0.jpg';
+          final sourceHashes = {sourcePath: sourceHash};
+          final manifestFile = File('${root.path}/manifest.json');
+          final manifest =
+              jsonDecode(await manifestFile.readAsString())
+                  as Map<String, Object?>;
+          manifest['requestHash'] = requestHash;
+          manifest['sourceHashes'] = sourceHashes;
+          await manifestFile.writeAsString(jsonEncode(manifest));
+          final layoutFile = File('${root.path}/layout.json');
+          await layoutFile.writeAsString(
+            jsonEncode({
+              'schemaVersion': 1,
+              'projection': 'spherical',
+              'width': 4096,
+              'height': 2048,
+              'yawMinRad': -0.5,
+              'yawMaxRad': 0.5,
+              'pitchMinRad': -0.25,
+              'pitchMaxRad': 0.25,
+              'tiles': [
+                {
+                  'row': 0,
+                  'column': 0,
+                  'path': sourcePath,
+                  'width': 100,
+                  'height': 100,
+                  'fx': 50.0,
+                  'fy': 50.0,
+                  'cx': 49.5,
+                  'cy': 49.5,
+                  'cameraToWorld': [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                  'positionSource': 'visual',
+                  'directVisualEvidence': true,
+                  'placementConstraint': {
+                    'kind': 'gridPrior',
+                    'origin': 'systemFallback',
+                  },
+                },
+              ],
+              'report': {'edgeDiagnostics': []},
+            }),
+          );
+          final layoutHash = (await sha256.bind(layoutFile.openRead()).first)
+              .toString();
+          final fingerprint = await _fingerprint(output);
+          final stateFile = File('${root.path}/job-state.json');
+          await stateFile.writeAsString(
+            jsonEncode({
+              'schema_version': 1,
+              'state': 'completed',
+              'operation': 'export',
+              'export_destination': output.path,
+              'width': 4096,
+              'height': 2048,
+              'request_hash': requestHash,
+              'source_hashes': sourceHashes,
+              'layout_hash': layoutHash,
+            }),
+          );
+          Future<Map<String, Object?>> ref(File file, String relative) async {
+            final stat = await file.stat();
+            final digest = await sha256.bind(file.openRead()).first;
+            return {
+              'path': file.path,
+              'relativePath': relative,
+              'ownedByTask': true,
+              'sizeBytes': stat.size,
+              'modifiedAtMicros': stat.modified.microsecondsSinceEpoch,
+              'sha256': digest.toString(),
+              'integrityStatus': 'verified',
+            };
+          }
+
+          final layoutRef = await ref(layoutFile, 'layout.json');
+          final manifestRef = await ref(manifestFile, 'manifest.json');
+          final stateRef = await ref(stateFile, 'job-state.json');
+          expect(layoutRef['sha256'], layoutHash);
+          final exportDigest = (await sha256.bind(output.openRead()).first)
+              .toString();
+          final task = StitchTask(
+            id: 'trace-task',
+            createdAt: DateTime.utc(2026),
+            sourceDirectory: '/input',
+            outputDirectory: root.path,
+            exportPath: output.path,
+            exportFingerprint: fingerprint,
+            photos: const [
+              ImportedPhoto(
+                originalName: '0_0.jpg',
+                storedPath: r'C:\INPUT\0_0.jpg',
+                sha256: sourceHash,
+                width: 100,
+                height: 100,
+                originalOrder: 0,
+              ),
+            ],
+            grid: const GridOptions(rows: 1, columns: 1),
+            horizontalFovDegrees: 90,
+            memoryBudgetMiB: 128,
+            workers: 1,
+            phase: StitchPhase.completed,
+          );
+          final snapshot = TaskRecordSnapshot(
+            task: task,
+            schemaVersion: 2,
+            record: {
+              'outputs': {
+                'sourceManifestAssociation': 'verified',
+                'layoutStateAssociation': 'verified',
+                'layoutSha256': layoutHash,
+                'exportPath': output.path,
+                'dimensions': {'width': 4096, 'height': 2048},
+                'exportDigestStatus': 'verifiedProducerReceipt',
+                'exportSha256': exportDigest,
+                'producerReceipt': {
+                  'status': 'verified',
+                  'jobStateSha256': stateRef['sha256'],
+                  'layoutSha256': layoutHash,
+                  'requestHash': requestHash,
+                  'sourceManifestMatch': true,
+                  'destination': output.path,
+                  'format': 'jxl',
+                  'dimensions': {'width': 4096, 'height': 2048},
+                  'exportSha256': exportDigest,
+                  'exportFingerprint': {
+                    'sizeBytes': fingerprint.sizeBytes,
+                    'modifiedAtMicros': fingerprint.modifiedAtMicros,
+                  },
+                },
+              },
+              'diagnostics': {
+                'layoutRef': layoutRef,
+                'manifestRef': manifestRef,
+                'jobStateRef': stateRef,
+              },
+            },
+          );
+          return (fingerprint: fingerprint, task: task, snapshot: snapshot);
+        });
+        final readyFixture = fixture!;
+        final fingerprint = readyFixture.fingerprint;
+        final task = readyFixture.task;
+        final snapshot = readyFixture.snapshot;
+        await tester.pumpWidget(
+          _viewer(fingerprint: fingerprint, traceRecord: snapshot),
+        );
+        await _pumpViewer(tester);
+        expect(
+          tester
+              .widget<IconButton>(
+                find.byKey(const ValueKey('output-source-inspect-toggle')),
+              )
+              .onPressed,
+          isNotNull,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tapAt(tester.getCenter(find.byType(InteractiveViewer)));
+        await tester.pumpAndSettle();
+        final traceText = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .map((widget) => widget.data)
+            .join(' ');
+        expect(traceText, contains('几何覆盖，不代表最终混合权重'));
+        expect(traceText, contains('视觉测量'));
+        expect(traceText, contains('网格先验 / 系统回退'));
+        expect(traceText, isNot(contains('gridPrior')));
+        expect(traceText, isNot(contains('systemFallback')));
+
+        final outputs = snapshot.record['outputs']! as Map;
+        final receipt = outputs['producerReceipt']! as Map;
+        final mismatchedSnapshot = TaskRecordSnapshot(
+          task: task,
+          schemaVersion: 2,
+          record: {
+            'outputs': {
+              ...outputs,
+              'layoutSha256': '0' * 64,
+              'producerReceipt': {...receipt, 'layoutSha256': '0' * 64},
+            },
+            'diagnostics': snapshot.record['diagnostics'],
+          },
+        );
+        await tester.pumpWidget(
+          _viewer(fingerprint: fingerprint, traceRecord: mismatchedSnapshot),
+        );
+        await _pumpViewer(tester);
+        expect(
+          tester
+              .widget<IconButton>(
+                find.byKey(const ValueKey('output-source-inspect-toggle')),
+              )
+              .onPressed,
+          isNotNull,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        var refusalText = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .map((widget) => widget.data)
+            .join(' ');
+        expect(refusalText, contains('此格式没有可验证的导出回执，来源追踪已停用。'));
+        expect(refusalText, isNot(contains('0_0.jpg')));
+        expect(refusalText, isNot(contains('几何覆盖')));
+
+        await tester.pumpWidget(
+          _englishViewer(
+            fingerprint: fingerprint,
+            traceRecord: mismatchedSnapshot,
+          ),
+        );
+        await _pumpViewer(tester);
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        refusalText = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .map((widget) => widget.data)
+            .join(' ');
+        expect(
+          refusalText,
+          contains(
+            'No verified export receipt is available for this format; source tracing is disabled.',
+          ),
+        );
+        expect(refusalText, isNot(contains('geometric source coverage')));
+
+        await tester.pumpWidget(
+          _englishViewer(fingerprint: fingerprint, traceRecord: snapshot),
+        );
+        await _pumpViewer(tester);
+        await tester.tap(
+          find.byKey(const ValueKey('output-source-inspect-toggle')),
+        );
+        await tester.pumpAndSettle();
+        final viewerFinder = find.byType(InteractiveViewer);
+        final viewerWidget = tester.widget<InteractiveViewer>(viewerFinder);
+        final viewport = tester.getSize(viewerFinder);
+        const requestedOutput = Offset(1024, 512);
+        const zoom = 2.0;
+        final tx = viewport.width / 2 - requestedOutput.dx * zoom;
+        final ty = viewport.height / 2 - requestedOutput.dy * zoom;
+        final zoomedTransform = viewerWidget.transformationController!.value
+            .clone();
+        zoomedTransform
+          ..setEntry(0, 0, zoom)
+          ..setEntry(1, 1, zoom)
+          ..setEntry(2, 2, 1.0)
+          ..setEntry(0, 3, tx)
+          ..setEntry(1, 3, ty);
+        viewerWidget.transformationController!.value = zoomedTransform;
+        await tester.pumpAndSettle();
+        await tester.tapAt(
+          tester.getTopLeft(viewerFinder) +
+              Offset(viewport.width / 2, viewport.height / 2),
+        );
+        await tester.pumpAndSettle();
+        final englishTrace = tester
+            .widgetList<SelectableText>(find.byType(SelectableText))
+            .map((widget) => widget.data)
+            .join(' ');
+        expect(englishTrace, contains('Output (1024.0, 512.0)'));
+        expect(englishTrace, contains('geometric source coverage'));
+        expect(englishTrace, contains('visually measured'));
+        expect(englishTrace, contains('grid prior / system fallback'));
+        expect(englishTrace, isNot(contains('gridPrior')));
+        expect(englishTrace, isNot(contains('systemFallback')));
+        expect(englishTrace, contains('final blend weights are not reported'));
+      },
+    );
 
     testWidgets('mobile save and share forward PNG TIFF and JXL MIME types', (
       tester,
@@ -625,6 +988,7 @@ Widget _viewer({
   ExportFileFingerprint? fingerprint,
   bool legacyBound = true,
   bool legacyPresent = true,
+  TaskRecordSnapshot? traceRecord,
 }) => ChineseTestApp(
   home: ExportedImageViewer(
     exportFilePath: _currentOutputPath,
@@ -632,6 +996,29 @@ Widget _viewer({
     expectedExportFingerprint: fingerprint,
     legacyTaskAssociationPresent: legacyPresent,
     legacyTaskBindingVerified: legacyBound,
+    traceRecord: traceRecord,
+  ),
+);
+
+Widget _englishViewer({
+  ExportFileFingerprint? fingerprint,
+  TaskRecordSnapshot? traceRecord,
+}) => MaterialApp(
+  locale: const Locale('en'),
+  supportedLocales: StitchLocalizations.supportedLocales,
+  localizationsDelegates: const [
+    StitchLocalizations.delegate,
+    GlobalMaterialLocalizations.delegate,
+    GlobalWidgetsLocalizations.delegate,
+    GlobalCupertinoLocalizations.delegate,
+  ],
+  home: ExportedImageViewer(
+    exportFilePath: _currentOutputPath,
+    pyramidDirectory: _currentRootPath,
+    expectedExportFingerprint: fingerprint,
+    legacyTaskAssociationPresent: true,
+    legacyTaskBindingVerified: true,
+    traceRecord: traceRecord,
   ),
 );
 
@@ -744,16 +1131,13 @@ Future<void> _writeMaximumPyramid(Directory root) async {
 
 Future<void> _pumpViewer(WidgetTester tester) async {
   // Viewer source validation and tile lookup use real filesystem futures.
-  // Pump bounded real-time slices instead of pumpAndSettle: the loading
-  // indicator intentionally animates while those operations are pending.
-  for (
-    var attempt = 0;
-    attempt < 50 &&
-        find.byType(CircularProgressIndicator).evaluate().isNotEmpty;
-    attempt++
-  ) {
+  // Pump short real-time slices until a five-second wall-clock deadline,
+  // rather than charging every completion against a fixed pump count.
+  final deadline = Stopwatch()..start();
+  while (deadline.elapsed < const Duration(seconds: 5) &&
+      find.byType(CircularProgressIndicator).evaluate().isNotEmpty) {
     await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      () => Future<void>.delayed(const Duration(milliseconds: 5)),
     );
     await tester.pump();
   }

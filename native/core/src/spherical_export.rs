@@ -132,7 +132,8 @@ pub(crate) fn for_each_level0_row(
     mut visit_row: impl FnMut(&[u8]) -> Result<()>,
 ) -> Result<AssemblyStats> {
     let mut row_buffer = vec![0u8; grid.width as usize * 4];
-    let budget_bytes = memory_budget_mib as u64 * 1024 * 1024;
+    let budget_bytes = crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+        .ok_or_else(|| invalid("memoryBudgetMiB overflows byte accounting"))?;
     let mut rows_written = 0u32;
     let mut source_tile_decodes = 0u64;
     let mut source_decode_ms = 0u64;
@@ -277,8 +278,14 @@ pub(crate) fn export_level0_png(
     checkpoint: &mut dyn FnMut(u32, u32) -> Result<()>,
     begin_commit: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Value> {
-    if !(16..=4096).contains(&memory_budget_mib) {
-        return Err(invalid("memoryBudgetMiB must be 16..=4096"));
+    if !(crate::job_resources::MIN_EXPORT_MEMORY_MIB..=crate::job_resources::MAX_JOB_MEMORY_MIB)
+        .contains(&memory_budget_mib)
+    {
+        return Err(invalid(format!(
+            "memoryBudgetMiB must be {}..={} MiB",
+            crate::job_resources::MIN_EXPORT_MEMORY_MIB,
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     let grid = validate_level0(job_dir, manifest, MAX_PIXELS, "PNG")?;
     let width = grid.width;
@@ -546,6 +553,43 @@ mod tests {
         let result = ::image::open(destination).unwrap().into_rgba8();
         assert_eq!(result.dimensions(), (count * 512, 512));
         assert_eq!(result.get_pixel(16 * 512 + 3, 100).0, [16, 20, 30, 255]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sixteen_gib_png_matches_128_mib_and_streams_bounded_rows() {
+        let root = test_dir();
+        write_gradient_tile(&root, 512, 512);
+        write_tile(&root, 0, 1, 1, 512, [20, 30, 210, 255]);
+        write_tile(&root, 1, 1, 1, 1, [40, 220, 60, 128]);
+        let low = root.join("low-budget.png");
+        let high = root.join("high-budget.png");
+        let low_stats = export_level0_png(
+            &root,
+            &manifest(),
+            &low,
+            128,
+            &mut |_, _| Ok(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        let high_stats = export_level0_png(
+            &root,
+            &manifest(),
+            &high,
+            16 * 1024,
+            &mut |_, _| Ok(()),
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(low_stats["memoryBudgetMiB"], 128);
+        assert_eq!(high_stats["memoryBudgetMiB"], 16 * 1024);
+        assert!(high_stats["peakWorkingBytesEstimate"].as_u64().unwrap() < 128 * 1024 * 1024);
+        assert_eq!(fs::read(&low).unwrap(), fs::read(&high).unwrap());
+        assert_eq!(
+            ::image::open(&high).unwrap().into_rgba8().dimensions(),
+            (513, 513)
+        );
         fs::remove_dir_all(root).unwrap();
     }
 }

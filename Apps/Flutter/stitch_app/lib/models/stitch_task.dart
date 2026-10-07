@@ -288,29 +288,10 @@ class StitchTask {
 
   factory StitchTask.fromJson(Map<String, Object?> json) {
     final gridJson = json['grid'] as Map<String, Object?>? ?? const {};
-    final forced = (gridJson['forceGridCells'] as List<Object?>? ?? const [])
-        .map((value) => value as Map<String, Object?>)
-        .map((value) => GridCell(value['row']! as int, value['column']! as int))
-        .toSet();
-    final corner = switch (gridJson['startCorner']) {
-      'top-right' => StartCorner.topRight,
-      'bottom-left' => StartCorner.bottomLeft,
-      'bottom-right' => StartCorner.bottomRight,
-      _ => StartCorner.topLeft,
-    };
-    final grid = GridOptions(
-      mode: gridJson['mode'] == 'sequence'
-          ? GridMode.sequence
-          : GridMode.filename,
-      rows: gridJson['rows'] as int? ?? 1,
-      columns: gridJson['columns'] as int? ?? 1,
-      axis: gridJson['axis'] == 'column'
-          ? TraversalAxis.column
-          : TraversalAxis.row,
-      startCorner: corner,
-      serpentine: gridJson['serpentine'] as bool? ?? false,
-      forceGridCells: forced,
-    );
+    final photos = (json['photos']! as List<Object?>)
+        .map((photo) => ImportedPhoto.fromJson(photo as Map<String, Object?>))
+        .toList();
+    final grid = GridOptions.fromJson(gridJson, photos: photos);
     final savedPhase = StitchPhase.values.firstWhere(
       (phase) => phase.name == json['phase'],
       orElse: () => StitchPhase.imported,
@@ -337,9 +318,7 @@ class StitchTask {
       createdAt: DateTime.parse(json['createdAt']! as String),
       sourceDirectory: json['sourceDirectory']! as String,
       outputDirectory: json['outputDirectory']! as String,
-      photos: (json['photos']! as List<Object?>)
-          .map((photo) => ImportedPhoto.fromJson(photo as Map<String, Object?>))
-          .toList(),
+      photos: photos,
       grid: grid,
       horizontalFovDegrees: (json['horizontalFovDegrees'] as num? ?? 45)
           .toDouble(),

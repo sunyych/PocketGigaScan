@@ -9,10 +9,12 @@ import 'package:path_provider/path_provider.dart';
 import '../models/stitch_task.dart';
 import '../models/export_fingerprint.dart';
 import 'legacy_support_directory.dart';
+import 'task_record_service.dart';
 
 class TaskRepository {
   TaskRepository({this.rootDirectory});
   final Directory? rootDirectory;
+  TaskRecordService? _recordService;
   static Future<void> _writeTail = Future.value();
 
   Future<Directory> root() async {
@@ -79,14 +81,80 @@ class TaskRepository {
       if (await _isRemoved(directory)) return;
       await directory.create(recursive: true);
       final file = File(p.join(directory.path, 'task.json'));
+      Map<String, Object?>? priorRecord;
+      if (await file.exists()) {
+        try {
+          final prior = jsonDecode(await file.readAsString());
+          if (prior is Map && prior['record'] is Map) {
+            final oldRecord = (prior['record'] as Map).cast<String, Object?>();
+            if (TaskRecordService.identityForJson(
+                  prior.cast<String, Object?>(),
+                ) ==
+                TaskRecordService.identityForTask(task)) {
+              priorRecord = TaskRecordService.updateRequestedTaskFields(
+                task,
+                oldRecord,
+              );
+            }
+          }
+        } on Object {
+          // Preserve the source file on malformed input; a normal save replaces it atomically.
+        }
+      }
+      final recordBuilder = _recordService ??= TaskRecordService(this);
+      final record = await recordBuilder.buildRecordForTask(
+        task,
+        priorRecord ?? TaskRecordService.initialRecord(task),
+      );
+      final envelope = <String, Object?>{
+        ...task.toJson(),
+        'schemaVersion': 2,
+        'record': record,
+      };
       final temp = File('${file.path}.tmp-${createId()}');
       await temp.writeAsString(
-        '${const JsonEncoder.withIndent('  ').convert(task.toJson())}\n',
+        '${const JsonEncoder.withIndent('  ').convert(envelope)}\n',
         flush: true,
       );
       await temp.rename(file.path);
     });
   }
+
+  /// Updates only the diagnostic member of the authoritative task.json file.
+  /// The task identity is checked under the same serialized write queue as saves.
+  Future<void> writeRecord(String id, Map<String, Object?> record) =>
+      _serialized(() async {
+        if (!RegExp(r'^[0-9]+-[a-f0-9]+$').hasMatch(id)) {
+          throw const FileSystemException('Invalid task id');
+        }
+        final directory = await directoryFor(id);
+        if (await _isRemoved(directory)) return;
+        final file = File(p.join(directory.path, 'task.json'));
+        if (!await file.exists()) return;
+        final value = jsonDecode(await file.readAsString());
+        if (value is! Map || value['id'] != id) return;
+        final envelope = value.cast<String, Object?>();
+        final task = StitchTask.fromJson(envelope);
+        if (record['identity'] != TaskRecordService.identityForTask(task)) {
+          return;
+        }
+        final recordBuilder = _recordService ??= TaskRecordService(this);
+        final updatedRecord = await recordBuilder.buildRecordForTask(
+          task,
+          TaskRecordService.updateRequestedTaskFields(task, record),
+        );
+        final updated = <String, Object?>{
+          ...envelope,
+          'schemaVersion': 2,
+          'record': updatedRecord,
+        };
+        final temp = File('${file.path}.tmp-${createId()}');
+        await temp.writeAsString(
+          '${const JsonEncoder.withIndent('  ').convert(updated)}\n',
+          flush: true,
+        );
+        await temp.rename(file.path);
+      });
 
   Future<bool> _isRemoved(Directory directory) =>
       File(p.join(directory.path, '.removed')).exists();
@@ -112,6 +180,13 @@ class TaskRepository {
     }
     final record = File(p.join(directory.path, 'task.json'));
     if (await record.exists()) await record.delete();
+    await for (final entry in directory.list(followLinks: false)) {
+      if (entry is File &&
+          (p.basename(entry.path).startsWith('task.json.tmp-') ||
+              p.basename(entry.path).startsWith('record.tmp-'))) {
+        await entry.delete();
+      }
+    }
   });
 
   Future<ExportFileFingerprint?> fingerprintFile(String path) async {
@@ -135,7 +210,7 @@ class TaskRepository {
       try {
         final value = jsonDecode(await file.readAsString());
         if (value is! Map<String, Object?> ||
-            value['schemaVersion'] != 1 ||
+            (value['schemaVersion'] != 1 && value['schemaVersion'] != 2) ||
             value['id'] != id) {
           return null;
         }
@@ -156,7 +231,8 @@ class TaskRepository {
       if (!await file.exists()) continue;
       try {
         final json = jsonDecode(await file.readAsString());
-        if (json is! Map<String, Object?> || json['schemaVersion'] != 1) {
+        if (json is! Map<String, Object?> ||
+            (json['schemaVersion'] != 1 && json['schemaVersion'] != 2)) {
           continue;
         }
         final loaded = StitchTask.fromJson(json);
