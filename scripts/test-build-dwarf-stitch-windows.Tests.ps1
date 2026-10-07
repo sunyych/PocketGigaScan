@@ -20,6 +20,18 @@ $ownedPathAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $ownedPathAst) 'Builder must guard recursive and move paths.'
 Invoke-Expression $ownedPathAst.Extent.Text
+$cleanOutputsAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Clear-OwnedFlutterWindowsBuildOutputs'
+}, $true)
+Assert-True ($null -ne $cleanOutputsAst) 'Builder must clear owned Flutter assets and stale Release outputs before packaging.'
+Invoke-Expression $cleanOutputsAst.Extent.Text
+$releaseAssetsAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-WindowsReleaseAssets'
+}, $true)
+Assert-True ($null -ne $releaseAssetsAst) 'Builder must reject incomplete, debug, or integration-test Release assets.'
+Invoke-Expression $releaseAssetsAst.Extent.Text
 $jxlRootAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-JxlSdkRoot'
@@ -66,6 +78,59 @@ Assert-True ($null -ne $vcRuntimeAst) 'Builder must package the selected app-loc
 Invoke-Expression $vcRuntimeAst.Extent.Text
 
 $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+$releaseAssetsTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-release-assets-test-' + [guid]::NewGuid().ToString('N'))
+$releaseAssetsTestRoot = [IO.Path]::GetFullPath($releaseAssetsTestRoot)
+Assert-True ($releaseAssetsTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($releaseAssetsTestRoot) -match '^pocket-release-assets-test-[0-9a-f]{32}$') 'Refusing unsafe Release asset fixture path.'
+$validRelease = Join-Path $releaseAssetsTestRoot 'valid/Release'
+New-Item -ItemType Directory -Force -Path (Join-Path $validRelease 'data') | Out-Null
+Set-Content -LiteralPath (Join-Path $validRelease 'data/app.so') -Value 'AOT fixture' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $validRelease 'data/icudtl.dat') -Value 'runtime data fixture' -Encoding ascii
+Assert-WindowsReleaseAssets $validRelease
+$missingAotRejected = $false
+try { Assert-WindowsReleaseAssets (Join-Path $releaseAssetsTestRoot 'missing/Release') } catch { $missingAotRejected = $true }
+Assert-True $missingAotRejected 'Release asset guard accepted a missing output directory/AOT app.so.'
+$debugMixedRelease = Join-Path $releaseAssetsTestRoot 'debug-mixed/Release'
+New-Item -ItemType Directory -Force -Path (Join-Path $debugMixedRelease 'data/flutter_assets') | Out-Null
+Set-Content -LiteralPath (Join-Path $debugMixedRelease 'data/app.so') -Value 'AOT fixture' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $debugMixedRelease 'data/flutter_assets/kernel_blob.bin') -Value 'debug kernel fixture' -Encoding ascii
+$debugAssetsRejected = $false
+try { Assert-WindowsReleaseAssets $debugMixedRelease } catch { $debugAssetsRejected = $true }
+Assert-True $debugAssetsRejected 'Release asset guard accepted a mixed AOT/debug Flutter bundle.'
+$integrationTestRelease = Join-Path $releaseAssetsTestRoot 'integration/Release'
+New-Item -ItemType Directory -Force -Path (Join-Path $integrationTestRelease 'data') | Out-Null
+Set-Content -LiteralPath (Join-Path $integrationTestRelease 'data/app.so') -Value 'AOT fixture' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $integrationTestRelease 'integration_test_plugin.dll') -Value 'test plugin fixture' -Encoding ascii
+$integrationPluginRejected = $false
+try { Assert-WindowsReleaseAssets $integrationTestRelease } catch { $integrationPluginRejected = $true }
+Assert-True $integrationPluginRejected 'Release asset guard accepted integration_test_plugin.dll.'
+Remove-Item -LiteralPath $releaseAssetsTestRoot -Recurse -Force
+
+$cleanOutputsTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-clean-flutter-outputs-test-' + [guid]::NewGuid().ToString('N'))
+$cleanOutputsTestRoot = [IO.Path]::GetFullPath($cleanOutputsTestRoot)
+Assert-True ($cleanOutputsTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($cleanOutputsTestRoot) -match '^pocket-clean-flutter-outputs-test-[0-9a-f]{32}$') 'Refusing unsafe clean-output fixture path.'
+$cleanOwner = Join-Path $cleanOutputsTestRoot 'app'
+$ownedAssets = Join-Path $cleanOwner 'build/flutter_assets'
+$ownedRelease = Join-Path $cleanOwner 'build/windows/x64/runner/Release'
+$preservedBuildOutput = Join-Path $cleanOwner 'build/windows/x64/runner/Debug/keep.bin'
+New-Item -ItemType Directory -Force -Path $ownedAssets, $ownedRelease, (Split-Path $preservedBuildOutput -Parent) | Out-Null
+Set-Content -LiteralPath (Join-Path $ownedAssets 'stale-fixture.bin') -Value 'stale fixture' -Encoding ascii
+Set-Content -LiteralPath (Join-Path $ownedRelease 'stale-fixture.dll') -Value 'stale fixture' -Encoding ascii
+Set-Content -LiteralPath $preservedBuildOutput -Value 'preserve unrelated configuration' -Encoding ascii
+Clear-OwnedFlutterWindowsBuildOutputs $ownedAssets $ownedRelease $cleanOwner
+Assert-True (-not (Test-Path -LiteralPath $ownedAssets) -and -not (Test-Path -LiteralPath $ownedRelease)) 'Build output cleanup left stale Flutter assets or Release files.'
+Assert-True (Test-Path -LiteralPath $preservedBuildOutput -PathType Leaf) 'Build output cleanup removed unrelated generated files.'
+$escapeAssets = Join-Path $cleanOwner 'build/flutter_assets'
+$outsideRelease = Join-Path $cleanOutputsTestRoot 'outside/Release'
+New-Item -ItemType Directory -Force -Path $escapeAssets, $outsideRelease | Out-Null
+Set-Content -LiteralPath (Join-Path $escapeAssets 'keep.bin') -Value 'keep fixture' -Encoding ascii
+$escapeCleanupRejected = $false
+try { Clear-OwnedFlutterWindowsBuildOutputs $escapeAssets $outsideRelease $cleanOwner } catch { $escapeCleanupRejected = $true }
+Assert-True $escapeCleanupRejected 'Build output cleanup accepted a Release path outside the owned app directory.'
+Assert-True (Test-Path -LiteralPath (Join-Path $escapeAssets 'keep.bin') -PathType Leaf) 'Cleanup partially ran before rejecting an unowned path.'
+Remove-Item -LiteralPath $cleanOutputsTestRoot -Recurse -Force
+
 $jxlTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-jxl-sdk-test-' + [guid]::NewGuid().ToString('N'))
 $jxlTestRoot = [IO.Path]::GetFullPath($jxlTestRoot)
 Assert-True ($jxlTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and

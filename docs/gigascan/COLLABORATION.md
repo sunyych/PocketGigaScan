@@ -28,7 +28,10 @@ controller suite pass. Independent review also required queue-save-before-publis
 and repeated snapshot rebasing; both tombstone and queue-write errno-5 retries
 retain originals and exports. Host copied-photo checks use a real-clock service
 test, with cancel/error/count widget coverage separate from native import UI.
-Release/UI qualification remains in progress; see the
+Independent archive review rejected a mixed debug/Release asset package before
+delivery. Luna picker coder added owned generated-output cleanup and a fail-closed
+AOT/debug-asset guard; Codex corrected a missing fixture parent through the coder
+and verified the builder contract. Release/UI qualification remains in progress; see the
 [PG-061 evidence record](evidence/WINDOWS-IMPORT-2026-10-07.md).
 
 ## PG-060 renderer hot path and recovery performance

@@ -53,3 +53,15 @@ workflow remains a separate integration/UI qualification.
 Normal Windows/Android Release packages and native dialog/full-import checks
 remain in progress. This patch does not change stitching
 geometry, source comparisons, renderer pixels or calibration limits.
+
+## Release isolation guard
+
+The first local Release package was rejected during independent archive review:
+Flutter clean reported a locked generated directory but exited successfully,
+leaving an earlier integration-test kernel in the shared Flutter asset directory.
+That package was not staged for download or published. The builder now validates
+both owned cleanup targets before deleting generated Flutter assets and Release
+output, fails on incomplete removal, and requires AOT app.so while rejecting
+debug snapshots and the integration-test plugin before packaging. Temporary
+contract fixtures verify valid AOT output, debug/plugin rejection, containment
+and preservation of unrelated Debug output. The contract suite passes.

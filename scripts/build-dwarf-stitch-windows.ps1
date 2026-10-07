@@ -70,6 +70,50 @@ function Assert-OwnedPath([string]$Path, [string]$OwnerRoot, [switch]$InspectTre
     }
 }
 
+function Clear-OwnedFlutterWindowsBuildOutputs {
+    param(
+        [string]$FlutterAssetsDirectory,
+        [string]$ReleaseDirectory,
+        [string]$OwnerRoot
+    )
+    $targets = @($FlutterAssetsDirectory, $ReleaseDirectory)
+    foreach ($target in $targets) {
+        Assert-OwnedPath $target $OwnerRoot -InspectTree
+    }
+    foreach ($target in $targets) {
+        if (Test-Path -LiteralPath $target) {
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction Stop
+        }
+        if (Test-Path -LiteralPath $target) {
+            throw "Could not completely remove generated Windows build output: $target"
+        }
+    }
+}
+
+function Assert-WindowsReleaseAssets([string]$ReleaseDirectory) {
+    $releaseRoot = [IO.Path]::GetFullPath($ReleaseDirectory)
+    if (-not (Test-Path -LiteralPath $releaseRoot -PathType Container)) {
+        throw "Windows Release output directory is missing: $releaseRoot"
+    }
+    $appSo = Join-Path $releaseRoot 'data/app.so'
+    if (-not (Test-Path -LiteralPath $appSo -PathType Leaf)) {
+        throw "Windows Release is missing its AOT application library: $appSo"
+    }
+
+    $forbiddenNames = @(
+        'kernel_blob.bin',
+        'isolate_snapshot_data',
+        'vm_snapshot_data',
+        'integration_test_plugin.dll'
+    )
+    $forbidden = @(Get-ChildItem -LiteralPath $releaseRoot -File -Recurse -Force | Where-Object {
+        $_.Name -in $forbiddenNames
+    })
+    if ($forbidden.Count -gt 0) {
+        throw "Windows Release contains debug or integration-test assets: $($forbidden[0].FullName)"
+    }
+}
+
 function Find-JxlSdkRoot([string]$Root) {
     $directories = @()
     if (Test-Path -LiteralPath $Root -PathType Container) {
@@ -538,8 +582,14 @@ Invoke-Checked $FlutterPath @('clean') $app
 Invoke-Checked $FlutterPath @('pub', 'get', '--enforce-lockfile') $app
 Invoke-Checked $FlutterPath @('analyze') $app
 Invoke-Checked $FlutterPath @('test', '--reporter', 'expanded') $app
+Clear-OwnedFlutterWindowsBuildOutputs `
+    (Join-Path $app 'build/flutter_assets') `
+    $releaseDir `
+    $app
 Invoke-Checked $FlutterPath @('build', 'windows', '--release', '--target', 'lib/main.dart') $app
 
+Assert-OwnedPath $releaseDir $app -InspectTree
+Assert-WindowsReleaseAssets $releaseDir
 $exe = Join-Path $releaseDir 'PocketGigaScan.exe'
 $coreDll = Join-Path $releaseDir 'lumia_gigascan_core.dll'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Expected executable not found: $exe" }
