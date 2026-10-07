@@ -95,6 +95,8 @@ $buildRs = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent
 Assert-True ($buildRs.Contains('CARGO_CFG_TARGET_OS')) 'C++ tool flags must follow the Cargo target OS.'
 Assert-True ($buildRs.Contains('target_os == "android"')) 'JPEG XL static support must include Android targets.'
 Assert-True ($buildRs.Contains('LUMIA_JXL_LINK_PATHS')) 'Android JPEG XL must support per-ABI static-library paths.'
+$androidWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) '.github\workflows\android-build.yml') -Raw
+Assert-True ($androidWorkflow.Contains('pub-cache-path: ${{ github.workspace }}/.local/pub-cache')) 'Android CI Pub cache must stay on the workspace volume so Kotlin can relativize plugin sources.'
 
 $validHeader = "Machine: AArch64"
 $validSegments = @'
