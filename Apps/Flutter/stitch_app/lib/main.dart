@@ -2913,7 +2913,15 @@ class _StitchHomePageState extends State<StitchHomePage>
             if (task.phase != StitchPhase.completed) ...[
               const SizedBox(height: 12),
               LinearProgressIndicator(
-                value: task.progress == 0 ? null : task.progress,
+                value:
+                    task.progress == 0 &&
+                        const {
+                          StitchPhase.running,
+                          StitchPhase.pausing,
+                          StitchPhase.exporting,
+                        }.contains(task.phase)
+                    ? null
+                    : task.progress,
               ),
               const SizedBox(height: 6),
               Text(

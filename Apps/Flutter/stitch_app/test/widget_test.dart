@@ -138,6 +138,191 @@ Future<Finder> _visibleAfterScroll(WidgetTester tester, Finder target) async {
 
 void main() {
   testWidgets(
+    'task progress is static before stitching in English and Chinese',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      for (final language in ['en', 'zh']) {
+        final imported = StitchTask(
+          id: 'progress-imported-$language',
+          createdAt: DateTime.utc(2026),
+          sourceDirectory: 'input',
+          outputDirectory: 'output',
+          photos: const [
+            ImportedPhoto(
+              originalName: 'one.jpg',
+              storedPath: 'one.jpg',
+              sha256: 'a',
+              width: 100,
+              height: 80,
+              originalOrder: 0,
+            ),
+          ],
+          grid: const GridOptions(mode: GridMode.sequence, rows: 1, columns: 1),
+          horizontalFovDegrees: 45,
+          memoryBudgetMiB: 128,
+          workers: 1,
+          phase: StitchPhase.imported,
+        );
+        final repository = _MemoryTaskRepository();
+        final api = _WidgetJobApi();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-imported'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: imported,
+              jobApi: api,
+              repository: repository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: repository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+
+        final progress = tester.widget<LinearProgressIndicator>(
+          find.byType(LinearProgressIndicator).first,
+        );
+        expect(progress.value, 0, reason: '$language imported task');
+        expect(
+          find.text(
+            language == 'zh' ? 'ready · 0% · 已导入' : 'ready · 0% · Imported',
+          ),
+          findsOneWidget,
+        );
+
+        final running = imported.copyWith(phase: StitchPhase.running);
+        final runningRepository = _MemoryTaskRepository();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-running'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: running,
+              jobApi: api,
+              repository: runningRepository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: runningRepository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                find.byType(LinearProgressIndicator).first,
+              )
+              .value,
+          isNull,
+          reason: '$language running task at zero progress stays indeterminate',
+        );
+
+        final queued = imported.copyWith(phase: StitchPhase.queued);
+        final queuedRepository = _MemoryTaskRepository();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-queued'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: queued,
+              jobApi: api,
+              repository: queuedRepository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: queuedRepository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                find.byType(LinearProgressIndicator).first,
+              )
+              .value,
+          0,
+          reason: '$language queued task remains static at zero progress',
+        );
+
+        final paused = queued.copyWith(phase: StitchPhase.paused);
+        final pausedRepository = _MemoryTaskRepository();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-paused'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: paused,
+              jobApi: api,
+              repository: pausedRepository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: pausedRepository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                find.byType(LinearProgressIndicator).first,
+              )
+              .value,
+          0,
+          reason: '$language paused task is static at zero progress',
+        );
+
+        final progressedPaused = paused.copyWith(progress: 0.42);
+        final progressedPausedRepository = _MemoryTaskRepository();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-paused-progress'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: progressedPaused,
+              jobApi: api,
+              repository: progressedPausedRepository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: progressedPausedRepository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump();
+        expect(
+          tester
+              .widget<LinearProgressIndicator>(
+                find.byType(LinearProgressIndicator).first,
+              )
+              .value,
+          0.42,
+          reason: '$language paused task retains completed progress',
+        );
+      }
+    },
+  );
+
+  testWidgets(
     'desktop shell shows local import affordance and explicit unavailable core',
     (tester) async {
       tester.view.physicalSize = const Size(1280, 900);

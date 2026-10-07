@@ -1,5 +1,21 @@
 # PocketGigaScan collaboration ledger
 
+## PG-055 idle task progress
+
+The user reports an animated progress bar before pressing Start stitching.
+Luna owns the shared main.dart progress widget and widget_test.dart regression;
+Codex coordinates and independently reviews the small state-only patch. Zero
+progress is indeterminate only for running, pausing and exporting. Imported,
+queued, paused, interrupted and terminal inactive tasks show static progress;
+completed-task presentation stays hidden as before. No core, task storage,
+photograph or export ownership behavior changes.
+
+English and Chinese widget coverage checks imported/queued/paused zero progress,
+active running zero progress and retained paused 42% progress. Separate keyed
+page instances avoid stale state between cases. The focused regression and both
+build-script contracts pass. Full analysis/tests and normal Windows Release
+qualification are recorded below after execution.
+
 ## PG-054 stitching loop and neighbor regression
 
 User reports 1.3 appears to loop in retry extraction/matching while 1.2 completes
