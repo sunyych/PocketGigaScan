@@ -16,6 +16,21 @@ page instances avoid stale state between cases. The focused regression and both
 build-script contracts pass. Full analysis/tests and normal Windows Release
 qualification are recorded below after execution.
 
+The first full suite detects three intended screenshot changes for TIFF, PNG
+and JPEG XL before starting. Codex inspects the generated screenshot and diff;
+all three pixel-difference bounds are exactly (505,138)-(1169,142), confined to
+the former animated progress stripe. Luna updates only those three baselines
+from the generated screenshots, with matching SHA-256 checks. Other screenshot
+baselines and source behavior stay unchanged.
+
+A subsequent complete suite passes the refreshed goldens but exposes an existing
+TIFF queue persistence race in its test: native export starts before an atomic
+queue publication is necessarily readable. Luna changes only the test helper to
+await a bounded sync/async predicate and captures the first persisted snapshot;
+the assertion uses that same snapshot rather than racing another load. The
+20-second timeout and format assertions remain. Codex reviews the fix and the
+focused TIFF test passes; no queue product logic changes.
+
 ## PG-054 stitching loop and neighbor regression
 
 User reports 1.3 appears to loop in retry extraction/matching while 1.2 completes

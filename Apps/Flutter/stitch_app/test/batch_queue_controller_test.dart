@@ -376,11 +376,14 @@ Future<void> _makeFolder(Directory parent, String name, int count) async {
   }
 }
 
-Future<void> _waitUntil(bool Function() condition, [String? reason]) async {
+Future<void> _waitUntil(
+  FutureOr<bool> Function() condition, [
+  String? reason,
+]) async {
   final elapsed = Stopwatch()..start();
   const timeout = Duration(seconds: 20);
   while (elapsed.elapsed < timeout) {
-    if (condition()) return;
+    if (await condition()) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
   fail(
@@ -750,7 +753,11 @@ void main() {
       await _waitUntil(() => job.operation == 'export');
       expect(job.destination, endsWith('.tif'));
       expect(job.destination, contains(queue.items.single.taskId!));
-      final restored = await queues.loadAll();
+      var restored = <BatchQueue>[];
+      await _waitUntil(() async {
+        restored = await queues.loadAll();
+        return restored.length == 1;
+      }, 'TIFF queue record to be persisted');
       expect(restored.single.outputFormat, ExportFormat.tiff);
     },
   );
