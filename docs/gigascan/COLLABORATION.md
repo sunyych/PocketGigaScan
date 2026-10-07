@@ -19,6 +19,23 @@ Luna precision UI owns narrow request/timeline translations/tests. Codex owns
 real 2.0 MP replay, preserved task evidence and independent gating review. No
 quality limit is raised and no source or weak edge is silently discarded.
 
+Luna handoffs and independent review are complete. Codex corrected the checked
+cache-reservation boundary through the renderer coder and required local-only
+performance counters instead of per-pixel atomics. The exact full-layout pair
+retains all 7742 decoded level-zero tiles with 21.2% lower render/pyramid/TIFF
+time. The packaged-engine 364-source replay reproduces the unlocked 124.29 px
+coarse failure and recovers exactly once at 2.0 MP to 11.94 px against the same
+12 px gate, with unchanged rendering geometry relative to the precise replay.
+Verified task records retain requested/actual precision and recovery attempts.
+
+Product source `f2c7c82` passes 212 native tests, 271 Flutter tests/clean analysis,
+32 Python checks, both builder contracts and normal Windows Release packaging.
+Android source build/APK integrity, seven Kotlin tests and Release lint also
+pass; ADB lists no device. Both hosted Windows jobs pass for that source. See
+the [PG-060 qualification record](evidence/HOTPATH-RECOVERY-2026-10-07.md) for
+checksums, timing caveats and explicit device/visual boundaries. No separate
+DeepSeek patch was found, and it is not claimed as incorporated.
+
 ## PG-058 versioned task traceability
 
 The user explicitly adds a versioned per-task master file containing source

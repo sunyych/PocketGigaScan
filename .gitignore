@@ -92,6 +92,7 @@ __pycache__/
 !/docs/gigascan/evidence/SETTINGS-TIMELINE-2026-10-06.md
 !/docs/gigascan/evidence/LOOP-REGRESSION-2026-10-06.md
 !/docs/gigascan/evidence/DWARF-PERFORMANCE-2026-10-06.md
+!/docs/gigascan/evidence/HOTPATH-RECOVERY-2026-10-07.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
