@@ -645,6 +645,12 @@ class TaskRecordService {
         'workersEffective': manifest?['workersEffective'],
         'renderWorkers': manifest?['renderWorkers'],
         'pyramidWorkersEffective': manifest?['pyramidWorkersEffective'],
+        'requestedRegistrationMegapixels':
+            report['requestedRegistrationMegapixels'],
+        'actualRegistrationMegapixels':
+            report['actualRegistrationMegapixels'] ??
+            report['registrationMegapixels'],
+        'precisionRecovery': report['precisionRecovery'],
       },
       'version': _manifestRendererVersion(manifest),
       'correspondenceQuality': report['qualityStatus'],

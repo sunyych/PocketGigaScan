@@ -7,6 +7,7 @@ import 'package:path/path.dart' as p;
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/export_fingerprint.dart';
 import 'package:stitch_app/models/imported_photo.dart';
+import 'package:stitch_app/models/performance_options.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_timeline.dart';
 import 'package:stitch_app/services/task_record_service.dart';
@@ -116,6 +117,10 @@ void main() {
   test(
     'layout geometry is reconciled only with matching source hashes',
     () async {
+      task = task.copyWith(
+        performanceOptions: const PerformanceOptions(fastRegistration: true),
+      );
+      await repository.save(task);
       final manifest = {
         'schemaVersion': 1,
         'width': 120,
@@ -151,6 +156,24 @@ void main() {
           'qualityStatus': 'needs-visual-review',
           'worstMeasuredEdges': [],
           'globalRayReprojectionRmsPx': 0.4,
+          'registrationMegapixels': 2.0,
+          'requestedRegistrationMegapixels': 0.6,
+          'actualRegistrationMegapixels': 2.0,
+          'precisionRecovery': {
+            'enabled': true,
+            'eligible': true,
+            'attempted': true,
+            'status': 'recovered',
+            'requestedRegistrationMegapixels': 0.6,
+            'actualRegistrationMegapixels': 2.0,
+            'attempts': [
+              {
+                'registrationMegapixels': 0.6,
+                'status': 'reprojectionQualityFailed',
+              },
+              {'registrationMegapixels': 2.0, 'status': 'completed'},
+            ],
+          },
           'edgeDiagnostics': [],
         },
       };
@@ -182,6 +205,20 @@ void main() {
         'verified',
       );
       expect((snapshot.record['algorithm'] as Map)['version'], 1);
+      final algorithm = snapshot.record['algorithm'] as Map;
+      final adopted = algorithm['adoptedParameters'] as Map;
+      expect(adopted['requestedRegistrationMegapixels'], 0.6);
+      expect(adopted['actualRegistrationMegapixels'], 2.0);
+      expect((adopted['precisionRecovery'] as Map)['status'], 'recovered');
+      expect(
+        ((adopted['precisionRecovery'] as Map)['attempts'] as List),
+        hasLength(2),
+      );
+      expect(
+        ((algorithm['parameters'] as Map)['performanceOptions']
+            as Map)['fastRegistration'],
+        isTrue,
+      );
       expect(await service.verifyArtifactRef(snapshot, kind: 'layout'), isTrue);
 
       await File(
@@ -192,6 +229,10 @@ void main() {
       final changedPhoto = (changed.record['photos'] as List).single as Map;
       expect(changedPhoto['geometryStatus'], 'uncomputed');
       expect(changedPhoto['cameraToWorld'], isNull);
+      expect(
+        ((changed.record['algorithm'] as Map)['adoptedParameters']),
+        isNull,
+      );
       expect(
         (changed.record['outputs'] as Map)['layoutStateAssociation'],
         'mismatch',
@@ -238,7 +279,7 @@ void main() {
             'height': 32,
           },
         ],
-        'report': {},
+        'report': {'registrationMegapixels': 1.25},
       };
       final layoutJson = jsonEncode(layout);
       await File(p.join(output.path, 'layout.json')).writeAsString(layoutJson);
@@ -268,6 +309,10 @@ void main() {
         (record['outputs'] as Map)['sourceManifestAssociation'],
         'verified',
       );
+      final adopted = (record['algorithm'] as Map)['adoptedParameters'] as Map;
+      expect(adopted['requestedRegistrationMegapixels'], isNull);
+      expect(adopted['actualRegistrationMegapixels'], 1.25);
+      expect(adopted['precisionRecovery'], isNull);
     },
   );
 
