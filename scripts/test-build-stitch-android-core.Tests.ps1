@@ -13,6 +13,18 @@ $tokens = $null
 $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
 Assert-True ($errors.Count -eq 0) "Android core builder parse errors: $($errors -join '; ')"
+$ownedPathAst = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-OwnedPath'
+}, $true)
+Assert-True ($null -ne $ownedPathAst) 'Builder must validate owned publish paths.'
+Invoke-Expression $ownedPathAst.Extent.Text
+$publishLicenseAst = $ast.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-AndroidLicenseStage'
+}, $true)
+Assert-True ($null -ne $publishLicenseAst) 'Builder must publish Android licenses through a guarded staging helper.'
+Invoke-Expression $publishLicenseAst.Extent.Text
 $elfCheckAst = $ast.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-AndroidElfText'
@@ -20,6 +32,29 @@ $elfCheckAst = $ast.Find({
 Assert-True ($null -ne $elfCheckAst) 'Builder must define the ELF alignment validator.'
 Invoke-Expression $elfCheckAst.Extent.Text
 $source = Get-Content -LiteralPath $scriptPath -Raw
+
+$testRepoRoot = [IO.Path]::GetFullPath((Split-Path $PSScriptRoot -Parent))
+$localTestRoot = [IO.Path]::GetFullPath((Join-Path $testRepoRoot '.local'))
+$publishTestRoot = Join-Path $localTestRoot ('android-license-publish-' + [guid]::NewGuid().ToString('N'))
+$publishTestRoot = [IO.Path]::GetFullPath($publishTestRoot)
+Assert-True ($publishTestRoot.StartsWith($localTestRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($publishTestRoot) -match '^android-license-publish-[0-9a-f]{32}$') 'Refusing unsafe Android license publish fixture path.'
+$publishCache = Join-Path $publishTestRoot 'cache'
+$publishPrivateStaging = Join-Path $publishCache 'staging\publish'
+$publishBackupRoot = Join-Path $publishCache 'staging\backups'
+$publishStage = Join-Path $publishPrivateStaging 'native-licenses-fixture'
+$publishFlutterCore = Join-Path $publishTestRoot 'flutter-stitch-core'
+$publishAssetsOwner = Join-Path $publishFlutterCore 'android-assets'
+$publishLicenseRoot = Join-Path $publishAssetsOwner 'native-licenses'
+New-Item -ItemType Directory -Force -Path $publishCache, $publishStage | Out-Null
+Set-Content -LiteralPath (Join-Path $publishStage 'manifest.json') -Value '{"complete":true}' -Encoding ascii
+try {
+    Publish-AndroidLicenseStage $publishStage $publishAssetsOwner $publishLicenseRoot $publishFlutterCore $publishPrivateStaging $publishBackupRoot $publishCache
+    Assert-True (Test-Path -LiteralPath (Join-Path $publishLicenseRoot 'manifest.json') -PathType Leaf) 'Clean Android license publish did not create its missing destination parent and publish the staged manifest.'
+    Assert-True (-not (Test-Path -LiteralPath $publishStage)) 'Android license publish left the staging directory in place.'
+} finally {
+    if (Test-Path -LiteralPath $publishTestRoot) { Remove-Item -LiteralPath $publishTestRoot -Recurse -Force }
+}
 
 foreach ($required in @(
     'native\core',
@@ -42,7 +77,8 @@ foreach ($required in @(
     "coreSourceTreeSha256",
     "source archive",
     "Join-Path `$cache 'staging\publish'",
-    "Join-Path `$cache 'staging\backups'"
+    "Join-Path `$cache 'staging\backups'",
+    'New-Item -ItemType Directory -Force -Path $assetsOwner, $backupRoot | Out-Null'
 )) {
     Assert-True ($source.Contains($required)) "Android builder is missing contract token: $required"
 }
