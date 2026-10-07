@@ -32,7 +32,13 @@ Map<String, Object?> buildSphericalRequest(StitchTask task) {
   }
   final options = task.performanceOptions;
   return {
-    'tiles': mapping.tiles(task.photos, forced: grid.forceGridCells),
+    'tiles': mapping.tiles(
+      task.photos,
+      forced: grid.forceGridCells,
+      forceGridCellOrigins: grid.forceGridCellOrigins,
+      lockedPhotoOrigins: grid.lockedPhotoOrigins,
+      pendingForceGridCells: grid.pendingForceGridCells,
+    ),
     'rows': mapping.rows,
     'columns': mapping.columns,
     'fx': fx,
@@ -53,6 +59,7 @@ Map<String, Object?> buildSphericalRequest(StitchTask task) {
     'featureType': options.featureType,
     'matcherType': options.matcherType,
     'registrationMegapixels': options.registrationMegapixels,
+    'allowPrecisionRecovery': options.fastRegistration,
     'allowNominalGridFallback': task.forceGridFallback,
     'autoGridOverlap': task.autoGridOverlap,
     'refineGridNeighbors': task.refineGridNeighbors,

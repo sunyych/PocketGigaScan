@@ -378,6 +378,80 @@ void main() {
     await runtime.dispose();
   });
 
+  testWidgets('automatic export retries after shared memory budget rises', (
+    tester,
+  ) async {
+    final documents = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'android-memory-auto-export-${DateTime.now().microsecondsSinceEpoch}',
+    )..createSync();
+    addTearDown(() => documents.delete(recursive: true));
+    const pathProvider = MethodChannel('plugins.flutter.io/path_provider');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(pathProvider, (_) async => documents.path);
+    addTearDown(
+      () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(pathProvider, null),
+    );
+    const channel = MethodChannel('test.android-memory-auto-export-runtime');
+    var availableMemoryMiB = 128;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          if (call.method == 'readResourceBudget') {
+            return <String, Object?>{
+              'totalMemoryMiB': 4096,
+              'availableMemoryMiB': availableMemoryMiB,
+              'cpuCount': 8,
+              'availableStorageMiB': 4096,
+              'thermalStatus': 'none',
+            };
+          }
+          if (call.method == 'setProcessingActive') return true;
+          return null;
+        });
+    final runtime = MobileRuntimeService(channel: channel);
+    final api = FakeApi()..statusState = 'completed';
+    final output = Directory(
+      '${Directory.systemTemp.path}${Platform.pathSeparator}'
+      'android-memory-auto-export-task-${DateTime.now().microsecondsSinceEpoch}',
+    )..createSync();
+    addTearDown(() => output.delete(recursive: true));
+    final task = fixture(
+      StitchPhase.running,
+      jobId: 'memory-auto-export-job',
+      autoExportOnCompletion: true,
+      outputDirectory: '${output.path}${Platform.pathSeparator}render',
+    ).copyWith(memoryBudgetMiB: 512);
+    final repository = FakeRepository([task]);
+    final queueController = await pumpPage(
+      tester,
+      task,
+      api,
+      PowerState.battery,
+      mobile: true,
+      android: true,
+      runtimeService: runtime,
+      repository: repository,
+    );
+    await _pumpUntil(
+      tester,
+      () => repository.tasks.single.stage == 'auto-export-deferred',
+      'Automatic export was not persisted while the shared budget was too small',
+    );
+    expect(api.exports, 0);
+
+    availableMemoryMiB = 4096;
+    await _pumpUntil(
+      tester,
+      () => api.exports == 1,
+      'Automatic export did not retry after the shared budget increased',
+    );
+    expect(api.exports, 1);
+    await tester.pumpWidget(const SizedBox());
+    queueController?.dispose();
+    await runtime.dispose();
+  });
+
   testWidgets(
     'cold start pauses a timed-out unselected standalone job before acknowledging it',
     (tester) async {

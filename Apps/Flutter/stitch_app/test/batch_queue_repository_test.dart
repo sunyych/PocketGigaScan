@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/models/batch_queue.dart';
+import 'package:stitch_app/models/performance_options.dart';
+import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
 
 void main() {
@@ -32,6 +34,11 @@ void main() {
         parentDirectory: parent.path,
         outputDirectory:
             '${temporary.path}${Platform.pathSeparator}parent_stitched',
+        exportDestination: 'content://provider/tree/export',
+        performanceOptions: const PerformanceOptions(fastRegistration: true),
+        refineGridNeighbors: false,
+        seamBlendMode: SeamBlendMode.feather,
+        localTextureWarp: false,
         items: [
           BatchQueueItem(
             id: '101-abcdef12',
@@ -75,6 +82,11 @@ void main() {
       expect(loaded.single.items.first.etaSeconds, 50);
       expect(loaded.single.items.first.elapsedSeconds, 17);
       expect(loaded.single.items.first.progressSamples, hasLength(1));
+      expect(loaded.single.exportDestination, 'content://provider/tree/export');
+      expect(loaded.single.performanceOptions.fastRegistration, isTrue);
+      expect(loaded.single.refineGridNeighbors, isFalse);
+      expect(loaded.single.seamBlendMode, SeamBlendMode.feather);
+      expect(loaded.single.localTextureWarp, isFalse);
     },
   );
 

@@ -82,6 +82,8 @@ class StitchStatusMessage extends StatelessWidget {
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
           childrenPadding: EdgeInsets.zero,
+          expandedAlignment: Alignment.centerLeft,
+          expandedCrossAxisAlignment: CrossAxisAlignment.start,
           dense: true,
           title: Text(localization.text('Technical details'), style: style),
           children: [SelectableText(detail, style: style)],

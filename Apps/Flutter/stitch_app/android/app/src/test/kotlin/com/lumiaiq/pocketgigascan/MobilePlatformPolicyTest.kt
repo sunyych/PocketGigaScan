@@ -42,6 +42,23 @@ class MobilePlatformPolicyTest {
     }
 
     @Test
+    fun outputFolderRequiresPersistableWriteGrantAndTreeUri() {
+        // A provider may grant persistent write access without read access.
+        assertTrue(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x42))
+        assertFalse(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x40))
+        assertFalse(MobilePlatformPolicy.isPersistableWritableTreeGrant(0x02))
+        assertTrue(MobilePlatformPolicy.isSafTreeUri("content://provider/tree/primary%3APictures"))
+        assertFalse(MobilePlatformPolicy.isSafTreeUri("file:///storage/emulated/0/Pictures"))
+        assertFalse(MobilePlatformPolicy.isSafTreeUri("content://provider/document/123"))
+    }
+
+    @Test
+    fun documentNamesCannotEscapeTheSelectedTree() {
+        assertEquals(".._result-panorama.png", MobilePlatformPolicy.safeDocumentName("../result-panorama.png"))
+        assertEquals("folder_result.png", MobilePlatformPolicy.safeDocumentName("folder\\result.png"))
+    }
+
+    @Test
     fun stagingSelectsOnlyDirectJpegFilesAndSanitizesNames() {
         assertTrue(MobilePlatformPolicy.isDirectJpegFile("01_02.JPG", "image/jpeg"))
         assertTrue(MobilePlatformPolicy.isDirectJpegFile("photo.jpeg", "application/octet-stream"))

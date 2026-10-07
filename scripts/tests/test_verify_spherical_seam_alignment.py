@@ -1,8 +1,10 @@
 """Small deterministic contract tests for the independent seam checker."""
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
+from argparse import Namespace
 from unittest.mock import patch
 
 import numpy as np
@@ -152,6 +154,168 @@ class RenderSpaceTests(unittest.TestCase):
             seam.persist_cache(path, {'generation': 2})
             self.assertEqual(path.read_text(encoding='utf-8'), '{"generation": 2}')
             self.assertFalse(path.with_name(path.name + '.tmp').exists())
+
+
+class NeighborAndQualityGateTests(unittest.TestCase):
+    def test_cardinal_default_and_diagonal_mode_pair_every_neighbor_once(self):
+        keys = {(row, column) for row in range(3) for column in range(3)}
+        cardinal = list(seam.neighbor_pairs(keys))
+        eight = list(seam.neighbor_pairs(keys, include_diagonals=True))
+        self.assertEqual(len(cardinal), 12)
+        self.assertEqual(len(eight), 20)
+        for pairs in (cardinal, eight):
+            identities = [frozenset(pair) for pair in pairs]
+            self.assertEqual(len(identities), len(set(identities)))
+            for first, second in pairs:
+                dr, dc = abs(first[0] - second[0]), abs(first[1] - second[1])
+                self.assertLessEqual(dr, 1)
+                self.assertLessEqual(dc, 1)
+                self.assertNotEqual((dr, dc), (0, 0))
+
+    def test_worst_edge_selection_uses_after_p95_and_keeps_representative_and_target(self):
+        def candidate(first, second, p95, coverage):
+            record = {'from': first, 'to': second, 'holdoutSpatialCells8x8': coverage,
+                      'after': {'p95Px': p95, 'rmsPx': p95 / 2}}
+            return (p95 / 3, record, np.zeros((2, 2)), np.zeros((2, 2)),
+                    np.zeros((2, 2)), np.zeros((2, 2)))
+
+        candidates = [
+            candidate((8, 12), (8, 13), 1.5, 2),
+            candidate((9, 13), (10, 13), 9.0, 3),
+            candidate((8, 13), (9, 13), 7.0, 4),
+            candidate((9, 13), (10, 14), 6.0, 5),
+            candidate((4, 4), (4, 5), 4.0, 8),
+        ]
+        selected = seam.select_edge_samples(candidates, (9, 13))
+        self.assertEqual(selected['worst'][1]['after']['p95Px'], 9.0)
+        self.assertEqual(set(selected['targetEdges']), {'north', 'south', 'southeast'})
+        self.assertEqual(selected['targetEdges']['south'][1]['from'], (9, 13))
+        self.assertEqual(selected['representative'][1]['holdoutSpatialCells8x8'], 8)
+
+    def test_quality_gate_rejects_empty_high_error_and_low_coverage_samples(self):
+        args = Namespace(quality_gate=True, max_after_rms_px=2.0,
+                         max_after_p95_px=3.0, max_edge_after_rms_px=None,
+                         max_edge_after_p95_px=None, diagonal_neighbors=False,
+                         min_measured_edges=1,
+                         min_support_coverage=2, required_edge=[], required_cell=[])
+        empty = {'after': seam.stats(np.array([], dtype=float))}
+        result = seam.evaluate_quality_gate(args, empty, [], {(0, 0)})
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('no measured edge' in failure for failure in result['failures']))
+
+        poor = {'after': seam.stats(np.array([4., 5., 6.]))}
+        edge = {'status': 'measured', 'from': (0, 0), 'to': (0, 1),
+                'holdoutAccepted': 5, 'holdoutSpatialCells8x8': 2}
+        result = seam.evaluate_quality_gate(args, poor, [edge], {(0, 0), (0, 1)})
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('RMS' in failure for failure in result['failures']))
+
+        low_coverage = {'after': seam.stats(np.array([1., 1.]))}
+        edge['holdoutSpatialCells8x8'] = 1
+        result = seam.evaluate_quality_gate(args, low_coverage, [edge], {(0, 0), (0, 1)})
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('support coverage' in failure for failure in result['failures']))
+
+    def test_per_edge_limit_rejects_bad_edge_hidden_by_good_global_aggregate(self):
+        args = Namespace(quality_gate=False, max_after_rms_px=6.0,
+                         max_after_p95_px=None, max_edge_after_rms_px=2.0,
+                         max_edge_after_p95_px=3.0, diagonal_neighbors=False,
+                         min_measured_edges=1, min_support_coverage=1,
+                         required_edge=[], required_cell=[])
+        edges = [
+            {'status': 'measured', 'from': (0, 0), 'to': (0, 1),
+             'holdoutAccepted': 10, 'holdoutSpatialCells8x8': 3,
+             'after': {'rmsPx': 1.0, 'p95Px': 1.5}},
+            {'status': 'measured', 'from': (1, 0), 'to': (1, 1),
+             'holdoutAccepted': 1, 'holdoutSpatialCells8x8': 2,
+             'after': {'rmsPx': 10.0, 'p95Px': 10.0}},
+        ]
+        summary = {'after': seam.stats(np.array([1.] * 10 + [10.]))}
+        result = seam.evaluate_quality_gate(args, summary, edges,
+                                            {(0, 0), (0, 1), (1, 0), (1, 1)})
+        self.assertLess(summary['after']['rmsPx'], args.max_after_rms_px)
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('edge (1, 0)--(1, 1)' in failure for failure in result['failures']))
+
+    def test_quality_gate_requires_error_bound_and_every_required_cell_edge(self):
+        args = Namespace(quality_gate=True, max_after_rms_px=None,
+                         max_after_p95_px=None, max_edge_after_rms_px=None,
+                         max_edge_after_p95_px=None, diagonal_neighbors=False,
+                         min_measured_edges=1, min_support_coverage=1,
+                         required_edge=[], required_cell=[(1, 1)])
+        summary = {'after': seam.stats(np.array([1.]))}
+        edge = {'status': 'measured', 'from': (1, 1), 'to': (0, 1),
+                'holdoutAccepted': 4, 'holdoutSpatialCells8x8': 2,
+                'after': {'rmsPx': 1.0, 'p95Px': 1.0}}
+        cells = {(1, 1), (0, 1), (1, 0)}
+        result = seam.evaluate_quality_gate(args, summary, [edge], cells)
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('no error bound' in failure for failure in result['failures']))
+        self.assertTrue(any('missing supported incident edge' in failure
+                            for failure in result['failures']))
+
+    def test_quality_gate_rejects_nonfinite_bounds_and_invalid_support(self):
+        args = Namespace(quality_gate=True, max_after_rms_px=float('nan'),
+                         max_after_p95_px=None, max_edge_after_rms_px=None,
+                         max_edge_after_p95_px=None, diagonal_neighbors=False,
+                         min_measured_edges=0, min_support_coverage=-1,
+                         required_edge=[], required_cell=[])
+        result = seam.evaluate_quality_gate(args, {'after': seam.stats(np.array([1.]))}, [], set())
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(any('finite and nonnegative' in failure for failure in result['failures']))
+        self.assertTrue(any('must be positive' in failure for failure in result['failures']))
+
+    def test_cached_correspondences_invalidate_on_source_layout_or_algorithm_change(self):
+        source = {'0,0': {'sha256': 'source-a', 'size': 123}}
+        layouts = {'before': 'before-a', 'after': 'after-a'}
+        matcher = seam.matcher_identity(2500)
+        saved = {'schemaVersion': 3, 'sourceFingerprints': source,
+                 'layoutFingerprints': layouts, 'matcher': matcher}
+        seam.validate_correspondence_cache(saved, source, layouts, matcher)
+        with self.assertRaisesRegex(ValueError, 'source'):
+            seam.validate_correspondence_cache(saved, {'0,0': {'sha256': 'source-b', 'size': 123}},
+                                               layouts, matcher)
+        with self.assertRaisesRegex(ValueError, 'layout'):
+            seam.validate_correspondence_cache(saved, source,
+                                               {'before': 'before-b', 'after': 'after-a'}, matcher)
+        changed_algorithm = dict(matcher, algorithmVersion=matcher['algorithmVersion'] + 1)
+        with self.assertRaisesRegex(ValueError, 'matcher'):
+            seam.validate_correspondence_cache(saved, source, layouts, changed_algorithm)
+
+    def test_quality_gate_failure_returns_nonzero_and_writes_report(self):
+        with tempfile.TemporaryDirectory(dir=SCRIPT.parents[1]) as directory:
+            root = Path(directory)
+            source = root / 'synthetic-source.bin'
+            source.write_bytes(b'synthetic fixture')
+            layout = {
+                'width': 10, 'height': 10,
+                'yawMinRad': -1., 'yawMaxRad': 1.,
+                'pitchMinRad': -.5, 'pitchMaxRad': .5,
+                'tiles': [{'row': 0, 'column': 0, 'path': str(source)}],
+            }
+            before, after = root / 'before.json', root / 'after.json'
+            before.write_text(json.dumps(layout), encoding='utf-8')
+            after.write_text(json.dumps(layout), encoding='utf-8')
+            output = root / 'report'
+            args = Namespace(
+                before=before, after=after, output=output,
+                pyramid_before=None, pyramid_after=None, max_features=100,
+                min_holdout=8, correspondence_cache=root / 'cache.json',
+                roi=None, diagonal_neighbors=False, quality_gate=True,
+                max_after_rms_px=1., max_after_p95_px=1.,
+                max_edge_after_rms_px=None, max_edge_after_p95_px=None,
+                min_measured_edges=1,
+                min_support_coverage=1, required_cell=[], required_edge=[],
+                target_cell=(9, 13),
+            )
+            with patch.object(seam, 'edge_matches', return_value=None), \
+                    patch.object(seam.cv2, 'SIFT_create', return_value=object()):
+                status = seam.main(args)
+            report = json.loads(
+                (output / 'texture-alignment-report.json').read_text(encoding='utf-8'))
+            self.assertEqual(status, 2)
+            self.assertEqual(report['qualityGate']['status'], 'failed')
+            self.assertIsNone(report['after']['rmsPx'])
 
 
 if __name__ == '__main__':

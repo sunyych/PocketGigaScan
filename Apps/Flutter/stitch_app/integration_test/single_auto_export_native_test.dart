@@ -170,12 +170,11 @@ Future<Finder> _visibleAfterScroll(WidgetTester tester, Finder target) async {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  const enabled = bool.fromEnvironment('TEST_SINGLE_AUTO_NATIVE');
 
   testWidgets(
-    'Windows single task automatically exports PNG, TIFF, and JPEG XL once',
+    'Windows single task automatically exports PNG, TIFF, and JPEG XL once (requires TEST_SINGLE_AUTO_NATIVE and TEST_SINGLE_AUTO_PARENT_DIR)',
     (tester) async {
-      const enabled = bool.fromEnvironment('TEST_SINGLE_AUTO_NATIVE');
-      if (!enabled) return;
       expect(Platform.isWindows, isTrue, reason: 'Requires Windows FFI.');
       const parentPath = String.fromEnvironment('TEST_SINGLE_AUTO_PARENT_DIR');
       expect(
@@ -346,5 +345,6 @@ void main() {
       }
     },
     timeout: const Timeout(Duration(hours: 1)),
+    skip: !enabled,
   );
 }

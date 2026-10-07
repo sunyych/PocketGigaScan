@@ -7,9 +7,11 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/batch_queue.dart';
+import '../models/app_settings.dart';
 import '../models/grid_options.dart';
 import '../models/performance_options.dart';
 import '../models/stitch_task.dart';
+import '../models/stitch_timeline.dart';
 import '../models/stitch_quality.dart';
 import 'batch_folder_importer.dart';
 import 'batch_queue_repository.dart';
@@ -18,6 +20,7 @@ import 'mobile_runtime_service.dart';
 import 'mobile_storage_service.dart';
 import 'spherical_request.dart';
 import 'task_repository.dart';
+import 'task_record_service.dart';
 
 class BatchQueueController extends ChangeNotifier {
   BatchQueueController({
@@ -45,6 +48,9 @@ class BatchQueueController extends ChangeNotifier {
   final MobileStorageService? storageService;
   MobileResourceBudget? resourceBudget;
   bool resourceConfigurationReady = true;
+  int? desiredMemoryBudgetMiB;
+  int? desiredMaxConcurrentJobs;
+  int newTaskMemoryBudgetMiB = 512;
 
   /// Native jobs whose Android foreground-service timeout still needs a
   /// quiescent checkpoint. Populate this before [initialize].
@@ -55,6 +61,7 @@ class BatchQueueController extends ChangeNotifier {
   final Set<String> _deletingTaskIds = {};
   final Map<String, StitchTask> _taskCache = {};
   final Map<String, int> _generations = {};
+  final Map<String, int> _timelineUiSequences = {};
   Future<void> _taskWriteTail = Future.value();
   Future<void> _queueWriteTail = Future.value();
   Future<void> _tickWork = Future.value();
@@ -64,6 +71,78 @@ class BatchQueueController extends ChangeNotifier {
   bool _disposed = false;
   bool _ticking = false;
   String? error;
+
+  String _nextTimelineUiId(String taskId, StitchTimeline timeline) {
+    var sequence = _timelineUiSequences[taskId] ?? 0;
+    final prefix = 'ui:$taskId:';
+    for (final event in timeline.events) {
+      if (!event.id.startsWith(prefix)) continue;
+      final saved = int.tryParse(event.id.substring(prefix.length));
+      if (saved != null && saved > sequence) sequence = saved;
+    }
+    sequence++;
+    _timelineUiSequences[taskId] = sequence;
+    return '$prefix$sequence';
+  }
+
+  String? _normalizedTimelineStage(String? stage) {
+    return canonicalStitchTimelineStage(stage);
+  }
+
+  bool _nativeHistoryCoversTaskState(
+    StitchTimeline previous,
+    StitchTimeline current,
+    StitchTask task,
+  ) {
+    final previousIds = previous.events.map((event) => event.id).toSet();
+    final expectedState = task.phase == StitchPhase.exporting
+        ? 'running'
+        : task.phase.name;
+    return current.events.any(
+      (event) =>
+          event.id.startsWith('native:${task.nativeJobId}:') &&
+          !previousIds.contains(event.id) &&
+          _normalizedTimelineStage(event.stage) ==
+              _normalizedTimelineStage(task.stage) &&
+          (event.state == expectedState ||
+              (task.phase == StitchPhase.exporting &&
+                  event.state == 'queued')) &&
+          (task.phase != StitchPhase.exporting || event.operation == 'export'),
+    );
+  }
+
+  StitchTimeline _mergeTimelineWithoutDuplicateUi(
+    StitchTimeline previous,
+    StitchTimeline candidate,
+  ) {
+    final previousIds = previous.events.map((event) => event.id).toSet();
+    final merged = previous.merge(candidate);
+    final incomingNative = merged.events.where(
+      (event) =>
+          event.id.startsWith('native:') && !previousIds.contains(event.id),
+    );
+    if (incomingNative.isEmpty) return merged;
+    final filtered = merged.events.where((event) {
+      if (!event.id.startsWith('ui:')) return true;
+      return !incomingNative.any((native) {
+        final nearInTime =
+            (native.timestampUtc.difference(event.timestampUtc).inMilliseconds)
+                .abs() <=
+            const Duration(seconds: 30).inMilliseconds;
+        final equivalentState =
+            event.state == native.state ||
+            (native.operation == 'export' &&
+                native.state == 'running' &&
+                event.state == 'exporting');
+        return nearInTime &&
+            _normalizedTimelineStage(event.stage) ==
+                _normalizedTimelineStage(native.stage) &&
+            event.operation == native.operation &&
+            equivalentState;
+      });
+    }).toList();
+    return StitchTimeline(events: List.unmodifiable(filtered));
+  }
 
   int _generation(String id) => _generations[id] ?? 0;
   int _bumpGeneration(String id) => _generations[id] = _generation(id) + 1;
@@ -151,15 +230,188 @@ class BatchQueueController extends ChangeNotifier {
   }) async {
     final next = _taskWriteTail.then((_) async {
       if (guardItem != null && generation != _generation(guardItem)) return;
-      await _taskRepository.save(task);
+      var persisted = task;
+      final previous = _taskCache[task.id];
+      if (previous != null) {
+        persisted = task.copyWith(
+          timeline: _mergeTimelineWithoutDuplicateUi(
+            previous.timeline,
+            task.timeline,
+          ),
+        );
+      }
+      final nativeHistoryCoversTransition =
+          previous != null &&
+          _nativeHistoryCoversTaskState(
+            previous.timeline,
+            persisted.timeline,
+            persisted,
+          );
+      final inferredOperation =
+          const {
+            'publishing',
+            'published',
+            'publish-failed',
+          }.contains(persisted.stage)
+          ? 'publish'
+          : previous?.phase == StitchPhase.exporting ||
+                persisted.phase == StitchPhase.exporting
+          ? 'export'
+          : null;
+      final candidateUiCoversTransition = persisted.timeline.events.any(
+        (event) =>
+            event.id.startsWith('ui:') &&
+            _normalizedTimelineStage(event.stage) ==
+                _normalizedTimelineStage(persisted.stage) &&
+            (inferredOperation == 'publish' ||
+                event.state == persisted.phase.name ||
+                (persisted.phase == StitchPhase.exporting &&
+                    event.state == 'running')) &&
+            (inferredOperation == null || event.operation == inferredOperation),
+      );
+      if (previous != null &&
+          !nativeHistoryCoversTransition &&
+          !candidateUiCoversTransition &&
+          (previous.phase != persisted.phase ||
+              _normalizedTimelineStage(previous.stage) !=
+                  _normalizedTimelineStage(persisted.stage))) {
+        persisted = persisted.copyWith(
+          timeline: persisted.timeline.mergeUiEvent(
+            id: _nextTimelineUiId(task.id, persisted.timeline),
+            kind: previous.phase != persisted.phase ? 'state' : 'stage',
+            timestampUtc: _clock().toUtc(),
+            stage: _normalizedTimelineStage(task.stage),
+            state: persisted.phase.name,
+            operation: inferredOperation,
+          ),
+        );
+      }
+      await _taskRepository.save(persisted);
       if (await _taskRepository.loadById(task.id) == null) {
         _taskCache.remove(task.id);
       } else {
-        _taskCache[task.id] = task;
+        _taskCache[task.id] = persisted;
       }
     });
     _taskWriteTail = next.catchError((Object _) {});
     await next;
+  }
+
+  StitchTask _mergeNativeEvents(StitchTask task, Map<String, Object?> status) {
+    final values = status['events'];
+    if (task.nativeJobId == null || values is! List) return task;
+    final events = values
+        .whereType<Map>()
+        .map(
+          (value) => value.map((key, value) => MapEntry(key.toString(), value)),
+        )
+        .toList();
+    if (events.isEmpty) return task;
+    return task.copyWith(
+      timeline: task.timeline.mergeNativeBatch(
+        events,
+        jobId: task.nativeJobId!,
+      ),
+    );
+  }
+
+  Future<StitchTask> _publishPrivateExport(
+    StitchTask task, {
+    String? guardItem,
+    int? generation,
+  }) async {
+    final destination = task.exportDirectory;
+    final source = task.exportPath;
+    if (storageService == null ||
+        destination == null ||
+        !destination.startsWith('content://') ||
+        source == null) {
+      return task;
+    }
+    if (guardItem != null && generation != _generation(guardItem)) {
+      return task;
+    }
+    final started = task.copyWith(
+      publishError: '发布失败：发布结果尚未确认。私有整图已保留，可重试发布。',
+      timeline: task.timeline.mergeUiEvent(
+        id: _nextTimelineUiId(task.id, task.timeline),
+        kind: 'publish-started',
+        timestampUtc: _clock().toUtc(),
+        stage: 'publishing',
+        state: 'running',
+        operation: 'publish',
+      ),
+    );
+    await _saveTask(started, guardItem: guardItem, generation: generation);
+    try {
+      final result = await (storageService ?? const MobileStorageService())
+          .publishExport(
+            source,
+            destinationUri: destination,
+            mimeType: switch (task.exportFormat) {
+              ExportFormat.png => 'image/png',
+              ExportFormat.tiff => 'image/tiff',
+              ExportFormat.jpegXl => 'image/jxl',
+            },
+            suggestedName: p.basename(source),
+          );
+      if (guardItem != null && generation != _generation(guardItem)) {
+        return task;
+      }
+      final published = started.copyWith(
+        publishedExportPath: result.uri,
+        clearPublishError: true,
+        timeline: started.timeline.mergeUiEvent(
+          id: _nextTimelineUiId(task.id, started.timeline),
+          kind: 'publish',
+          timestampUtc: _clock().toUtc(),
+          stage: 'published',
+          state: 'completed',
+          operation: 'publish',
+        ),
+      );
+      await _saveTask(published, guardItem: guardItem, generation: generation);
+      return published;
+    } on Object catch (error) {
+      final failed = started.copyWith(
+        publishError: '发布失败：$error。私有整图已保留，可重试发布。',
+        timeline: started.timeline.mergeUiEvent(
+          id: _nextTimelineUiId(task.id, started.timeline),
+          kind: 'publish-failed',
+          timestampUtc: _clock().toUtc(),
+          stage: 'publish-failed',
+          state: 'failed',
+          operation: 'publish',
+        ),
+      );
+      await _saveTask(failed, guardItem: guardItem, generation: generation);
+      return failed;
+    }
+  }
+
+  Future<void> retryPublish(String queueId, String itemId) async {
+    final found = _find(queueId, itemId);
+    if (found == null || found.item.taskId == null) return;
+    final task = await _loadTask(found.item);
+    if (task == null || task.exportPath == null || task.publishError == null) {
+      return;
+    }
+    final generation = _generation(itemId);
+    final result = await _publishPrivateExport(
+      task,
+      guardItem: itemId,
+      generation: generation,
+    );
+    if (generation != _generation(itemId)) return;
+    await _replaceState(
+      queueId,
+      itemId,
+      BatchItemState.completed,
+      message:
+          result.publishError ??
+          result.publishedExportPath ??
+          result.exportPath,
+    );
   }
 
   List<BatchQueue> get queues => List.unmodifiable(_queues);
@@ -182,7 +434,17 @@ class BatchQueueController extends ChangeNotifier {
                   !item.pauseRequested) ||
               item.taskId == null) {
             if (pendingRuntimePauseJobIds.isEmpty || item.taskId == null) {
-              items.add(item);
+              if (item.state == BatchItemState.completed &&
+                  item.taskId != null) {
+                final completedTask = await _loadTask(item);
+                items.add(
+                  completedTask?.publishError == null
+                      ? item
+                      : item.copyWith(message: completedTask!.publishError),
+                );
+              } else {
+                items.add(item);
+              }
               continue;
             }
             preloadedTask = await _loadTask(item);
@@ -273,6 +535,7 @@ class BatchQueueController extends ChangeNotifier {
                 task.needsLargeJobConfirmation &&
                 !task.hasCurrentLargeJobApproval) {
               final status = await _api.status(task.nativeJobId!);
+              final timelineTask = _mergeNativeEvents(task, status);
               var nativeState = status['state'] as String? ?? 'unknown';
               final nativeOperation =
                   status['operation'] as String? ?? 'render';
@@ -282,7 +545,7 @@ class BatchQueueController extends ChangeNotifier {
                   jobId: task.nativeJobId!,
                 );
                 await _saveTask(
-                  task.copyWith(
+                  timelineTask.copyWith(
                     phase: StitchPhase.completed,
                     stage: 'export-pending',
                     clearExportCheckpointPath: true,
@@ -317,7 +580,7 @@ class BatchQueueController extends ChangeNotifier {
                 }
               }
               await _saveTask(
-                task.copyWith(
+                timelineTask.copyWith(
                   phase: nativeState == 'paused'
                       ? StitchPhase.paused
                       : StitchPhase.pausing,
@@ -341,12 +604,13 @@ class BatchQueueController extends ChangeNotifier {
               continue;
             }
             final status = await _api.status(task.nativeJobId!);
+            final timelineTask = _mergeNativeEvents(task, status);
             final state = status['state'] as String? ?? 'paused';
             final operation = status['operation'] as String? ?? 'render';
             final savedDestination =
                 status['exportDestination'] as String? ??
-                task.exportCheckpointPath ??
-                task.exportPath;
+                timelineTask.exportCheckpointPath ??
+                timelineTask.exportPath;
             if (state == 'completed' && operation == 'export') {
               final output = savedDestination == null
                   ? null
@@ -358,25 +622,31 @@ class BatchQueueController extends ChangeNotifier {
                   ? await _taskRepository.fingerprintFile(savedDestination!)
                   : null;
               if (fingerprint != null) {
-                await _saveTask(
-                  task.copyWith(
+                final completedTask = await _publishPrivateExport(
+                  timelineTask.copyWith(
                     phase: StitchPhase.completed,
                     exportPath: savedDestination,
                     exportFingerprint: fingerprint,
                     clearExportCheckpointPath: true,
                     progress: 1,
                   ),
+                  guardItem: item.id,
+                  generation: _generation(item.id),
                 );
+                await _saveTask(completedTask);
                 items.add(
                   item.copyWith(
                     state: BatchItemState.completed,
                     progress: 1,
-                    message: savedDestination,
+                    message:
+                        completedTask.publishError ??
+                        completedTask.publishedExportPath ??
+                        savedDestination,
                   ),
                 );
               } else {
                 await _saveTask(
-                  task.copyWith(
+                  timelineTask.copyWith(
                     phase: StitchPhase.completed,
                     clearExportCheckpointPath: true,
                     error: '核心报告导出完成，但输出文件不存在或为空；保留上次成功输出。',
@@ -396,7 +666,7 @@ class BatchQueueController extends ChangeNotifier {
                 savedDestination != null &&
                 savedDestination != task.exportCheckpointPath) {
               await _saveTask(
-                task.copyWith(
+                timelineTask.copyWith(
                   exportCheckpointPath: savedDestination,
                   stage: 'export',
                 ),
@@ -626,14 +896,16 @@ class BatchQueueController extends ChangeNotifier {
   Future<void> addParent(
     String parentPath, {
     ExportFormat outputFormat = ExportFormat.tiff,
+    AppSettings? settings,
   }) async {
     if (_importing) return;
-    if (outputFormat == ExportFormat.jpegXl) {
+    final selectedFormat = settings?.exportFormat ?? outputFormat;
+    if (selectedFormat == ExportFormat.jpegXl) {
       final response = await _api.capabilities();
       final caps =
           response['capabilities'] as Map<String, Object?>? ?? const {};
       if (caps['jpegXlAvailable'] != true) {
-        throw StateError('核心未报告可用的 JPEG XL 无损编码器');
+        throw StateError('核心未报告可用的 JPEG XL 编码器');
       }
     }
     _importing = true;
@@ -648,6 +920,7 @@ class BatchQueueController extends ChangeNotifier {
         p.dirname(p.normalize(parentPath)),
         '${parentName}_stitched',
       );
+      final configuredDestination = settings?.outputDirectory;
       final items = <BatchQueueItem>[];
       for (final snapshot in snapshots) {
         final id = _taskRepository.createId();
@@ -669,7 +942,12 @@ class BatchQueueController extends ChangeNotifier {
         parentDirectory: parentPath,
         outputDirectory: outputPath,
         items: items,
-        outputFormat: outputFormat,
+        outputFormat: selectedFormat,
+        exportDestination: configuredDestination,
+        performanceOptions: settings?.performance ?? const PerformanceOptions(),
+        refineGridNeighbors: settings?.refineGridNeighbors ?? true,
+        seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
+        localTextureWarp: settings?.localTextureWarp ?? true,
       );
       _queues.insert(0, queue);
       await _save(queue);
@@ -743,14 +1021,16 @@ class BatchQueueController extends ChangeNotifier {
         photos: imported.photos,
         grid: imported.grid,
         horizontalFovDegrees: imported.fovDegrees ?? 45,
-        memoryBudgetMiB: 512,
+        memoryBudgetMiB: newTaskMemoryBudgetMiB,
         workers: 1,
         phase: StitchPhase.imported,
         cameraProfileId: imported.cameraProfileId,
-        performanceOptions: const PerformanceOptions(),
+        performanceOptions: queue.performanceOptions,
         exportFormat: queue.outputFormat,
-        refineGridNeighbors: true,
-        seamBlendMode: SeamBlendMode.deghost,
+        refineGridNeighbors: queue.refineGridNeighbors,
+        seamBlendMode: queue.seamBlendMode,
+        localTextureWarp: queue.localTextureWarp,
+        exportDirectory: queue.exportDestination ?? queue.outputDirectory,
       );
       await _saveTask(task);
       final needsSettings = imported.needsLayout || !imported.cameraVerified;
@@ -1105,20 +1385,33 @@ class BatchQueueController extends ChangeNotifier {
       } else if (_isActivePhase(task.phase)) {
         throw StateError('任务缺少原生作业编号；无法确认已停止');
       }
-      for (final ref in refs) {
-        final current = _find(ref.$1.id, ref.$2.id);
-        if (current == null) continue;
-        final queue = current.queue;
-        final next = queue.copyWith(
-          items: [
-            for (final item in queue.items)
-              if (item.id != ref.$2.id) item,
-          ],
-        );
-        _queues[current.index] = next;
-        await _save(next);
-      }
+      // Commit the task tombstone before dropping durable queue ownership. If
+      // storage denies the metadata write, leave the queue reference available
+      // for an explicit retry and keep the task visible in the local cache.
       await _taskRepository.removeTaskRecord(taskId);
+      for (final ref in refs) {
+        while (true) {
+          final current = _find(ref.$1.id, ref.$2.id);
+          if (current == null) break;
+          final queue = current.queue;
+          final next = queue.copyWith(
+            items: [
+              for (final item in queue.items)
+                if (item.id != ref.$2.id) item,
+            ],
+          );
+          await _save(next);
+          final live = _find(ref.$1.id, ref.$2.id);
+          if (live == null) break;
+          if (!identical(live.queue, queue)) {
+            // Recompute after every awaited write so a concurrent queue edit
+            // cannot be overwritten by a stale removal snapshot.
+            continue;
+          }
+          _queues[live.index] = next;
+          break;
+        }
+      }
       _taskCache.remove(taskId);
       for (final ref in refs) {
         _inFlight.remove(ref.$2.id);
@@ -1350,10 +1643,11 @@ class BatchQueueController extends ChangeNotifier {
               : const <ProgressSample>[];
           final samples = _appendSample(priorSamples, phaseProgress);
           final eta = _estimateEta(samples);
-          final updatedTask = task.copyWith(
+          final taskWithTimeline = _mergeNativeEvents(task, status);
+          final updatedTask = taskWithTimeline.copyWith(
             progress: progress,
             stage: stage,
-            phase: _taskPhase(state),
+            phase: _taskPhaseForStatus(state, operation),
             resultStats: status['resultStats'] is Map<String, Object?>
                 ? {
                     ...status['resultStats'] as Map<String, Object?>,
@@ -1436,8 +1730,19 @@ class BatchQueueController extends ChangeNotifier {
                 );
                 continue;
               }
-              await _saveTask(
+              final completedTask = await _publishPrivateExport(
                 operationTask.copyWith(
+                  phase: StitchPhase.completed,
+                  exportPath: path,
+                  exportFingerprint: fingerprint,
+                  clearExportCheckpointPath: true,
+                  progress: 1,
+                ),
+                guardItem: item.id,
+                generation: generation,
+              );
+              await _saveTask(
+                completedTask.copyWith(
                   phase: StitchPhase.completed,
                   exportPath: path,
                   exportFingerprint: fingerprint,
@@ -1453,7 +1758,10 @@ class BatchQueueController extends ChangeNotifier {
                 item.id,
                 BatchItemState.completed,
                 progress: 1,
-                message: path,
+                message:
+                    completedTask.publishError ??
+                    completedTask.publishedExportPath ??
+                    path,
               );
             } else {
               await _saveTask(
@@ -1653,6 +1961,17 @@ class BatchQueueController extends ChangeNotifier {
       );
       return;
     }
+    if (!await _completedExportFitsMemoryBudget(task)) {
+      await _deferCompletedExport(
+        queue,
+        item,
+        task,
+        BatchItemState.ready,
+        '等待共享内存预算释放后再导出整图',
+        generation,
+      );
+      return;
+    }
     if (requireLargeJobApproval && runtimeService != null) {
       if (!resourceConfigurationReady) {
         await _deferCompletedExport(
@@ -1702,6 +2021,17 @@ class BatchQueueController extends ChangeNotifier {
         return;
       }
     }
+    if (!await _completedExportFitsMemoryBudget(task)) {
+      await _deferCompletedExport(
+        queue,
+        item,
+        task,
+        BatchItemState.ready,
+        '共享资源预算已变化，等待释放后再导出整图',
+        generation,
+      );
+      return;
+    }
     _inFlight.add(item.id);
     await _replaceState(
       queue.id,
@@ -1715,7 +2045,14 @@ class BatchQueueController extends ChangeNotifier {
       return;
     }
     try {
-      final output = Directory(queue.outputDirectory);
+      final selectedPath = queue.exportDestination;
+      final output = Directory(
+        selectedPath != null &&
+                selectedPath.isNotEmpty &&
+                !selectedPath.startsWith('content://')
+            ? selectedPath
+            : queue.outputDirectory,
+      );
       await output.create(recursive: true);
       if (generation != _generation(item.id)) {
         _inFlight.remove(item.id);
@@ -1738,6 +2075,17 @@ class BatchQueueController extends ChangeNotifier {
       await _saveTask(exportTask, guardItem: item.id, generation: generation);
       if (generation != _generation(item.id)) {
         _inFlight.remove(item.id);
+        return;
+      }
+      if (!await _completedExportFitsMemoryBudget(task)) {
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.ready,
+          '共享资源预算已变化，等待释放后再导出整图',
+          generation,
+        );
         return;
       }
       final response = await _api.export(task.nativeJobId!, destination.path);
@@ -1777,13 +2125,24 @@ class BatchQueueController extends ChangeNotifier {
         );
         return;
       }
-      await _saveTask(
-        exportTask.copyWith(
-          phase: _taskPhase(state),
-          exportFingerprint: fingerprint,
-          exportPath: state == 'completed' ? destination.path : task.exportPath,
-          clearExportCheckpointPath: state == 'completed',
+      var exportResultTask = _mergeNativeEvents(exportTask, response).copyWith(
+        phase: _taskPhaseForStatus(
+          state,
+          response['operation'] as String? ?? 'export',
         ),
+        exportFingerprint: fingerprint,
+        exportPath: state == 'completed' ? destination.path : task.exportPath,
+        clearExportCheckpointPath: state == 'completed',
+      );
+      if (state == 'completed') {
+        exportResultTask = await _publishPrivateExport(
+          exportResultTask,
+          guardItem: item.id,
+          generation: generation,
+        );
+      }
+      await _saveTask(
+        exportResultTask,
         guardItem: item.id,
         generation: generation,
       );
@@ -1802,7 +2161,10 @@ class BatchQueueController extends ChangeNotifier {
           item.id,
           BatchItemState.completed,
           progress: 1,
-          message: destination.path,
+          message:
+              exportResultTask.publishError ??
+              exportResultTask.publishedExportPath ??
+              destination.path,
         );
       } else if (state == 'failed' || state == 'cancelled') {
         await runtimeService?.setProcessingActive(
@@ -1860,6 +2222,35 @@ class BatchQueueController extends ChangeNotifier {
     }
   }
 
+  Future<bool> _completedExportFitsMemoryBudget(StitchTask task) async {
+    final jobId = task.nativeJobId;
+    if (jobId == null) return false;
+    try {
+      final status = await _api.status(jobId);
+      final capsResponse = await _api.capabilities();
+      final caps =
+          capsResponse['capabilities'] as Map<String, Object?>? ?? const {};
+      final requested =
+          (status['memoryBudgetMiB'] as num? ?? task.memoryBudgetMiB).toInt();
+      final nativeLimit = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+          .toInt();
+      final effectiveLimit = desiredMemoryBudgetMiB == null
+          ? nativeLimit
+          : math.min(nativeLimit, desiredMemoryBudgetMiB!);
+      final held = (caps['reservedMemoryMiB'] as num? ?? 0).toInt();
+      final activeJobs = (caps['activeJobs'] as num? ?? 0).toInt();
+      final configuredJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+      final slotLimit = desiredMaxConcurrentJobs == null
+          ? configuredJobs
+          : math.min(configuredJobs, desiredMaxConcurrentJobs!);
+      return requested <= effectiveLimit &&
+          held + requested <= effectiveLimit &&
+          activeJobs < slotLimit;
+    } on Object {
+      return false;
+    }
+  }
+
   Future<void> _deferCompletedExport(
     BatchQueue queue,
     BatchQueueItem item,
@@ -1896,18 +2287,19 @@ class BatchQueueController extends ChangeNotifier {
     final generation = expectedGeneration ?? _generation(item.id);
     try {
       final status = await _api.status(task.nativeJobId!);
+      final timelineTask = _mergeNativeEvents(task, status);
       if (generation != _generation(item.id)) return;
       final operation = status['operation'] as String? ?? 'render';
       final state = status['state'] as String? ?? 'paused';
       final destination =
           status['exportDestination'] as String? ??
-          task.exportCheckpointPath ??
-          task.exportPath;
+          timelineTask.exportCheckpointPath ??
+          timelineTask.exportPath;
       if (operation != 'export' && state == 'completed') {
         await _exportCompleted(
           queue,
           item,
-          task,
+          timelineTask,
           expectedGeneration: generation,
         );
         return;
@@ -1925,7 +2317,10 @@ class BatchQueueController extends ChangeNotifier {
           destination != null &&
           destination != task.exportCheckpointPath) {
         await _saveTask(
-          task.copyWith(exportCheckpointPath: destination, stage: 'export'),
+          timelineTask.copyWith(
+            exportCheckpointPath: destination,
+            stage: 'export',
+          ),
         );
         if (generation != _generation(item.id)) return;
       }
@@ -1944,25 +2339,31 @@ class BatchQueueController extends ChangeNotifier {
             return;
           }
           if (fingerprint != null) {
-            await _saveTask(
-              task.copyWith(
+            final completedTask = await _publishPrivateExport(
+              timelineTask.copyWith(
                 phase: StitchPhase.completed,
                 exportPath: destination,
                 exportFingerprint: fingerprint,
                 clearExportCheckpointPath: true,
                 progress: 1,
               ),
+              guardItem: item.id,
+              generation: generation,
             );
+            await _saveTask(completedTask);
             await _replaceState(
               queue.id,
               item.id,
               BatchItemState.completed,
               progress: 1,
-              message: destination,
+              message:
+                  completedTask.publishError ??
+                  completedTask.publishedExportPath ??
+                  destination,
             );
           } else {
             await _saveTask(
-              task.copyWith(
+              timelineTask.copyWith(
                 phase: StitchPhase.completed,
                 clearExportCheckpointPath: true,
                 error: '核心报告导出完成，但输出文件不存在或为空；保留上次成功输出。',
@@ -2118,13 +2519,40 @@ class BatchQueueController extends ChangeNotifier {
       if (!_disposed) notifyListeners();
       return;
     }
+    final configuredMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+        .toInt();
+    final configuredJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    if (desiredMemoryBudgetMiB != null &&
+        (configuredMemory != desiredMemoryBudgetMiB ||
+            (desiredMaxConcurrentJobs != null &&
+                configuredJobs != desiredMaxConcurrentJobs))) {
+      try {
+        final updated = await _api.configureResources(
+          totalCpuWorkers: (caps['totalCpuWorkers'] as num? ?? 1).toInt(),
+          totalMemoryBudgetMiB: desiredMemoryBudgetMiB!,
+          maxConcurrentJobs: desiredMaxConcurrentJobs ?? configuredJobs,
+        );
+        caps = updated['capabilities'] as Map<String, Object?>? ?? caps;
+      } on NativeJobException catch (exception) {
+        if (exception.code != 'RESOURCE_BUSY') rethrow;
+        // Keep active reservations. The desired cap below prevents any new
+        // starts until it can be applied on a later queue tick.
+      }
+    }
     var reservedWorkers = (caps['reservedWorkers'] as num? ?? 0).toInt();
     final totalWorkers = (caps['totalCpuWorkers'] as num? ?? 1).toInt();
     final logical = (caps['logicalCpuCount'] as num? ?? 1).toInt();
     var reservedMemory = (caps['reservedMemoryMiB'] as num? ?? 0).toInt();
-    final totalMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024).toInt();
+    final configuredTotalMemory = (caps['totalMemoryBudgetMiB'] as num? ?? 1024)
+        .toInt();
+    final totalMemory = desiredMemoryBudgetMiB == null
+        ? configuredTotalMemory
+        : math.min(configuredTotalMemory, desiredMemoryBudgetMiB!);
     var activeJobs = (caps['activeJobs'] as num? ?? 0).toInt();
-    final maxJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    final configuredMaxJobs = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    final maxJobs = desiredMaxConcurrentJobs == null
+        ? configuredMaxJobs
+        : math.min(configuredMaxJobs, desiredMaxConcurrentJobs!);
     final maxWorkers = (caps['maxWorkersPerJob'] as num? ?? 32).toInt();
     final candidates = [
       for (final queue in _queues)
@@ -2311,13 +2739,17 @@ class BatchQueueController extends ChangeNotifier {
       final requestedMemory = resuming
           ? ((nativeOperationStatus['memoryBudgetMiB'] as num?)?.toInt() ??
                 task.memoryBudgetMiB)
-          : task.memoryBudgetMiB.clamp(128, 4096).toInt();
+          : task.memoryBudgetMiB.clamp(128, 128 * 1024).toInt();
       final budget = resourceBudget;
-      final memory = requireLargeJobApproval && budget != null
+      final mobileMemory =
+          !resuming && requireLargeJobApproval && budget != null
           ? math
                 .min(requestedMemory, budget.recommendedTotalMemoryBudgetMiB)
                 .toInt()
           : requestedMemory;
+      final memory = !resuming && desiredMemoryBudgetMiB != null
+          ? math.min(mobileMemory, desiredMemoryBudgetMiB!).toInt()
+          : mobileMemory;
       final availableWorkers = totalWorkers - reservedWorkers;
       final requestedWorkers = resuming
           ? ((nativeOperationStatus['operationWorkers'] as num?)?.toInt() ??
@@ -2399,7 +2831,6 @@ class BatchQueueController extends ChangeNotifier {
             nativeJobId: output.path,
             phase: StitchPhase.queued,
             workers: workers,
-            memoryBudgetMiB: memory,
             stage: 'start-intent',
           );
           await _saveTask(intent, guardItem: item.id, generation: generation);
@@ -2700,6 +3131,14 @@ class BatchQueueController extends ChangeNotifier {
     _ => StitchPhase.interrupted,
   };
 
+  StitchPhase _taskPhaseForStatus(String state, String operation) {
+    if (operation == 'export' &&
+        const {'queued', 'running', 'pausing'}.contains(state)) {
+      return StitchPhase.exporting;
+    }
+    return _taskPhase(state);
+  }
+
   Future<StitchTask?> _loadTask(BatchQueueItem item) async {
     if (item.taskId == null) return null;
     final cached = _taskCache[item.taskId];
@@ -2724,6 +3163,9 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<StitchTask?> taskForItem(BatchQueueItem item) => _loadTask(item);
+
+  Future<TaskRecordSnapshot?> taskRecordFor(String taskId) =>
+      TaskRecordService(_taskRepository).loadRecord(taskId);
 
   ({int index, BatchQueue queue, BatchQueueItem item})? _find(
     String queueId,

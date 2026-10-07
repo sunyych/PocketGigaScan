@@ -29,6 +29,74 @@ StitchTask fixture() => StitchTask(
 );
 
 void main() {
+  test('legacy forced cells migrate with unknown origin and stay locked', () {
+    final legacy = fixture()
+        .copyWith(
+          grid: GridOptions(
+            mode: GridMode.sequence,
+            rows: 1,
+            columns: 1,
+            forceGridCells: {const GridCell(0, 0)},
+          ),
+        )
+        .toJson();
+    final gridJson = (legacy['grid']! as Map<String, Object?>)
+      ..remove('forceGridCellOrigins')
+      ..remove('lockedPhotoOrigins');
+
+    final restored = StitchTask.fromJson(legacy);
+    expect(
+      restored.grid.lockedPhotoOrigins['image.jpg'],
+      GridConstraintOrigin.legacyUnknown,
+    );
+    expect(restored.grid.forceGridCells, {const GridCell(0, 0)});
+    expect(
+      (restored.toJson()['grid']! as Map<String, Object?>).containsKey(
+        'lockedPhotoOrigins',
+      ),
+      isTrue,
+    );
+
+    gridJson['rows'] = 1;
+    gridJson['columns'] = 2;
+    gridJson['forceGridCells'] = [
+      {'row': 0, 'column': 1},
+    ];
+    final temporarilyInvalid = StitchTask.fromJson(legacy);
+    expect(temporarilyInvalid.grid.forceGridCells, {const GridCell(0, 1)});
+    expect(
+      temporarilyInvalid.grid.forceGridCellOrigins[const GridCell(0, 1)],
+      GridConstraintOrigin.legacyUnknown,
+    );
+    final expandedJson = temporarilyInvalid.toJson();
+    final expandedGrid = expandedJson['grid']! as Map<String, Object?>;
+    expandedGrid['columns'] = 1;
+    final recoveredMapping = StitchTask.fromJson(expandedJson);
+    expect(recoveredMapping.grid.pendingForceGridCells, {const GridCell(0, 1)});
+    expect(
+      recoveredMapping.grid
+          .placementFor(recoveredMapping.photos.single, const GridCell(0, 0))
+          .toJson(),
+      {'kind': 'gridPrior', 'origin': 'systemFallback'},
+    );
+  });
+
+  test('operator hard lock origin survives task serialization', () {
+    final task = fixture().copyWith(
+      grid: const GridOptions(
+        mode: GridMode.sequence,
+        rows: 1,
+        columns: 1,
+      ).setPhotoLock(const GridCell(0, 0), 'image.jpg', locked: true),
+    );
+    final restored = StitchTask.fromJson(task.toJson());
+    expect(
+      restored.grid.lockedPhotoOrigins['image.jpg'],
+      GridConstraintOrigin.operatorAction,
+    );
+    expect(restored.grid.forceGridCells, {const GridCell(0, 0)});
+  });
+
   test('grid fallback and overlap settings survive task serialization', () {
     final task = fixture().copyWith(
       forceGridFallback: true,
@@ -49,80 +117,91 @@ void main() {
     expect(restored.cameraCalibrationOverridden, isTrue);
   });
 
-  test('large-job approval persists and is invalidated by job, grid, or photo changes', () {
-    final large = fixture().copyWith(
-      grid: const GridOptions(mode: GridMode.sequence, rows: 7, columns: 1),
-      photos: [
-        for (var index = 0; index < 7; index++)
-          ImportedPhoto(
-            originalName: 'image$index.jpg',
-            storedPath: 'image$index.jpg',
-            sha256: 'hash$index',
-            width: 3840,
-            height: 2160,
-            originalOrder: index,
-          ),
-      ],
-    );
-    expect(large.needsLargeJobConfirmation, isTrue);
-    expect(large.hasCurrentLargeJobApproval, isFalse);
-    final approved = large.copyWith(
-      largeJobApprovalScope: large.currentLargeJobApprovalScope,
-    );
-    final restored = StitchTask.fromJson(approved.toJson());
-    expect(restored.hasCurrentLargeJobApproval, isTrue);
-    expect(
-      restored.copyWith(grid: restored.grid.copyWith(serpentine: true))
-          .hasCurrentLargeJobApproval,
-      isFalse,
-    );
-    expect(
-      StitchTask.fromJson({...restored.toJson(), 'id': 'another-job'})
-          .hasCurrentLargeJobApproval,
-      isFalse,
-    );
-    expect(
-      restored.copyWith(
+  test(
+    'large-job approval persists and is invalidated by job, grid, or photo changes',
+    () {
+      final large = fixture().copyWith(
+        grid: const GridOptions(mode: GridMode.sequence, rows: 7, columns: 1),
         photos: [
-          ...restored.photos,
-          const ImportedPhoto(
-            originalName: 'extra.jpg',
-            storedPath: 'extra.jpg',
-            sha256: 'extra',
-            width: 3840,
-            height: 2160,
-            originalOrder: 7,
-          ),
+          for (var index = 0; index < 7; index++)
+            ImportedPhoto(
+              originalName: 'image$index.jpg',
+              storedPath: 'image$index.jpg',
+              sha256: 'hash$index',
+              width: 3840,
+              height: 2160,
+              originalOrder: index,
+            ),
         ],
-      ).hasCurrentLargeJobApproval,
-      isFalse,
-    );
-  });
+      );
+      expect(large.needsLargeJobConfirmation, isTrue);
+      expect(large.hasCurrentLargeJobApproval, isFalse);
+      final approved = large.copyWith(
+        largeJobApprovalScope: large.currentLargeJobApprovalScope,
+      );
+      final restored = StitchTask.fromJson(approved.toJson());
+      expect(restored.hasCurrentLargeJobApproval, isTrue);
+      expect(
+        restored
+            .copyWith(grid: restored.grid.copyWith(serpentine: true))
+            .hasCurrentLargeJobApproval,
+        isFalse,
+      );
+      expect(
+        StitchTask.fromJson({
+          ...restored.toJson(),
+          'id': 'another-job',
+        }).hasCurrentLargeJobApproval,
+        isFalse,
+      );
+      expect(
+        restored
+            .copyWith(
+              photos: [
+                ...restored.photos,
+                const ImportedPhoto(
+                  originalName: 'extra.jpg',
+                  storedPath: 'extra.jpg',
+                  sha256: 'extra',
+                  width: 3840,
+                  height: 2160,
+                  originalOrder: 7,
+                ),
+              ],
+            )
+            .hasCurrentLargeJobApproval,
+        isFalse,
+      );
+    },
+  );
 
-  test('large-job threshold is strictly above 6x6 and includes 7x6 and 7x1', () {
-    StitchTask withGrid(int rows, int columns) => fixture().copyWith(
-      grid: GridOptions(
-        mode: GridMode.sequence,
-        rows: rows,
-        columns: columns,
-      ),
-      photos: [
-        for (var index = 0; index < rows * columns; index++)
-          ImportedPhoto(
-            originalName: 'image$index.jpg',
-            storedPath: 'image$index.jpg',
-            sha256: 'hash$index',
-            width: 3840,
-            height: 2160,
-            originalOrder: index,
-          ),
-      ],
-    );
+  test(
+    'large-job threshold is strictly above 6x6 and includes 7x6 and 7x1',
+    () {
+      StitchTask withGrid(int rows, int columns) => fixture().copyWith(
+        grid: GridOptions(
+          mode: GridMode.sequence,
+          rows: rows,
+          columns: columns,
+        ),
+        photos: [
+          for (var index = 0; index < rows * columns; index++)
+            ImportedPhoto(
+              originalName: 'image$index.jpg',
+              storedPath: 'image$index.jpg',
+              sha256: 'hash$index',
+              width: 3840,
+              height: 2160,
+              originalOrder: index,
+            ),
+        ],
+      );
 
-    expect(withGrid(6, 6).needsLargeJobConfirmation, isFalse);
-    expect(withGrid(7, 6).needsLargeJobConfirmation, isTrue);
-    expect(withGrid(7, 1).needsLargeJobConfirmation, isTrue);
-  });
+      expect(withGrid(6, 6).needsLargeJobConfirmation, isFalse);
+      expect(withGrid(7, 6).needsLargeJobConfirmation, isTrue);
+      expect(withGrid(7, 1).needsLargeJobConfirmation, isTrue);
+    },
+  );
 
   test(
     'quality choices persist and legacy tasks retain PNG and old blending',
@@ -156,31 +235,34 @@ void main() {
     },
   );
 
-  test('JPEG XL extension, label, persistence name, and fingerprint persist', () {
-    final task = fixture().copyWith(
-      exportFormat: ExportFormat.jpegXl,
-      exportPath: r'C:\exports\panorama.jxl',
-      exportFingerprint: const ExportFileFingerprint(
-        sizeBytes: 1234,
-        modifiedAtMicros: 4567,
-      ),
-    );
-    final restored = StitchTask.fromJson(task.toJson());
-    expect(restored.exportFormat, ExportFormat.jpegXl);
-    expect(restored.exportFingerprint?.sizeBytes, 1234);
-    expect(restored.exportFingerprint?.modifiedAtMicros, 4567);
-    expect(ExportFormat.fromPath('PANORAMA.JXL'), ExportFormat.jpegXl);
-    expect(ExportFormat.jpegXl.extension, 'jxl');
-    expect(ExportFormat.jpegXl.label, 'JPEG XL（有损）');
-    expect(ExportFormat.jpegXl.shortLabel, 'JPEG XL');
-    expect(ExportFormat.png.label, 'PNG（无损）');
-    expect(ExportFormat.tiff.label, 'TIFF（无损，大图自动 BigTIFF）');
-    expect(task.toJson()['exportFormat'], 'jpegXl');
-    expect(ExportFormat.fromSavedValue('jpegXl'), ExportFormat.jpegXl);
-    expect(ExportFormat.fromSavedValue('tiff'), ExportFormat.tiff);
-    expect(ExportFormat.jpegXl.supportedOnMobile, isTrue);
-    expect(ExportFormat.fromSavedValue('unexpected'), ExportFormat.png);
-  });
+  test(
+    'JPEG XL extension, label, persistence name, and fingerprint persist',
+    () {
+      final task = fixture().copyWith(
+        exportFormat: ExportFormat.jpegXl,
+        exportPath: r'C:\exports\panorama.jxl',
+        exportFingerprint: const ExportFileFingerprint(
+          sizeBytes: 1234,
+          modifiedAtMicros: 4567,
+        ),
+      );
+      final restored = StitchTask.fromJson(task.toJson());
+      expect(restored.exportFormat, ExportFormat.jpegXl);
+      expect(restored.exportFingerprint?.sizeBytes, 1234);
+      expect(restored.exportFingerprint?.modifiedAtMicros, 4567);
+      expect(ExportFormat.fromPath('PANORAMA.JXL'), ExportFormat.jpegXl);
+      expect(ExportFormat.jpegXl.extension, 'jxl');
+      expect(ExportFormat.jpegXl.label, 'JPEG XL（有损）');
+      expect(ExportFormat.jpegXl.shortLabel, 'JPEG XL');
+      expect(ExportFormat.png.label, 'PNG（无损）');
+      expect(ExportFormat.tiff.label, 'TIFF（无损，大图自动 BigTIFF）');
+      expect(task.toJson()['exportFormat'], 'jpegXl');
+      expect(ExportFormat.fromSavedValue('jpegXl'), ExportFormat.jpegXl);
+      expect(ExportFormat.fromSavedValue('tiff'), ExportFormat.tiff);
+      expect(ExportFormat.jpegXl.supportedOnMobile, isTrue);
+      expect(ExportFormat.fromSavedValue('unexpected'), ExportFormat.png);
+    },
+  );
 
   test('in-flight legacy exports migrate to an immutable checkpoint path', () {
     final legacy = fixture().toJson()

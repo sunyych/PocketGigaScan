@@ -17,11 +17,31 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 14;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 19;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
     JOBS.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Export a freshly rendered layout for the standalone layout benchmark.
+/// Callers must use a new output directory and retain the returned receipt.
+pub fn benchmark_export_level0_tiff(
+    job_dir: &Path,
+    manifest: &Value,
+    destination: &Path,
+    memory_budget_mib: usize,
+) -> crate::Result<Value> {
+    let mut checkpoint = |_: u32, _: u32| Ok(());
+    let mut begin_commit = || Ok(());
+    crate::tiff_export::export_level0_tiff(
+        job_dir,
+        manifest,
+        destination,
+        memory_budget_mib,
+        &mut checkpoint,
+        &mut begin_commit,
+    )
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,6 +81,98 @@ struct Snapshot {
     height: Option<u32>,
     #[serde(default)]
     commit_started: bool,
+    #[serde(default)]
+    events: Vec<Value>,
+    #[serde(default)]
+    next_event_id: u64,
+}
+
+fn stage_family(stage: &str) -> &str {
+    if stage.starts_with("grid-component-pose-") {
+        "optimize-grid-poses"
+    } else if stage.starts_with("pixel-refinement-") || stage.starts_with("pixel-bundle-") {
+        "refine-pixel-texture"
+    } else if matches!(
+        stage,
+        "retry-matching" | "retry-feature-extraction" | "clahe-retry"
+    ) || stage.starts_with("retry-matching-progress:")
+        || stage.starts_with("clahe-retry-progress:")
+    {
+        "retry-neighbor-matching"
+    } else if stage.starts_with("joint-cycle-prune-") {
+        "prune-conflicting-neighbors"
+    } else if stage.starts_with("source-plane-warp-") {
+        "fit-local-texture-warp"
+    } else {
+        stage
+    }
+}
+
+/// Coarse registration progress advances only at named phase boundaries. Per-tile
+/// and per-edge callbacks remain useful cancellation checkpoints, but do not
+/// pretend that each callback is a meaningful fraction of total work.
+fn registration_progress(stage: &str) -> Option<f64> {
+    fn batch_progress(stage: &str, prefix: &str, start: f64) -> Option<f64> {
+        let counts = stage.strip_prefix(prefix)?;
+        let (done, total) = counts.split_once('/')?;
+        let done = done.parse::<u64>().ok()?;
+        let total = total.parse::<u64>().ok()?;
+        if total == 0 || done == 0 || done > total {
+            return None;
+        }
+        Some(start + 0.02 * (done as f64 / total as f64))
+    }
+
+    match stage {
+        "validation-complete" => Some(0.04),
+        "grid-overlap-complete" => Some(0.06),
+        "feature-extraction-complete" => Some(0.08),
+        "initial-matching-complete" => Some(0.10),
+        _ if stage.starts_with("retry-matching-progress:") => {
+            batch_progress(stage, "retry-matching-progress:", 0.10)
+        }
+        _ if stage.starts_with("clahe-retry-progress:") => {
+            batch_progress(stage, "clahe-retry-progress:", 0.12)
+        }
+        // This callback occurs after the ordinary retry loop and as the optional
+        // CLAHE pass begins.
+        "clahe-retry" => Some(0.12),
+        // A bounded 2 MP registration retry starts after the fast attempt's
+        // quality gate. Keep progress monotonic while the second pass runs.
+        "precision-recovery-start" => Some(0.18),
+        _ if stage.starts_with("grid-component-pose-")
+            || stage.starts_with("pixel-refinement-")
+            || stage.starts_with("pixel-bundle-") =>
+        {
+            Some(0.15)
+        }
+        _ if stage.starts_with("joint-cycle-prune-") => Some(0.17),
+        _ if stage.starts_with("source-plane-warp-") => Some(0.18),
+        "registration-complete" => Some(0.19),
+        _ => None,
+    }
+}
+
+fn record_transition(s: &mut Snapshot) {
+    let changed = s.events.last().is_none_or(|event| {
+        event["stage"] != stage_family(&s.stage)
+            || event["state"] != s.state
+            || event["operation"] != s.operation
+    });
+    if !changed {
+        return;
+    }
+    append_event(s, "native-transition");
+}
+
+fn append_event(s: &mut Snapshot, kind: &str) {
+    let id = s.next_event_id.max(1);
+    s.next_event_id = id + 1;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    s.events.push(json!({"id":id,"timestampUtc":millis,"kind":kind,"stage":stage_family(&s.stage),"state":s.state,"operation":s.operation}));
 }
 struct Control {
     root: PathBuf,
@@ -74,6 +186,11 @@ struct Control {
 #[derive(Debug)]
 enum RunFailure {
     CooperativeCancellation,
+    Registration {
+        code: String,
+        message: String,
+        diagnostics: Option<Value>,
+    },
     Failed(String),
 }
 
@@ -95,6 +212,18 @@ impl From<&str> for RunFailure {
         Self::from(message.to_owned())
     }
 }
+
+fn registration_run_failure(error: spherical::SphericalFailure) -> RunFailure {
+    if error.code == "CANCELLED" {
+        RunFailure::CooperativeCancellation
+    } else {
+        RunFailure::Registration {
+            code: error.code.to_owned(),
+            message: error.message,
+            diagnostics: error.diagnostics,
+        }
+    }
+}
 impl Control {
     fn snapshot(&self) -> Snapshot {
         self.snapshot.lock().expect("job lock").clone()
@@ -102,9 +231,11 @@ impl Control {
     fn update(&self, f: impl FnOnce(&mut Snapshot)) {
         let mut s = self.snapshot.lock().expect("job lock");
         f(&mut s);
+        record_transition(&mut s);
         if let Err(e) = persist(&self.root, &s) {
             s.state = "failed".into();
             s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut s);
         }
     }
     /// Atomically close the cancellation window before publishing a completed artifact.
@@ -121,9 +252,11 @@ impl Control {
             if s.state == "running" && !s.commit_started && !self.cancel.load(Ordering::SeqCst) {
                 s.stage = stage.into();
                 s.commit_started = true;
+                append_event(&mut s, "commit-started");
                 if let Err(e) = persist(&self.root, &s) {
                     s.state = "failed".into();
                     s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+                    record_transition(&mut s);
                     return false;
                 }
                 return true;
@@ -141,6 +274,7 @@ impl Control {
         if s.state == "cancelled" || self.cancel.load(Ordering::SeqCst) {
             s.state = "cancelled".into();
             s.stage = stage.into();
+            record_transition(&mut s);
             let _ = persist(&self.root, &s);
             return false;
         }
@@ -157,6 +291,7 @@ impl Control {
         }
         if self.cancel.load(Ordering::SeqCst) {
             s.state = "cancelled".into();
+            record_transition(&mut s);
             let _ = persist(&self.root, &s);
             return false;
         }
@@ -169,31 +304,37 @@ impl Control {
                 failed.error = Some(
                     json!({"code":"INPUT_CHANGED","message":"source or request fingerprint changed while paused"}),
                 );
+                record_transition(&mut failed);
                 let _ = persist(&self.root, &failed);
                 return false;
             }
             s = self.snapshot.lock().expect("job lock");
             if self.cancel.load(Ordering::SeqCst) {
                 s.state = "cancelled".into();
+                record_transition(&mut s);
                 let _ = persist(&self.root, &s);
                 return false;
             }
         }
+        let old_state = s.state.clone();
         if s.state == "paused" {
             s.state = "running".into();
         }
-        let stage_changed = s.stage != stage;
+        let stage_changed = stage_family(&s.stage) != stage_family(stage);
         let old_progress = s.progress;
         s.stage = stage.into();
         if let Some(p) = progress {
-            s.progress = p;
+            s.progress = p.max(s.progress);
         }
-        let should_persist =
-            stage_changed || progress.is_some_and(|p| (p - old_progress).abs() >= 0.005);
+        let progress_changed =
+            progress.is_some_and(|p| (p.max(old_progress) - old_progress).abs() >= 0.005);
+        let should_persist = old_state != s.state || stage_changed || progress_changed;
         if should_persist {
+            record_transition(&mut s);
             if let Err(e) = persist(&self.root, &s) {
                 s.state = "failed".into();
                 s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+                record_transition(&mut s);
                 return false;
             }
         }
@@ -221,7 +362,7 @@ fn response(s: &Snapshot) -> Value {
         .export_destination
         .as_deref()
         .map(|path| export_format_for_path(Path::new(path)).unwrap_or("unknown"));
-    json!({"ok":true,"abiVersion":1,"jobId":s.job_id,"state":s.state,"stage":s.stage,"progress":s.progress,"backend":s.backend,"operation":s.operation,"workersRequested":s.workers_requested,"workersEffective":s.workers_effective,"operationWorkers":operation_workers,"memoryBudgetMiB":s.memory_budget_mib,"layoutPath":s.layout_path,"manifestPath":s.manifest_path,"exportDestination":s.export_destination,"exportFormat":export_format,"dimensions":s.width.zip(s.height).map(|(w,h)|json!([w,h])),"resultStats":s.result_stats,"error":s.error})
+    json!({"ok":true,"abiVersion":1,"jobId":s.job_id,"state":s.state,"stage":s.stage,"progress":s.progress,"backend":s.backend,"operation":s.operation,"events":s.events,"workersRequested":s.workers_requested,"workersEffective":s.workers_effective,"operationWorkers":operation_workers,"memoryBudgetMiB":s.memory_budget_mib,"layoutPath":s.layout_path,"manifestPath":s.manifest_path,"exportDestination":s.export_destination,"exportFormat":export_format,"dimensions":s.width.zip(s.height).map(|(w,h)|json!([w,h])),"resultStats":s.result_stats,"error":s.error})
 }
 fn fail(code: &str, msg: impl ToString) -> Value {
     json!({"ok":false,"abiVersion":1,"error":{"code":code,"message":msg.to_string()}})
@@ -296,7 +437,8 @@ pub fn handle(input: &str) -> Value {
 }
 fn capabilities_value(limits: Limits) -> Value {
     let (active_jobs, reserved_workers, reserved_memory_mib) = job_resources::usage();
-    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
+    let pending = job_resources::pending_limits();
+    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
 }
 fn capabilities() -> Value {
     json!({"ok":true,"capabilities":capabilities_value(job_resources::limits())})
@@ -411,7 +553,14 @@ fn start(c: Command) -> Value {
     if !(job_resources::MIN_JOB_MEMORY_MIB..=job_resources::MAX_JOB_MEMORY_MIB)
         .contains(&c.memory_budget_mib)
     {
-        return fail("INVALID_REQUEST", "memoryBudgetMiB must be 128..=4096");
+        return fail(
+            "INVALID_REQUEST",
+            format!(
+                "memoryBudgetMiB must be {}..={} MiB",
+                job_resources::MIN_JOB_MEMORY_MIB,
+                job_resources::MAX_JOB_MEMORY_MIB
+            ),
+        );
     }
     if !(1..=job_resources::MAX_WORKERS_PER_JOB).contains(&c.workers) {
         return fail("INVALID_REQUEST", "workers must be 1..=32");
@@ -569,7 +718,11 @@ fn start(c: Command) -> Value {
         width: None,
         height: None,
         commit_started: false,
+        events: Vec::new(),
+        next_event_id: 1,
     };
+    let mut snapshot = snapshot;
+    record_transition(&mut snapshot);
     let control = Arc::new(Control {
         root: root.clone(),
         snapshot: Mutex::new(snapshot),
@@ -624,6 +777,7 @@ fn get_job(id: Option<&str>) -> Result<Arc<Control>, String> {
     if ["running", "queued", "pausing", "committing"].contains(&s.state.as_str()) {
         s.state = "paused".into();
         s.commit_started = false;
+        record_transition(&mut s);
         persist(&path, &s).map_err(|e| format!("could not recover job state: {e}"))?;
     }
     let control = Arc::new(Control {
@@ -662,9 +816,11 @@ fn pause(j: Arc<Control>) -> Value {
     }
     if snapshot.state == "running" || snapshot.state == "queued" {
         snapshot.state = "pausing".into();
+        record_transition(&mut snapshot);
         if let Err(e) = persist(&j.root, &snapshot) {
             snapshot.state = "failed".into();
             snapshot.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut snapshot);
         }
     }
     let v = response(&snapshot);
@@ -684,17 +840,21 @@ fn cancel(j: Arc<Control>) -> Value {
     if !j.worker_active.load(Ordering::SeqCst) {
         s.state = "cancelled".into();
         s.stage = "cancelled".into();
+        record_transition(&mut s);
         if let Err(e) = persist(&j.root, &s) {
             s.state = "failed".into();
             s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+            record_transition(&mut s);
         }
         return response(&s);
     }
     s.state = "pausing".into();
+    record_transition(&mut s);
     j.cancel.store(true, Ordering::SeqCst);
     if let Err(e) = persist(&j.root, &s) {
         s.state = "failed".into();
         s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":e.to_string()}));
+        record_transition(&mut s);
     }
     drop(s);
     j.changed.notify_all();
@@ -829,11 +989,23 @@ fn finish_run_failure(j: &Control, failure: RunFailure) {
     // Cancellation from a renderer checkpoint is the signal used to unwind a
     // pause. A concurrent user cancel takes precedence; genuine errors are
     // never hidden merely because a pause was requested.
+    let failure = match failure {
+        RunFailure::Registration {
+            code,
+            message,
+            diagnostics,
+        } => {
+            finish_registration_failure(j, code, message, diagnostics);
+            return;
+        }
+        failure => failure,
+    };
     j.update(|s| {
         if s.state == "failed" {
             return;
         }
         match failure {
+            RunFailure::Registration { .. } => unreachable!("handled above"),
             RunFailure::CooperativeCancellation if j.cancel.load(Ordering::SeqCst) => {
                 s.state = "cancelled".into();
                 s.stage = "cancelled".into();
@@ -863,6 +1035,62 @@ fn finish_run_failure(j: &Control, failure: RunFailure) {
         }
         s.commit_started = false;
     });
+}
+
+fn finish_registration_failure(
+    j: &Control,
+    code: String,
+    message: String,
+    diagnostics: Option<Value>,
+) {
+    // Serialize the cancellation race with the diagnostic write. If cancellation
+    // already won, keep the established cancelled state and leave no failure file.
+    let mut s = j.snapshot.lock().expect("job lock");
+    if ["failed", "cancelled"].contains(&s.state.as_str()) {
+        return;
+    }
+    if j.cancel.load(Ordering::SeqCst) {
+        s.state = "cancelled".into();
+        s.stage = "cancelled".into();
+        s.error = None;
+        s.commit_started = false;
+        record_transition(&mut s);
+        let _ = persist(&j.root, &s);
+        drop(s);
+        j.changed.notify_all();
+        return;
+    }
+
+    let diagnostic_path = "registration-failure.json";
+    let diagnostic_record = json!({
+        "schemaVersion": 1,
+        "code": code,
+        "message": message,
+        "diagnostics": diagnostics,
+    });
+    let diagnostic_write = write_json_atomic(&j.root.join(diagnostic_path), &diagnostic_record);
+
+    s.state = "failed".into();
+    s.stage = "registration-failed".into();
+    s.commit_started = false;
+    s.error = Some(json!({
+        "code": code,
+        "message": message,
+        "diagnosticsPath": if diagnostic_write.is_ok() { Some(diagnostic_path) } else { None },
+        "diagnosticsPersistError": diagnostic_write.as_ref().err().map(ToString::to_string),
+    }));
+    s.result_stats = Some(json!({
+        "operation": "render",
+        "registrationFailurePath": if diagnostic_write.is_ok() { Some(diagnostic_path) } else { None },
+    }));
+    record_transition(&mut s);
+    if let Err(error) = persist(&j.root, &s) {
+        s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":error.to_string()}));
+        record_transition(&mut s);
+        let _ = persist(&j.root, &s);
+    }
+    drop(s);
+    j.changed.notify_all();
 }
 fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     let total_started = Instant::now();
@@ -903,7 +1131,7 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     });
     let request_text = serde_json::to_string(&j.snapshot().request).map_err(|e| e.to_string())?;
     let mut check = |stage: &str| {
-        if j.checkpoint(stage, None) {
+        if j.checkpoint(stage, registration_progress(stage)) {
             Ok(())
         } else {
             Err("cancelled".into())
@@ -928,7 +1156,7 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
                 cached_layout
             } else {
                 let result = spherical::align_json_with_checkpoint(&request_text, &mut check)
-                    .map_err(|e| e.message)?;
+                    .map_err(registration_run_failure)?;
                 let layout_bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
                 let layout_json =
                     String::from_utf8(layout_bytes.clone()).map_err(|e| e.to_string())?;
@@ -941,11 +1169,18 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
             }
         } else {
             spherical::align_json_with_checkpoint(&request_text, &mut check)
-                .map_err(|e| e.message)?
+                .map_err(registration_run_failure)?
         }
     } else {
-        spherical::align_json_with_checkpoint(&request_text, &mut check).map_err(|e| e.message)?
+        spherical::align_json_with_checkpoint(&request_text, &mut check)
+            .map_err(registration_run_failure)?
     };
+    j.update(|s| {
+        s.stage = "registration-complete".into();
+        s.progress = s
+            .progress
+            .max(registration_progress("registration-complete").unwrap_or(0.19));
+    });
     if !layout_path.exists() {
         write_json_atomic(&layout_path, &layout)?;
         let hash = fingerprint::sha256_file(&layout_path).map_err(|e| e.to_string())?;
@@ -1116,13 +1351,27 @@ fn alignment_stats(layout: &Value, cache_hit: bool) -> Value {
         "featureType":report["featureType"],
         "matcherType":report["matcherType"],
         "registrationMegapixels":report["registrationMegapixels"],
+        "requestedRegistrationMegapixels":report["requestedRegistrationMegapixels"],
+        "actualRegistrationMegapixels":report["actualRegistrationMegapixels"],
+        "precisionRecovery":report["precisionRecovery"],
         "neighborMode":report["neighborMode"],
         "qualityStatus":report["qualityStatus"],
+        "edgeDiagnostics":report["edgeDiagnostics"],
+        "qualityWarnings":report["qualityWarnings"],
         "gridOverlapEstimate":report["gridOverlapEstimate"],
         "featureExtractionMs":report["featureExtractionMs"],
         "initialMatchingMs":report["initialMatchingMs"],
         "lowContrastRetryMs":report["lowContrastRetryMs"],
+        "lowContrastRetryExtractionMs":report["lowContrastRetryExtractionMs"],
+        "lowContrastRetryMatchingMs":report["lowContrastRetryMatchingMs"],
+        "lowContrastRetryExtractedEndpointCount":report["lowContrastRetryExtractedEndpointCount"],
+        "lowContrastRetryUniqueExtractedFeatureCount":report["lowContrastRetryUniqueExtractedFeatureCount"],
         "claheRetryMs":report["claheRetryMs"],
+        "claheRetryExtractionMs":report["claheRetryExtractionMs"],
+        "claheRetryMatchingMs":report["claheRetryMatchingMs"],
+        "claheRetryExtractedEndpointCount":report["claheRetryExtractedEndpointCount"],
+        "claheRetryUniqueExtractedFeatureCount":report["claheRetryUniqueExtractedFeatureCount"],
+        "claheRetryFeatureCountSemantics":report["claheRetryFeatureCountSemantics"],
         "poseOptimizationMs":report["poseOptimizationMs"],
         "totalAlignmentMs":report["totalAlignmentMs"]
     })
@@ -1559,7 +1808,7 @@ mod tests {
 
     #[test]
     fn alignment_cache_key_ignores_execution_options_but_tracks_algorithm_and_sources() {
-        let request = json!({"fov":70,"grid":{"rows":2},"parallelRendering":true,"workers":4,"useAlignmentCache":true});
+        let request = json!({"fov":70,"grid":{"rows":2},"parallelRendering":true,"workers":4,"useAlignmentCache":true,"allowPrecisionRecovery":true});
         let mut hashes = BTreeMap::new();
         hashes.insert("source.jpg".into(), "a".repeat(64));
         let key = alignment_cache_key(&request, &hashes);
@@ -1573,9 +1822,28 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
-            alignment_cache_key_for_version(14, &request, &hashes),
-            "the current component-pose algorithm must use cache version 14"
+            alignment_cache_key_for_version(19, &request, &hashes),
+            "bounded precision recovery must use cache version 19"
         );
+        assert_ne!(
+            key,
+            alignment_cache_key_for_version(18, &request, &hashes),
+            "version 18 layouts predate bounded precision recovery"
+        );
+        let mut recovery_disabled = request.clone();
+        recovery_disabled["allowPrecisionRecovery"] = json!(false);
+        assert_ne!(
+            key,
+            alignment_cache_key(&recovery_disabled, &hashes),
+            "cache identity must include whether precision recovery is allowed"
+        );
+        assert_ne!(
+            key,
+            alignment_cache_key_for_version(16, &request, &hashes),
+            "extended source-plane warp layouts must not reuse version 16 results"
+        );
+        assert_ne!(key, alignment_cache_key_for_version(15, &request, &hashes));
+        assert_ne!(key, alignment_cache_key_for_version(14, &request, &hashes));
         assert_ne!(
             key,
             alignment_cache_key_for_version(13, &request, &hashes),
@@ -1588,7 +1856,7 @@ mod tests {
 
     #[test]
     fn corrupt_alignment_cache_record_is_rejected() {
-        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3}});
+        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3,"requestedRegistrationMegapixels":0.6,"actualRegistrationMegapixels":2.0,"precisionRecovery":{"enabled":true,"eligible":true,"attempted":true,"status":"recovered","requestedRegistrationMegapixels":0.6,"actualRegistrationMegapixels":2.0,"attempts":[{"registrationMegapixels":0.6,"status":"reprojectionQualityFailed"},{"registrationMegapixels":2.0,"status":"completed"}]},"edgeDiagnostics":[{"from":0,"to":1,"reliabilityWeightScale":0.05,"loopConflictAmbiguous":true}],"qualityWarnings":["inspect affected seams"]}});
         let layout_json = serde_json::to_string(&layout).unwrap();
         let hash = fingerprint::sha256_bytes(layout_json.as_bytes());
         let valid =
@@ -1600,6 +1868,20 @@ mod tests {
         assert_eq!(summary["qualityStatus"], "needs-visual-review");
         assert_eq!(summary["matchingWorkers"], 3);
         assert_eq!(summary["cached"], true);
+        assert_eq!(summary["requestedRegistrationMegapixels"], 0.6);
+        assert_eq!(summary["actualRegistrationMegapixels"], 2.0);
+        assert_eq!(
+            summary["precisionRecovery"],
+            layout["report"]["precisionRecovery"]
+        );
+        assert_eq!(
+            summary["edgeDiagnostics"],
+            layout["report"]["edgeDiagnostics"]
+        );
+        assert_eq!(
+            summary["qualityWarnings"],
+            layout["report"]["qualityWarnings"]
+        );
         let mut corrupt_layout = layout.clone();
         corrupt_layout["width"] = json!(9);
         let mut corrupt = valid.clone();
@@ -1685,9 +1967,22 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.memory_budget_mib, 256);
 
-        let invalid: Command = serde_json::from_value(json!({
+        let high_budget: Command = serde_json::from_value(json!({
             "command": "start",
             "memoryBudgetMiB": 4097
+        }))
+        .unwrap();
+        assert_eq!(high_budget.memory_budget_mib, 4097);
+        let high_budget_result = start(high_budget);
+        assert_eq!(high_budget_result["error"]["code"], "INVALID_REQUEST");
+        assert_eq!(
+            high_budget_result["error"]["message"],
+            "request is required"
+        );
+
+        let invalid: Command = serde_json::from_value(json!({
+            "command": "start",
+            "memoryBudgetMiB": job_resources::MAX_JOB_MEMORY_MIB + 1
         }))
         .unwrap();
         let result = start(invalid);
@@ -1724,6 +2019,10 @@ mod tests {
         assert_eq!(current["capabilities"]["activeJobs"], 1);
         assert_eq!(current["capabilities"]["reservedWorkers"], 1);
         assert_eq!(current["capabilities"]["reservedMemoryMiB"], 256);
+        assert_eq!(
+            current["capabilities"]["pendingLimits"]["totalMemoryBudgetMiB"],
+            128
+        );
         let invalid = handle(
             r#"{"command":"configureResources","totalCpuWorkers":1,"totalMemoryBudgetMiB":128,"maxConcurrentJobs":9}"#,
         );
@@ -1735,6 +2034,75 @@ mod tests {
             original.max_concurrent_jobs,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn pending_resource_lowering_blocks_stale_and_racing_reservations() {
+        let _guard = lock_jobs();
+        let original = job_resources::limits();
+        let logical = job_resources::logical_cpus();
+        if logical < 3 {
+            return;
+        }
+        let workers = logical.min(8);
+        job_resources::configure(workers, 1024, 8).unwrap();
+        let held: Vec<PathBuf> = (0..3)
+            .map(|index| temp_dir(&format!("pending-held-{index}")))
+            .collect();
+        let initial_reservations_succeeded = held
+            .iter()
+            .all(|path| job_resources::reserve(path, path, 1, 128).is_ok());
+        let lowering = job_resources::configure(workers.min(4), 512, 1);
+        let old_limit_retained = job_resources::limits().max_concurrent_jobs == 8;
+        let pending_cap_blocks_fourth = job_resources::reserve(
+            &temp_dir("pending-fourth"),
+            &temp_dir("pending-fourth"),
+            1,
+            128,
+        )
+        .is_err();
+
+        job_resources::release(&held[0]);
+        job_resources::release(&held[1]);
+        let pending_applied_with_one_existing = job_resources::limits().max_concurrent_jobs == 1
+            && job_resources::pending_limits().is_none();
+        let pending_cap_blocks_while_one_remains = job_resources::reserve(
+            &temp_dir("pending-after-drain"),
+            &temp_dir("pending-after-drain"),
+            1,
+            128,
+        )
+        .is_err();
+        job_resources::release(&held[2]);
+
+        let race_a = temp_dir("pending-race-a");
+        let race_b = temp_dir("pending-race-b");
+        let (a, b) = std::thread::scope(|scope| {
+            let first = scope.spawn(|| job_resources::reserve(&race_a, &race_a, 1, 128));
+            let second = scope.spawn(|| job_resources::reserve(&race_b, &race_b, 1, 128));
+            (first.join().unwrap(), second.join().unwrap())
+        });
+        let exactly_one_racing_reservation = a.is_ok() ^ b.is_ok();
+        if a.is_ok() {
+            job_resources::release(&race_a);
+        }
+        if b.is_ok() {
+            job_resources::release(&race_b);
+        }
+        let applied_budget_restored = job_resources::configure(
+            original.total_cpu_workers,
+            original.total_memory_mib,
+            original.max_concurrent_jobs,
+        );
+
+        assert!(initial_reservations_succeeded);
+        assert!(lowering.is_err());
+        assert!(old_limit_retained);
+        assert!(pending_cap_blocks_fourth);
+        assert!(pending_applied_with_one_existing);
+        assert!(pending_cap_blocks_while_one_remains);
+        assert!(exactly_one_racing_reservation);
+        assert!(applied_budget_restored.is_ok());
     }
 
     fn test_control(root: &Path, source: &Path) -> Arc<Control> {
@@ -1788,7 +2156,11 @@ mod tests {
             width: None,
             height: None,
             commit_started: false,
+            events: Vec::new(),
+            next_event_id: 1,
         };
+        let mut snapshot = snapshot;
+        record_transition(&mut snapshot);
         persist(root, &snapshot).unwrap();
         Arc::new(Control {
             root: root.to_path_buf(),
@@ -1798,6 +2170,329 @@ mod tests {
             worker_active: AtomicBool::new(true),
             verify_on_resume: AtomicBool::new(false),
         })
+    }
+
+    #[test]
+    fn native_transition_events_capture_fast_changes_and_ignore_progress_only_updates() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-events");
+        let source = root.with_extension("source");
+        fs::write(&source, b"timeline fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|s| s.stage = "register".into());
+        control.update(|s| s.stage = "render-level-0".into());
+        let before = control.snapshot().events.len();
+        control.update(|s| s.progress += 0.001);
+        assert_eq!(control.snapshot().events.len(), before);
+        control.update(|s| {
+            s.state = "completed".into();
+            s.stage = "done".into();
+        });
+        let events = control.snapshot().events;
+        assert!(events.len() >= 4);
+        assert_eq!(events[events.len() - 2]["stage"], "render-level-0");
+        assert_eq!(events.last().unwrap()["state"], "completed");
+        assert!(events
+            .windows(2)
+            .all(|pair| pair[0]["id"].as_u64() < pair[1]["id"].as_u64()));
+        assert!(events
+            .iter()
+            .all(|event| event["timestampUtc"].as_u64().is_some()));
+        let saved = control.snapshot();
+        let mut legacy_json = serde_json::to_value(&saved).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("events");
+        legacy_json.as_object_mut().unwrap().remove("next_event_id");
+        let legacy: Snapshot = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.events.is_empty());
+        jobs().lock().unwrap().remove(&root);
+        let root_id = root.to_string_lossy().into_owned();
+        let reloaded = get_job(Some(&root_id)).unwrap();
+        assert_eq!(reloaded.snapshot().events, saved.events);
+        jobs().lock().unwrap().remove(&root);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commit_start_and_terminal_transition_keep_distinct_event_kinds() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-commit-kind");
+        let source = root.with_extension("source");
+        fs::write(&source, b"commit timeline fixture").unwrap();
+        let control = test_control(&root, &source);
+        assert!(control.begin_commit("publish"));
+        assert_eq!(
+            control.snapshot().events.last().unwrap()["kind"],
+            "commit-started"
+        );
+        control.update(|s| {
+            s.state = "completed".into();
+            s.stage = "done".into();
+            s.commit_started = false;
+        });
+        assert_eq!(
+            control.snapshot().events.last().unwrap()["kind"],
+            "native-transition"
+        );
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn timeline_collapses_inner_loop_stage_families_but_keeps_exact_status_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-stage-family");
+        let source = root.with_extension("source");
+        fs::write(&source, b"stage family fixture").unwrap();
+        let control = test_control(&root, &source);
+        for stage in [
+            "pixel-refinement-camera",
+            "pixel-refinement-edge",
+            "pixel-refinement-sweep",
+            "pixel-bundle-pcg",
+            "pixel-refinement-camera",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "pixel-refinement-camera");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "refine-pixel-texture"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "refine-pixel-texture")
+                .count(),
+            1
+        );
+        assert_eq!(snapshot.next_event_id, 3);
+        for stage in [
+            "grid-component-pose-cost",
+            "grid-component-pose-sweep",
+            "grid-component-pose-line-search",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "grid-component-pose-line-search");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "optimize-grid-poses"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "optimize-grid-poses")
+                .count(),
+            1
+        );
+        for stage in ["joint-cycle-prune-round", "joint-cycle-prune-candidate"] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "joint-cycle-prune-candidate");
+        assert_eq!(
+            snapshot.events.last().unwrap()["stage"],
+            "prune-conflicting-neighbors"
+        );
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "prune-conflicting-neighbors")
+                .count(),
+            1
+        );
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retry_stage_family_collapses_per_edge_callbacks_without_losing_live_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-retry-family");
+        let source = root.with_extension("source");
+        fs::write(&source, b"retry family fixture").unwrap();
+        let control = test_control(&root, &source);
+        for stage in [
+            "retry-matching",
+            "retry-feature-extraction",
+            "retry-matching",
+            "retry-feature-extraction",
+            "clahe-retry",
+            "clahe-retry",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "clahe-retry");
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "retry-neighbor-matching")
+                .count(),
+            1
+        );
+        assert_eq!(stage_family("retry-matching"), "retry-neighbor-matching");
+        assert_eq!(
+            stage_family("retry-feature-extraction"),
+            "retry-neighbor-matching"
+        );
+        assert_eq!(stage_family("clahe-retry"), "retry-neighbor-matching");
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registration_progress_uses_monotonic_coarse_phase_boundaries() {
+        let stages = [
+            "validation-complete",
+            "grid-overlap-complete",
+            "feature-extraction-complete",
+            "initial-matching-complete",
+            "retry-matching",
+            "retry-feature-extraction",
+            "clahe-retry",
+            "pixel-refinement-sweep",
+            "grid-component-pose-cost",
+            "joint-cycle-prune-round",
+            "source-plane-warp-outer-iteration",
+            "source-plane-warp-line-search",
+            "precision-recovery-start",
+            "registration-complete",
+        ];
+        let mut progress = 0.02_f64;
+        let mut reported = Vec::new();
+        for stage in stages {
+            if let Some(boundary) = registration_progress(stage) {
+                progress = progress.max(boundary);
+            }
+            reported.push(progress);
+        }
+        assert!(reported.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(
+            reported[4], reported[5],
+            "per-edge retry callbacks add no progress"
+        );
+        assert_eq!(*reported.last().unwrap(), 0.19);
+        assert_eq!(
+            registration_progress("precision-recovery-start"),
+            Some(0.18)
+        );
+        assert!(
+            (registration_progress("retry-matching-progress:5/10").unwrap() - 0.11).abs() < 1e-12
+        );
+        assert!(
+            (registration_progress("retry-matching-progress:10/10").unwrap() - 0.12).abs() < 1e-12
+        );
+        assert!((registration_progress("clahe-retry-progress:1/4").unwrap() - 0.125).abs() < 1e-12);
+        assert!((registration_progress("clahe-retry-progress:4/4").unwrap() - 0.14).abs() < 1e-12);
+        for malformed in [
+            "retry-matching-progress:0/0",
+            "retry-matching-progress:11/10",
+            "retry-matching-progress:nope/10",
+            "retry-matching-progress:1",
+            "clahe-retry-progress:2/1/4",
+        ] {
+            assert_eq!(registration_progress(malformed), None, "{malformed}");
+        }
+        assert_eq!(
+            stage_family("retry-matching-progress:1/4"),
+            "retry-neighbor-matching"
+        );
+        assert_eq!(
+            stage_family("clahe-retry-progress:1/4"),
+            "retry-neighbor-matching"
+        );
+    }
+
+    #[test]
+    fn registration_failure_persists_diagnostics_and_reports_terminal_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("registration-failure-diagnostics");
+        let source = root.with_extension("source");
+        fs::write(&source, b"registration failure fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|snapshot| snapshot.state = "paused".into());
+        finish_run_failure(
+            &control,
+            RunFailure::Registration {
+                code: "REGISTRATION_FAILED".into(),
+                message: "quality gate rejected registration".into(),
+                diagnostics: Some(json!({"worstEdgeRmsPx":55.01,"edge":{"from":1,"to":2}})),
+            },
+        );
+        let snapshot = control.snapshot();
+        assert_eq!(
+            snapshot.state, "failed",
+            "a genuine error must survive pause"
+        );
+        assert_eq!(snapshot.stage, "registration-failed");
+        assert_eq!(
+            snapshot.error.as_ref().unwrap()["diagnosticsPath"],
+            "registration-failure.json"
+        );
+        assert_eq!(
+            snapshot.result_stats.as_ref().unwrap()["registrationFailurePath"],
+            "registration-failure.json"
+        );
+        let diagnostic: Value =
+            serde_json::from_slice(&fs::read(root.join("registration-failure.json")).unwrap())
+                .unwrap();
+        assert_eq!(diagnostic["code"], "REGISTRATION_FAILED");
+        assert_eq!(diagnostic["message"], "quality gate rejected registration");
+        assert_eq!(diagnostic["diagnostics"]["worstEdgeRmsPx"], 55.01);
+        assert_eq!(diagnostic["diagnostics"]["edge"]["from"], 1);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registration_cancellation_does_not_write_failure_diagnostics() {
+        let _guard = lock_jobs();
+        let root = temp_dir("registration-cancel-no-diagnostics");
+        let source = root.with_extension("source");
+        fs::write(&source, b"registration cancellation fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.cancel.store(true, Ordering::SeqCst);
+        finish_run_failure(
+            &control,
+            RunFailure::Registration {
+                code: "REGISTRATION_FAILED".into(),
+                message: "raced with cancellation".into(),
+                diagnostics: Some(json!({"ignored":true})),
+            },
+        );
+        assert_eq!(control.snapshot().state, "cancelled");
+        assert_eq!(control.snapshot().stage, "cancelled");
+        assert!(!root.join("registration-failure.json").exists());
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_operation_resets_render_completion_progress_before_checkpoints() {
+        let _guard = lock_jobs();
+        let root = temp_dir("export-progress-reset");
+        let source = root.with_extension("source");
+        fs::write(&source, b"export progress fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|snapshot| snapshot.progress = 1.0);
+        control.update(|snapshot| {
+            snapshot.operation = "export".into();
+            snapshot.stage = "export".into();
+            snapshot.progress = 0.92;
+        });
+        assert_eq!(control.snapshot().progress, 0.92);
+        assert!(control.checkpoint("export", Some(0.96)));
+        assert_eq!(control.snapshot().progress, 0.96);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -2152,5 +2847,92 @@ mod tests {
         control.worker_active.store(false, Ordering::SeqCst);
         let _ = fs::remove_file(source);
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sixteen_gib_render_and_pyramid_match_128_mib_tiny_fixture() {
+        use image::{Rgba, RgbaImage};
+
+        let root = temp_dir("high-memory-render");
+        let source_dir = root.join("sources");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.png");
+        RgbaImage::from_fn(16, 16, |x, y| {
+            Rgba([(x * 13) as u8, (y * 11) as u8, 91, 255])
+        })
+        .save(&source)
+        .unwrap();
+        let layout = json!({
+            "schemaVersion":1,
+            "projection":"spherical",
+            "width":32,
+            "height":24,
+            "yawMinRad":-0.01,
+            "yawMaxRad":0.01,
+            "pitchMinRad":-0.01,
+            "pitchMaxRad":0.01,
+            "tiles":[{
+                "path":source.to_string_lossy(),
+                "width":16,
+                "height":16,
+                "fx":12.0,
+                "fy":12.0,
+                "cx":7.5,
+                "cy":7.5,
+                "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]
+            }]
+        });
+        let low = root.join("low-budget");
+        let high = root.join("high-budget");
+        let low_stats = spherical_renderer::render_layout_tiles_with_options(
+            &layout,
+            &low,
+            128,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        let high_stats = spherical_renderer::render_layout_tiles_with_options(
+            &layout,
+            &high,
+            16 * 1024,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(low_stats["workersEffective"], 1);
+        assert_eq!(high_stats["workersEffective"], 1);
+        assert_eq!(high_stats["memoryAccounting"], "conservativeEstimate");
+        assert!(high_stats["sourceCacheLimitBytes"].as_u64().unwrap() > 4 * 1024 * 1024 * 1024);
+        assert_eq!(
+            fs::read(low.join("level-0/0-0.png")).unwrap(),
+            fs::read(high.join("level-0/0-0.png")).unwrap()
+        );
+        let (low_levels, _) =
+            spherical_renderer::build_pyramid_levels_with_options(&low, 32, 24, 128, 1, |_, _| {
+                true
+            })
+            .unwrap();
+        let (high_levels, _) = spherical_renderer::build_pyramid_levels_with_options(
+            &high,
+            32,
+            24,
+            16 * 1024,
+            1,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(low_levels, high_levels);
+        for level in 0..low_levels.len() {
+            let tile = format!("level-{level}/0-0.png");
+            assert_eq!(
+                fs::read(low.join(&tile)).unwrap(),
+                fs::read(high.join(&tile)).unwrap(),
+                "pyramid pixels differ at {tile}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

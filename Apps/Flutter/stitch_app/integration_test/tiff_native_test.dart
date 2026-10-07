@@ -113,13 +113,11 @@ int _inlineValue(({int type, int count, int valueField}) tag) {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  const enabled = bool.fromEnvironment('TEST_TIFF_NATIVE');
 
   testWidgets(
-    'Windows batch exports lossless TIFF and applies new desktop defaults',
+    'Windows batch exports lossless TIFF and applies new desktop defaults (requires TEST_TIFF_NATIVE and TEST_TIFF_PARENT_DIR)',
     (tester) async {
-      const enabled = bool.fromEnvironment('TEST_TIFF_NATIVE');
-      if (!enabled) return;
-
       await tester.runAsync(() async {
         expect(Platform.isWindows, isTrue, reason: 'Requires Windows FFI.');
         const fixturePath = String.fromEnvironment('TEST_TIFF_PARENT_DIR');
@@ -332,5 +330,6 @@ void main() {
       });
     },
     timeout: const Timeout(Duration(minutes: 6)),
+    skip: !enabled,
   );
 }

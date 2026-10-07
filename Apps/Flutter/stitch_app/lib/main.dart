@@ -22,41 +22,119 @@ import 'services/photo_importer.dart';
 import 'services/power_service.dart';
 import 'services/mobile_storage_service.dart';
 import 'services/mobile_runtime_service.dart';
+import 'services/memory_budget_policy.dart';
 import 'services/spherical_request.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
+import 'services/task_record_service.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'l10n/stitch_localizations.dart';
 import 'l10n/localized_text.dart';
+import 'models/app_settings.dart';
+import 'services/settings_controller.dart';
+import 'settings_page.dart';
+import 'models/stitch_timeline.dart';
+import 'widgets/stitching_log.dart';
 
 void main() => runApp(const LumiaStitchApp());
 
-class LumiaStitchApp extends StatelessWidget {
-  const LumiaStitchApp({super.key, this.locale, this.home});
+class LumiaStitchApp extends StatefulWidget {
+  const LumiaStitchApp({
+    super.key,
+    this.locale,
+    this.home,
+    this.settingsController,
+  });
   final Locale? locale;
   final Widget? home;
+  final SettingsController? settingsController;
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    title: 'PocketGigaScan',
-    locale: locale,
-    supportedLocales: StitchLocalizations.supportedLocales,
-    localizationsDelegates: const [
-      StitchLocalizations.delegate,
-      GlobalMaterialLocalizations.delegate,
-      GlobalWidgetsLocalizations.delegate,
-      GlobalCupertinoLocalizations.delegate,
-    ],
-    localeResolutionCallback: (deviceLocale, supportedLocales) {
-      if (deviceLocale?.languageCode.toLowerCase() == 'zh') {
-        return const Locale('zh');
-      }
-      return const Locale('en');
+  State<LumiaStitchApp> createState() => _LumiaStitchAppState();
+}
+
+class _LumiaStitchAppState extends State<LumiaStitchApp> {
+  late final SettingsController _settings =
+      widget.settingsController ??
+      SettingsController(
+        initial: widget.home != null
+            ? AppSettings.defaults(
+                mobile: Platform.isAndroid || Platform.isIOS,
+                android: Platform.isAndroid,
+              )
+            : null,
+        defaults: AppSettings.defaults(
+          mobile: Platform.isAndroid || Platform.isIOS,
+          android: Platform.isAndroid,
+        ),
+      );
+  @override
+  void dispose() {
+    if (widget.settingsController == null) _settings.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: _settings,
+    builder: (context, _) {
+      final s = _settings.settings;
+      final locale =
+          widget.locale ??
+          (s.language == AppLanguage.system ? null : Locale(s.language.name));
+      final brightness = switch (s.themeMode) {
+        AppThemeMode.light => Brightness.light,
+        AppThemeMode.dark => Brightness.dark,
+        _ => null,
+      };
+      final seed = switch (s.accent) {
+        AppAccent.blue => const Color(0xff2868b2),
+        AppAccent.purple => const Color(0xff7651a6),
+        AppAccent.orange => const Color(0xffc66a22),
+        _ => const Color(0xff246b72),
+      };
+      final theme = ThemeData(
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: seed,
+          brightness: brightness ?? Brightness.light,
+        ),
+        brightness: brightness,
+        useMaterial3: true,
+      );
+      return MaterialApp(
+        title: 'PocketGigaScan',
+        locale: locale,
+        themeMode: s.themeMode == AppThemeMode.system
+            ? ThemeMode.system
+            : s.themeMode == AppThemeMode.dark
+            ? ThemeMode.dark
+            : ThemeMode.light,
+        supportedLocales: StitchLocalizations.supportedLocales,
+        localizationsDelegates: const [
+          StitchLocalizations.delegate,
+          GlobalMaterialLocalizations.delegate,
+          GlobalWidgetsLocalizations.delegate,
+          GlobalCupertinoLocalizations.delegate,
+        ],
+        localeResolutionCallback: (deviceLocale, supportedLocales) {
+          if (widget.locale != null) return widget.locale;
+          if (s.language != AppLanguage.system) return Locale(s.language.name);
+          if (deviceLocale?.languageCode.toLowerCase() == 'zh') {
+            return const Locale('zh');
+          }
+          return const Locale('en');
+        },
+        theme: theme,
+        darkTheme: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: seed,
+            brightness: Brightness.dark,
+          ),
+          brightness: Brightness.dark,
+          useMaterial3: true,
+        ),
+        home: widget.home ?? StitchHomePage(settingsController: _settings),
+      );
     },
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff246b72)),
-      useMaterial3: true,
-    ),
-    home: home ?? const StitchHomePage(),
   );
 }
 
@@ -77,6 +155,8 @@ class StitchHomePage extends StatefulWidget {
     this.androidOverride,
     this.mobileStorageService,
     this.mobileRuntimeService,
+    this.settingsController,
+    this.photoImporter,
   });
   final JobApi? jobApi;
   final PowerGate? powerGate;
@@ -89,6 +169,8 @@ class StitchHomePage extends StatefulWidget {
   final bool? androidOverride;
   final MobileStorageService? mobileStorageService;
   final MobileRuntimeService? mobileRuntimeService;
+  final SettingsController? settingsController;
+  final PhotoImporter? photoImporter;
   @override
   State<StitchHomePage> createState() => _StitchHomePageState();
 }
@@ -102,7 +184,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   late final MobileRuntimeService? _runtime = _android
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
-  final _importer = PhotoImporter();
+  late final _importer = widget.photoImporter ?? PhotoImporter();
   late final JobApi _api = widget.jobApi ?? NativeJobApi();
   late final BatchQueueController? _batchController = (_mobile && !_android)
       ? null
@@ -139,6 +221,9 @@ class _StitchHomePageState extends State<StitchHomePage>
   final _memory = TextEditingController(
     text: Platform.isAndroid || Platform.isIOS ? '128' : '512',
   );
+  int _lastAllocatedMemoryMiB = Platform.isAndroid || Platform.isIOS
+      ? 128
+      : 512;
   final _workers = TextEditingController(
     text: Platform.isAndroid || Platform.isIOS ? '1' : '4',
   );
@@ -173,11 +258,24 @@ class _StitchHomePageState extends State<StitchHomePage>
   bool _processingRuntimeTimeouts = false;
   bool _androidTimeoutSnapshotReady = false;
   bool _batchControllerInitialized = false;
+  bool _startOrResumeInFlight = false;
   late final Future<bool> _androidResourcesReady = _configureAndroidResources();
   MobileResourceBudget? _resourceBudget;
+  MemoryResourceReading? _appMemoryReading;
+  Future<void> _resourceSyncTail = Future<void>.value();
+  int _resourceSyncRevision = 0;
+  int _appMaxConcurrentJobs = 2;
 
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
+  AppSettings get _appSettings =>
+      widget.settingsController?.settings ??
+      AppSettings(
+        exportFormat: _mobile ? ExportFormat.png : ExportFormat.tiff,
+        refineGridNeighbors: _android,
+        seamBlendMode: _mobile ? SeamBlendMode.feather : SeamBlendMode.deghost,
+        performance: _performanceOptions,
+      );
   bool get _hasActiveJob =>
       _task?.nativeJobId != null &&
       {
@@ -323,6 +421,12 @@ class _StitchHomePageState extends State<StitchHomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    widget.settingsController?.addListener(_applySettingsDefaults);
+    if (widget.settingsController != null) {
+      unawaited(
+        widget.settingsController!.ready.then((_) => _applySettingsDefaults()),
+      );
+    }
     if (_mobile && widget.initialTask == null) {
       _exportFormat = _android ? ExportFormat.tiff : ExportFormat.png;
       _refineGridNeighbors = _android;
@@ -367,6 +471,23 @@ class _StitchHomePageState extends State<StitchHomePage>
       _handleRuntimeTimeout,
     );
     _refreshTasks();
+  }
+
+  void _applySettingsDefaults({bool force = false}) {
+    unawaited(_syncAppResources());
+    if (!mounted ||
+        (!force && _task != null) ||
+        widget.settingsController == null) {
+      return;
+    }
+    final s = _appSettings;
+    setState(() {
+      _performanceOptions = s.performance;
+      _exportFormat = s.exportFormat;
+      _refineGridNeighbors = s.refineGridNeighbors;
+      _seamBlendMode = s.seamBlendMode;
+      _localTextureWarp = s.localTextureWarp;
+    });
   }
 
   Future<void> _initializeBatchOwnership(
@@ -428,16 +549,269 @@ class _StitchHomePageState extends State<StitchHomePage>
       );
     }
     _resourceBudget = budget;
+    await widget.settingsController?.ready;
+    final reading = MemoryResourceReading(
+      totalMemoryMiB: budget.totalMemoryMiB,
+      availableMemoryMiB: budget.availableMemoryMiB,
+      logicalCpuCount: budget.cpuCount,
+      valid:
+          budget.totalMemoryMiB > 0 &&
+          budget.availableMemoryMiB > 0 &&
+          budget.availableMemoryMiB <= budget.totalMemoryMiB,
+      source: 'android-runtime',
+    );
+    _appMemoryReading = reading;
+    final policy = MemoryBudgetPolicy.evaluate(
+      _appSettings,
+      reading,
+      mobile: true,
+    );
+    final budgetSlots = policy.selectedMiB ~/ 128;
+    final maxJobs = math.max(
+      1,
+      math.min(8, math.min(budget.recommendedMaxConcurrentJobs, budgetSlots)),
+    );
+    _appMaxConcurrentJobs = maxJobs;
+    final share = MemoryBudgetPolicy.allocatedJobBudgetMiB(
+      policy.selectedMiB,
+      maxJobs,
+    );
+    _batchController?.desiredMemoryBudgetMiB = policy.selectedMiB;
+    _batchController?.desiredMaxConcurrentJobs = maxJobs;
+    _batchController?.newTaskMemoryBudgetMiB = share;
     try {
       await _api.configureResources(
         totalCpuWorkers: budget.recommendedTotalCpuWorkers,
-        totalMemoryBudgetMiB: budget.recommendedTotalMemoryBudgetMiB,
-        maxConcurrentJobs: budget.recommendedMaxConcurrentJobs,
+        totalMemoryBudgetMiB: policy.selectedMiB,
+        maxConcurrentJobs: maxJobs,
       );
+      _batchController?.desiredMemoryBudgetMiB = policy.selectedMiB;
+      _batchController?.desiredMaxConcurrentJobs = maxJobs;
       return true;
     } on Object {
       return false;
     }
+  }
+
+  Future<void> _syncAppResources() async {
+    final revision = ++_resourceSyncRevision;
+    final previous = _resourceSyncTail;
+    final next = previous.then((_) => _syncAppResourcesSerial(revision));
+    _resourceSyncTail = next.catchError((Object _) {});
+    await next;
+  }
+
+  Future<void> _syncAppResourcesSerial(int revision) async {
+    if (!_api.isAvailable || !mounted) return;
+    try {
+      await widget.settingsController?.ready;
+      if (_android) {
+        try {
+          final budget = await _runtime!.readResourceBudget();
+          if (revision != _resourceSyncRevision || !mounted) return;
+          _resourceBudget = budget;
+          _appMemoryReading = MemoryResourceReading(
+            totalMemoryMiB: budget.totalMemoryMiB,
+            availableMemoryMiB: budget.availableMemoryMiB,
+            logicalCpuCount: budget.cpuCount,
+            valid:
+                budget.totalMemoryMiB > 0 &&
+                budget.availableMemoryMiB > 0 &&
+                budget.availableMemoryMiB <= budget.totalMemoryMiB,
+            source: 'android-runtime',
+          );
+        } on Object {
+          if (revision != _resourceSyncRevision || !mounted) return;
+          _resourceBudget = const MobileResourceBudget(
+            totalMemoryMiB: 128,
+            availableMemoryMiB: 128,
+            cpuCount: 1,
+            availableStorageMiB: 0,
+            thermalStatus: 'unknown',
+            readingsValid: false,
+          );
+          _appMemoryReading = const MemoryResourceReading(
+            totalMemoryMiB: 128,
+            availableMemoryMiB: 128,
+            logicalCpuCount: 1,
+            valid: false,
+            source: 'android-runtime-fallback',
+          );
+        }
+      }
+      final response = await _api.capabilities();
+      final caps =
+          response['capabilities'] as Map<String, Object?>? ?? const {};
+      final system = caps['systemMemory'];
+      if (!_android && system is Map) {
+        _appMemoryReading = MemoryResourceReading.fromMap(<Object?, Object?>{
+          ...system.cast<Object?, Object?>(),
+          'logicalCpuCount': caps['logicalCpuCount'],
+        }, source: 'native-system');
+      }
+      final reading =
+          _appMemoryReading ??
+          const MemoryResourceReading(
+            totalMemoryMiB: 0,
+            availableMemoryMiB: 0,
+            valid: false,
+            source: 'fallback',
+          );
+      final policy = MemoryBudgetPolicy.evaluate(
+        _appSettings,
+        reading,
+        mobile: _mobile,
+      );
+      final cpuWorkers = _android
+          ? (_resourceBudget?.recommendedTotalCpuWorkers ?? 1)
+          : (caps['totalCpuWorkers'] as num? ?? 1).toInt();
+      final nativeSlotLimit = (caps['maxConcurrentJobsLimit'] as num? ?? 8)
+          .toInt()
+          .clamp(1, 8)
+          .toInt();
+      final requestedSlots = _android
+          ? (_resourceBudget?.recommendedMaxConcurrentJobs ?? 1)
+          : (caps['maxConcurrentJobs'] as num? ?? _appMaxConcurrentJobs)
+                .toInt();
+      final memoryPerSlotMiB = _android ? 128 : 512;
+      final maxConcurrentJobs = math.max(
+        1,
+        math.min(
+          nativeSlotLimit,
+          math.min(
+            requestedSlots,
+            math.min(cpuWorkers, policy.selectedMiB ~/ memoryPerSlotMiB),
+          ),
+        ),
+      );
+      _appMaxConcurrentJobs = maxConcurrentJobs;
+      final share = MemoryBudgetPolicy.allocatedJobBudgetMiB(
+        policy.selectedMiB,
+        maxConcurrentJobs,
+      );
+      if (revision != _resourceSyncRevision || !mounted) return;
+      _batchController?.desiredMemoryBudgetMiB = policy.selectedMiB;
+      _batchController?.desiredMaxConcurrentJobs = maxConcurrentJobs;
+      _batchController?.newTaskMemoryBudgetMiB = share;
+      if (_task == null &&
+          (int.tryParse(_memory.text) == _lastAllocatedMemoryMiB ||
+              _memory.text.isEmpty)) {
+        _memory.text = '$share';
+        _lastAllocatedMemoryMiB = share;
+      }
+      await _api.configureResources(
+        totalCpuWorkers: cpuWorkers,
+        totalMemoryBudgetMiB: policy.selectedMiB,
+        maxConcurrentJobs: maxConcurrentJobs,
+      );
+    } on Object {
+      // Keep the current native reservation cap until active jobs release it.
+      final policy = MemoryBudgetPolicy.evaluate(
+        _appSettings,
+        _appMemoryReading ??
+            const MemoryResourceReading(
+              totalMemoryMiB: 0,
+              availableMemoryMiB: 0,
+              valid: false,
+              source: 'fallback',
+            ),
+        mobile: _mobile,
+      );
+      if (revision == _resourceSyncRevision && mounted) {
+        final maxConcurrentJobs = math.max(
+          1,
+          math.min(
+            _appMaxConcurrentJobs,
+            policy.selectedMiB ~/ (_android ? 128 : 512),
+          ),
+        );
+        _batchController?.desiredMemoryBudgetMiB = policy.selectedMiB;
+        _batchController?.desiredMaxConcurrentJobs = maxConcurrentJobs;
+        _batchController?.newTaskMemoryBudgetMiB =
+            MemoryBudgetPolicy.allocatedJobBudgetMiB(
+              policy.selectedMiB,
+              maxConcurrentJobs,
+            );
+        if (_task == null &&
+            (int.tryParse(_memory.text) == _lastAllocatedMemoryMiB ||
+                _memory.text.isEmpty)) {
+          _memory.text = '${_batchController?.newTaskMemoryBudgetMiB ?? 512}';
+          _lastAllocatedMemoryMiB =
+              _batchController?.newTaskMemoryBudgetMiB ?? 512;
+        }
+      }
+    }
+  }
+
+  Future<bool> _canAdmitMemory(int requestedMiB, String operation) async {
+    if (!mounted) return false;
+    await _syncAppResources();
+    while (mounted) {
+      final revision = _resourceSyncRevision;
+      final tail = _resourceSyncTail;
+      await tail;
+      if (revision == _resourceSyncRevision &&
+          identical(tail, _resourceSyncTail)) {
+        break;
+      }
+    }
+    if (!mounted) return false;
+    final reading =
+        _appMemoryReading ??
+        const MemoryResourceReading(
+          totalMemoryMiB: 0,
+          availableMemoryMiB: 0,
+          valid: false,
+          source: 'fallback',
+        );
+    final appCap = MemoryBudgetPolicy.evaluate(
+      _appSettings,
+      reading,
+      mobile: _mobile,
+    ).selectedMiB;
+    final response = await _api.capabilities();
+    final caps = response['capabilities'] as Map<String, Object?>? ?? const {};
+    final held = (caps['reservedMemoryMiB'] as num? ?? 0).toInt();
+    final activeJobs = (caps['activeJobs'] as num? ?? 0).toInt();
+    final nativeSlots = (caps['maxConcurrentJobs'] as num? ?? 1).toInt();
+    final slotLimit = math.max(
+      1,
+      math.min(
+        _appMaxConcurrentJobs,
+        math.min(
+          nativeSlots,
+          (caps['maxConcurrentJobsLimit'] as num? ?? 8).toInt(),
+        ),
+      ),
+    );
+    if (activeJobs >= slotLimit) {
+      if (mounted) {
+        final l = StitchLocalizations.of(context);
+        setState(
+          () => _message = l.memoryConcurrencyAdmission(
+            l.text(operation),
+            activeJobs,
+            slotLimit,
+          ),
+        );
+      }
+      return false;
+    }
+    if (requestedMiB > appCap || held + requestedMiB > appCap) {
+      if (mounted) {
+        final l = StitchLocalizations.of(context);
+        setState(
+          () => _message = l.memoryBudgetAdmission(
+            l.text(operation),
+            requestedMiB,
+            appCap,
+            held,
+          ),
+        );
+      }
+      return false;
+    }
+    return true;
   }
 
   Future<bool> _androidCanStart() async {
@@ -797,6 +1171,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.settingsController?.removeListener(_applySettingsDefaults);
     unawaited(_runtimeTimeoutSubscription?.cancel());
     if (widget.mobileRuntimeService == null) {
       unawaited(_runtime?.dispose());
@@ -952,23 +1327,27 @@ class _StitchHomePageState extends State<StitchHomePage>
         next.axis != _grid.axis ||
         next.startCorner != _grid.startCorner ||
         next.serpentine != _grid.serpentine;
-    if (rearranged && _grid.forceGridCells.isNotEmpty) {
+    if (rearranged &&
+        (_grid.forceGridCells.isNotEmpty ||
+            _grid.lockedPhotoOrigins.isNotEmpty)) {
       final task = _task;
       final oldMapping = task == null ? null : _mappingFor(task, _grid);
       final newMapping = task == null ? null : _mappingFor(task, next);
-      final retained =
-          oldMapping?.isValid == true && newMapping?.isValid == true
-          ? remapForcedCellsByPhoto(
-              photos: task!.photos,
-              oldMapping: oldMapping!.cells,
-              oldForced: _grid.forceGridCells,
-              newMapping: newMapping!.cells,
-            )
-          : const <GridCell>{};
-      next = next.copyWith(forceGridCells: retained);
-      _message = retained.isEmpty
-          ? '排列已改变；修正网格后请重新标记异常照片。'
-          : '排列已改变；强制网格标记已随原片保留。';
+      if (task != null && oldMapping != null && newMapping != null) {
+        next = remapGridLocksByPhoto(
+          photos: task.photos,
+          oldMapping: oldMapping.cells,
+          oldOptions: _grid,
+          nextOptions: next,
+          newMapping: newMapping.cells,
+          oldMappingValid: oldMapping.isValid,
+          newMappingValid: newMapping.isValid,
+        );
+        _message =
+            next.forceGridCells.isEmpty && next.lockedPhotoOrigins.isEmpty
+            ? '排列已改变；修正网格后请重新标记异常照片。'
+            : '排列已改变；强制网格标记已随原片保留。';
+      }
     }
     setState(() {
       _grid = next;
@@ -1010,6 +1389,12 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   Future<void> _importPhotos() async {
     if (_busy || !_editable) return;
+    await widget.settingsController?.ready;
+    if (!mounted) return;
+    // When a task is selected, its controls hold the user's current choices.
+    // Keep those as the new task's starting options instead of resetting them
+    // to global defaults during import.
+    _applySettingsDefaults();
     setState(() {
       _busy = true;
       _message = null;
@@ -1053,6 +1438,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         cameraCalibrationOverridden: _cameraCalibrationTouched,
         performanceOptions: _performanceOptions,
         exportFormat: _exportFormat,
+        exportDirectory: _appSettings.outputDirectory,
         autoExportOnCompletion: true,
         refineGridNeighbors: _refineGridNeighbors,
         seamBlendMode: _seamBlendMode,
@@ -1106,17 +1492,24 @@ class _StitchHomePageState extends State<StitchHomePage>
     final candidate = _grid.copyWith(rows: rows, columns: columns);
     final oldMapping = _mappingFor(old, _grid),
         newMapping = _mappingFor(old, candidate);
-    final forced = rearranged
-        ? remapForcedCellsByPhoto(
+    final next =
+        rearranged &&
+            (_grid.forceGridCells.isNotEmpty ||
+                _grid.lockedPhotoOrigins.isNotEmpty)
+        ? remapGridLocksByPhoto(
             photos: old.photos,
             oldMapping: oldMapping.cells,
-            oldForced: _grid.forceGridCells,
+            oldOptions: _grid,
+            nextOptions: candidate,
             newMapping: newMapping.cells,
+            oldMappingValid: oldMapping.isValid,
+            newMappingValid: newMapping.isValid,
           )
-        : _grid.forceGridCells;
-    final next = candidate.copyWith(forceGridCells: forced);
-    if (rearranged && _grid.forceGridCells.isNotEmpty) {
-      _message = forced.isEmpty
+        : candidate;
+    if (rearranged &&
+        (_grid.forceGridCells.isNotEmpty ||
+            _grid.lockedPhotoOrigins.isNotEmpty)) {
+      _message = next.forceGridCells.isEmpty && next.lockedPhotoOrigins.isEmpty
           ? '排列已改变；修正网格后请重新标记异常照片。'
           : '排列已改变；强制网格标记已随原片保留。';
     }
@@ -1131,8 +1524,8 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
     final memory = int.tryParse(_memory.text);
     final workers = int.tryParse(_workers.text);
-    if (memory == null || memory < 128 || memory > 4096) {
-      setState(() => _message = '渲染内存预算需为 128–4096 MiB。');
+    if (memory == null || memory < 128 || memory > 128 * 1024) {
+      setState(() => _message = '渲染内存预算需为 128–131072 MiB。');
       return false;
     }
     if (workers == null || workers < 1 || workers > 32) {
@@ -1224,6 +1617,16 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<void> _startOrResume({required bool resume}) async {
+    if (_startOrResumeInFlight || _busy) return;
+    _startOrResumeInFlight = true;
+    try {
+      await _startOrResumeGuarded(resume: resume);
+    } finally {
+      _startOrResumeInFlight = false;
+    }
+  }
+
+  Future<void> _startOrResumeGuarded({required bool resume}) async {
     final task = _task;
     if (task == null || _busy) return;
     if (_isActivelyBatchOwned(task)) {
@@ -1251,6 +1654,27 @@ class _StitchHomePageState extends State<StitchHomePage>
       return;
     }
     if (!await _androidCanStart()) return;
+    await _syncAppResources();
+    if (!mounted) return;
+    if (resume) {
+      try {
+        final status = await _api.status(task.nativeJobId!);
+        final required =
+            (status['memoryBudgetMiB'] as num? ?? task.memoryBudgetMiB).toInt();
+        if (!await _canAdmitMemory(required, '恢复任务')) return;
+      } on Object catch (error) {
+        if (mounted) {
+          final l = StitchLocalizations.of(context);
+          setState(
+            () => _message = l.resourceBudgetStatusFailed(
+              l.text('恢复任务'),
+              error.toString(),
+            ),
+          );
+        }
+        return;
+      }
+    }
     setState(() {
       _busy = true;
       _message = null;
@@ -1268,6 +1692,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         await _persist(active);
         _runtimeGuardUnavailableJobs.remove(task.nativeJobId!);
         final guardedPhase = await _enableMobileRuntime(task.nativeJobId!);
+        if (!mounted) return;
         if (guardedPhase != null) {
           active = active.copyWith(
             phase: guardedPhase,
@@ -1280,11 +1705,19 @@ class _StitchHomePageState extends State<StitchHomePage>
           setState(() => _message = active.pauseReason);
           return;
         }
+        final latestStatus = await _api.status(task.nativeJobId!);
+        final latestRequired =
+            (latestStatus['memoryBudgetMiB'] as num? ?? task.memoryBudgetMiB)
+                .toInt();
+        if (!await _canAdmitMemory(latestRequired, '恢复任务') || !mounted) {
+          return;
+        }
         final response = await _api.resume(task.nativeJobId!);
         active = active.copyWith(
           phase: _phase(response['state']),
           stage: response['stage'] as String? ?? task.stage,
           progress: (response['progress'] as num? ?? task.progress).toDouble(),
+          timeline: _mergeResponseTimeline(active, response, task.nativeJobId!),
           clearError: true,
           clearPauseReason: true,
         );
@@ -1309,16 +1742,26 @@ class _StitchHomePageState extends State<StitchHomePage>
         _runtimeGuardUnavailableJobs.remove(
           active.nativeJobId ?? active.outputDirectory,
         );
+        final reading =
+            _appMemoryReading ??
+            const MemoryResourceReading(
+              totalMemoryMiB: 0,
+              availableMemoryMiB: 0,
+              valid: false,
+              source: 'fallback',
+            );
+        final appMemoryCap = MemoryBudgetPolicy.evaluate(
+          _appSettings,
+          reading,
+          mobile: _mobile,
+        ).selectedMiB;
+        final effectiveMemory = math
+            .min(active.memoryBudgetMiB, appMemoryCap)
+            .toInt();
+        if (!await _canAdmitMemory(effectiveMemory, '启动任务')) return;
         final out = await _repository.prepareOutput(active);
+        if (!mounted) return;
         final budget = _resourceBudget;
-        final effectiveMemory = _android && budget != null
-            ? math
-                  .min(
-                    active.memoryBudgetMiB,
-                    budget.recommendedTotalMemoryBudgetMiB,
-                  )
-                  .toInt()
-            : active.memoryBudgetMiB;
         final effectiveWorkers = _android && budget != null
             ? math
                   .min(
@@ -1332,6 +1775,10 @@ class _StitchHomePageState extends State<StitchHomePage>
             : active.workers;
         final anticipatedJobId = active.nativeJobId ?? out.path;
         if (!await _enableMobileRuntimeBeforeStart(anticipatedJobId)) return;
+        if (!mounted) return;
+        if (!await _canAdmitMemory(effectiveMemory, '启动任务') || !mounted) {
+          return;
+        }
         final response = await _api.start(
           buildSphericalRequest(active),
           out.path,
@@ -1366,6 +1813,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           phase: _phase(response['state']),
           stage: response['stage'] as String? ?? 'queued',
           progress: 0,
+          timeline: _mergeResponseTimeline(active, response, jobId),
         );
       }
       await _persist(active);
@@ -1440,6 +1888,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase: _phase(response['state']),
         pauseReason: reason,
         autoExportOnCompletion: false,
+        timeline: _mergeResponseTimeline(task, response, task.nativeJobId!),
       );
       await _persist(
         updated,
@@ -1449,7 +1898,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       if (!_isCurrentSelection(generation, task.id)) return;
       if (updated.phase == StitchPhase.paused && _android) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       if (updated.phase == StitchPhase.paused) await _lock.disable();
       setState(() => _message = reason);
@@ -1484,10 +1933,11 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase: _phase(response['state']),
         pauseReason: '已请求取消；等待核心确认',
         autoExportOnCompletion: false,
+        timeline: _mergeResponseTimeline(task, response, task.nativeJobId!),
       );
       if (updated.phase == StitchPhase.cancelled && _android) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       await _persist(
         updated,
@@ -1567,6 +2017,46 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       return;
     }
+    var required = task.memoryBudgetMiB;
+    try {
+      final status = await _api.status(task.nativeJobId!);
+      required = (status['memoryBudgetMiB'] as num? ?? task.memoryBudgetMiB)
+          .toInt();
+      if (!await _canAdmitMemory(required, '整图导出')) {
+        if (mounted &&
+            task.autoExportOnCompletion &&
+            task.nativeJobId != null) {
+          await _persist(
+            task.copyWith(
+              phase: StitchPhase.completed,
+              stage: 'auto-export-deferred',
+              clearExportCheckpointPath: true,
+            ),
+          );
+          _beginPolling();
+        } else if (mounted && task.phase == StitchPhase.exporting) {
+          await _persist(
+            task.copyWith(
+              phase: StitchPhase.completed,
+              stage: 'export-deferred',
+              clearExportCheckpointPath: true,
+            ),
+          );
+        }
+        return;
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        final l = StitchLocalizations.of(context);
+        setState(
+          () => _message = l.resourceBudgetStatusFailed(
+            l.text('整图导出'),
+            error.toString(),
+          ),
+        );
+      }
+      return;
+    }
     if (!await _confirmLargeJob(task)) {
       if (task.phase == StitchPhase.exporting) {
         await _persist(
@@ -1580,10 +2070,16 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       return;
     }
+    if (!mounted) return;
+    if (!await _canAdmitMemory(required, '整图导出')) {
+      await _deferExportForMemory(task);
+      return;
+    }
     final guardFailurePhase =
         _android && _runtimeGuardedJobs.contains(task.nativeJobId)
         ? null
         : await _enableMobileRuntime(task.nativeJobId!);
+    if (!mounted) return;
     if (guardFailurePhase != null) {
       await _persist(
         task.copyWith(
@@ -1618,13 +2114,24 @@ class _StitchHomePageState extends State<StitchHomePage>
         ? await getApplicationSupportDirectory()
         : await getApplicationDocumentsDirectory();
     final exportDirectory = Directory(p.join(directory.path, 'LumiaStitch'));
+    if (!mounted) return;
+    if (!await _canAdmitMemory(required, '整图导出')) {
+      await _deferExportForMemory(task);
+      return;
+    }
     await exportDirectory.create(recursive: true);
-    final destination =
+    final privateDestination =
         exportTask.exportCheckpointPath ??
         p.join(
           exportDirectory.path,
           '${task.id}-${DateTime.now().toUtc().microsecondsSinceEpoch}.${task.exportFormat.extension}',
         );
+    final destination = Platform.isWindows && exportTask.exportDirectory != null
+        ? p.join(exportTask.exportDirectory!, p.basename(privateDestination))
+        : privateDestination;
+    if (Platform.isWindows && exportTask.exportDirectory != null) {
+      await Directory(exportTask.exportDirectory!).create(recursive: true);
+    }
     final exportIntentTask = exportTask.autoExportOnCompletion
         ? exportTask
         : exportTask.copyWith(autoExportOnCompletion: true);
@@ -1633,6 +2140,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _message = null;
     });
     _controlGeneration++;
+    final controlGeneration = _controlGeneration;
     try {
       await _persist(
         exportIntentTask.copyWith(
@@ -1641,6 +2149,13 @@ class _StitchHomePageState extends State<StitchHomePage>
           exportCheckpointPath: destination,
         ),
       );
+      if (!mounted) return;
+      if (!await _canAdmitMemory(required, '整图导出')) {
+        await _deferExportForMemory(
+          exportIntentTask.copyWith(phase: StitchPhase.exporting),
+        );
+        return;
+      }
       final response = await _api.export(task.nativeJobId!, destination);
       final state = response['state'] as String? ?? 'running';
       if (state == 'completed') {
@@ -1648,15 +2163,29 @@ class _StitchHomePageState extends State<StitchHomePage>
         if (fingerprint == null) {
           throw StateError('核心报告导出完成，但输出文件不存在或为空。');
         }
-        await _persist(
-          exportIntentTask.copyWith(
-            phase: StitchPhase.completed,
-            stage: 'done',
-            autoExportOnCompletion: false,
-            exportPath: destination,
-            exportFingerprint: fingerprint,
-            clearExportCheckpointPath: true,
+        var completed = exportIntentTask.copyWith(
+          phase: StitchPhase.completed,
+          stage: 'done',
+          autoExportOnCompletion: false,
+          exportPath: destination,
+          exportFingerprint: fingerprint,
+          clearExportCheckpointPath: true,
+          timeline: _mergeResponseTimeline(
+            exportIntentTask,
+            response,
+            task.nativeJobId!,
           ),
+        );
+        if (completed.exportDirectory != null) {
+          completed = await _publishExport(
+            completed,
+            expectedGeneration: controlGeneration,
+          );
+        }
+        await _persist(
+          completed,
+          expectedGeneration: controlGeneration,
+          expectedTaskId: task.id,
         );
       } else if (state == 'failed' || state == 'cancelled') {
         await _persist(
@@ -1668,6 +2197,11 @@ class _StitchHomePageState extends State<StitchHomePage>
             error: task.exportPath == null
                 ? '整图导出$state。'
                 : '新整图导出$state；保留了此前成功的导出文件。',
+            timeline: _mergeResponseTimeline(
+              exportIntentTask,
+              response,
+              task.nativeJobId!,
+            ),
           ),
         );
       } else {
@@ -1677,6 +2211,11 @@ class _StitchHomePageState extends State<StitchHomePage>
             stage: 'export',
             exportCheckpointPath: destination,
             clearError: true,
+            timeline: _mergeResponseTimeline(
+              exportIntentTask,
+              response,
+              task.nativeJobId!,
+            ),
           ),
         );
       }
@@ -1753,6 +2292,27 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
   }
 
+  Future<void> _deferExportForMemory(StitchTask task) async {
+    if (task.autoExportOnCompletion && task.nativeJobId != null) {
+      await _persist(
+        task.copyWith(
+          phase: StitchPhase.completed,
+          stage: 'auto-export-deferred',
+          clearExportCheckpointPath: true,
+        ),
+      );
+      _beginPolling();
+    } else if (task.phase == StitchPhase.exporting) {
+      await _persist(
+        task.copyWith(
+          phase: StitchPhase.completed,
+          stage: 'export-deferred',
+          clearExportCheckpointPath: true,
+        ),
+      );
+    }
+  }
+
   Future<void> _openExportViewer(StitchTask task) async {
     final path = task.exportPath;
     if (_mobile && !_android) {
@@ -1779,6 +2339,13 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
     }
     if (!mounted) return;
+    TaskRecordSnapshot? traceRecord;
+    try {
+      traceRecord = await TaskRecordService(_repository).loadRecord(task.id);
+    } on Object {
+      traceRecord = null;
+    }
+    if (!mounted) return;
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ExportedImageViewer(
@@ -1787,6 +2354,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           expectedExportFingerprint: task.exportFingerprint,
           legacyTaskAssociationPresent: legacyAssociationPresent,
           legacyTaskBindingVerified: nativeVerified,
+          traceRecord: traceRecord,
           mobileStorageService: _android ? _storage : null,
           exportMimeType: _mimeType(task.exportFormat),
         ),
@@ -1912,6 +2480,45 @@ class _StitchHomePageState extends State<StitchHomePage>
     int? expectedGeneration,
     String? expectedTaskId,
   }) async {
+    final previous = _task?.id == updated.id ? _task : null;
+    var mergedTimeline = (previous?.timeline ?? const StitchTimeline()).merge(
+      updated.timeline,
+    );
+    final priorEventIds =
+        previous?.timeline.events.map((event) => event.id).toSet() ??
+        const <String>{};
+    final jobId = updated.nativeJobId ?? previous?.nativeJobId;
+    final nativeTransitionObserved =
+        jobId != null &&
+        mergedTimeline.events.any(
+          (event) =>
+              event.id.startsWith('native:$jobId:') &&
+              !priorEventIds.contains(event.id) &&
+              event.state == updated.phase.name,
+        );
+    if (previous != null &&
+        !nativeTransitionObserved &&
+        (previous.phase != updated.phase || previous.stage != updated.stage)) {
+      final sequence =
+          mergedTimeline.events
+              .where((event) => event.id.startsWith('ui:${updated.id}:'))
+              .length +
+          1;
+      mergedTimeline = mergedTimeline.mergeUiEvent(
+        id: 'ui:${updated.id}:$sequence',
+        kind: 'lifecycle',
+        stage: updated.stage,
+        state: updated.phase.name,
+        operation:
+            updated.phase == StitchPhase.exporting ||
+                previous.phase == StitchPhase.exporting ||
+                updated.stage.contains('export') ||
+                previous.stage.contains('export')
+            ? 'export'
+            : 'render',
+      );
+    }
+    updated = updated.copyWith(timeline: mergedTimeline);
     await _repository.save(updated);
     if (!mounted) return;
     final selectionStillMatches =
@@ -1965,6 +2572,17 @@ class _StitchHomePageState extends State<StitchHomePage>
         phase = StitchPhase.completed;
       }
       final stage = state['stage'] as String? ?? task.stage;
+      var timeline = task.timeline;
+      final rawEvents = state['events'];
+      if (rawEvents is List) {
+        timeline = timeline.mergeNativeBatch(
+          rawEvents
+              .whereType<Map>()
+              .map((event) => Map<String, Object?>.from(event))
+              .toList(),
+          jobId: task.nativeJobId!,
+        );
+      }
       final progress = (state['progress'] as num? ?? task.progress)
           .toDouble()
           .clamp(0, 1);
@@ -2036,6 +2654,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           ? pendingPath
           : task.exportCheckpointPath;
       final updated = task.copyWith(
+        timeline: timeline,
         phase: shouldAutoExport
             ? StitchPhase.exporting
             : reportedSuccessfulExport
@@ -2080,6 +2699,18 @@ class _StitchHomePageState extends State<StitchHomePage>
             : task.resultStats,
         clearError: state['error'] == null && successfulExport,
       );
+      final withPublication =
+          reportedSuccessfulExport &&
+              successfulExport &&
+              task.exportDirectory != null &&
+              (task.publishedExportPath == null ||
+                  task.publishError != null ||
+                  task.phase == StitchPhase.exporting ||
+                  task.stage == 'auto-export' ||
+                  task.stage == 'export' ||
+                  task.exportPath != reportedPath)
+          ? await _publishExport(updated, expectedGeneration: controlGeneration)
+          : updated;
       if (_android &&
           {
             StitchPhase.paused,
@@ -2088,14 +2719,14 @@ class _StitchHomePageState extends State<StitchHomePage>
             StitchPhase.cancelled,
           }.contains(updated.phase)) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
-        await _runtime?.setProcessingActive(false, jobId: task.nativeJobId!);
+        await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
       if (!_isCurrentSelection(controlGeneration, task.id) ||
           !identical(task, _task)) {
         return;
       }
       await _persist(
-        updated,
+        withPublication,
         expectedGeneration: controlGeneration,
         expectedTaskId: task.id,
       );
@@ -2125,6 +2756,137 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (shouldAutoExport) await _batchOwnershipReadySignal.future;
     if (shouldAutoExport && _isCurrentSelection(controlGeneration, task.id)) {
       await _export();
+    }
+  }
+
+  Future<StitchTask> _publishExport(
+    StitchTask task, {
+    int? expectedGeneration,
+  }) async {
+    final destination = task.exportDirectory;
+    final source = task.exportPath;
+    if (destination == null || source == null) return task;
+    if (_task?.id == task.id &&
+        !_isCurrentSelection(
+          expectedGeneration ?? _controlGeneration,
+          task.id,
+        )) {
+      return task;
+    }
+    final started = _withPublicationEvent(task, 'running');
+    await _repository.save(started);
+    try {
+      final name = p.basename(source);
+      final mime = switch (task.exportFormat) {
+        ExportFormat.png => 'image/png',
+        ExportFormat.tiff => 'image/tiff',
+        ExportFormat.jpegXl => 'image/jxl',
+      };
+      if (_android) {
+        final published = await _storage.publishExport(
+          source,
+          destinationUri: destination,
+          mimeType: mime,
+          suggestedName: name,
+        );
+        return _withPublicationEvent(
+          started.copyWith(
+            publishedExportPath: published.uri,
+            clearPublishError: true,
+          ),
+          'completed',
+        );
+      }
+      final directory = Directory(destination);
+      await directory.create(recursive: true);
+      if (Platform.isWindows &&
+          p.equals(
+            p.normalize(p.absolute(p.dirname(source))),
+            p.normalize(p.absolute(destination)),
+          )) {
+        return _withPublicationEvent(
+          started.copyWith(
+            publishedExportPath: source,
+            clearPublishError: true,
+          ),
+          'completed',
+        );
+      }
+      final output = await File(source).copy(p.join(directory.path, name));
+      return _withPublicationEvent(
+        started.copyWith(
+          publishedExportPath: output.path,
+          clearPublishError: true,
+        ),
+        'completed',
+      );
+    } catch (error) {
+      return _withPublicationEvent(
+        started.copyWith(publishError: error.toString()),
+        'failed',
+      );
+    }
+  }
+
+  StitchTimeline _mergeResponseTimeline(
+    StitchTask task,
+    Map<String, Object?> response,
+    String jobId,
+  ) {
+    final events = response['events'];
+    if (events is! List) return task.timeline;
+    return task.timeline.mergeNativeBatch(
+      events
+          .whereType<Map>()
+          .map((event) => Map<String, Object?>.from(event))
+          .toList(),
+      jobId: jobId,
+    );
+  }
+
+  StitchTask _withPublicationEvent(StitchTask task, String state) {
+    final prefix = 'ui:${task.id}:';
+    final sequence =
+        task.timeline.events
+            .where((event) => event.id.startsWith(prefix))
+            .length +
+        1;
+    return task.copyWith(
+      timeline: task.timeline.mergeUiEvent(
+        id: '$prefix$sequence',
+        kind: 'publication',
+        stage: switch (state) {
+          'running' => 'publishing',
+          'completed' => 'published',
+          _ => 'publish-failed',
+        },
+        state: state,
+        operation: 'publish',
+      ),
+    );
+  }
+
+  Future<void> _retryPublish(StitchTask task) async {
+    if (_busy || _task?.id != task.id) return;
+    final generation = _controlGeneration;
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    try {
+      final result = await _publishExport(
+        task.copyWith(clearPublishError: true),
+        expectedGeneration: generation,
+      );
+      if (_isCurrentSelection(generation, task.id)) {
+        await _persist(
+          result,
+          expectedGeneration: generation,
+          expectedTaskId: task.id,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
     }
   }
 
@@ -2374,25 +3136,37 @@ class _StitchHomePageState extends State<StitchHomePage>
         ),
         title: const Text('PocketGigaScan'),
         actions: [
+          if (widget.settingsController != null)
+            IconButton(
+              tooltip: StitchLocalizations.of(context).settingsTitle,
+              icon: const Icon(Icons.settings),
+              onPressed: _openSettings,
+            ),
           IconButton(
             tooltip: StitchLocalizations.of(
               context,
             ).text(_mobile && !_android ? '批处理仅限 Windows 桌面版' : '批处理队列'),
             onPressed: _mobile && !_android
                 ? null
-                : () => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => BatchQueuePage(
-                        api: _api,
-                        controller: _batchController,
-                        mobileOverride: _mobile,
-                        androidOverride: _android,
-                        mobileStorageService: _storage,
-                        runtimeService: _runtime,
-                        resourceBudget: _resourceBudget,
+                : () async {
+                    final navigator = Navigator.of(context);
+                    await widget.settingsController?.ready;
+                    if (!mounted) return;
+                    await navigator.push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => BatchQueuePage(
+                          api: _api,
+                          controller: _batchController,
+                          mobileOverride: _mobile,
+                          androidOverride: _android,
+                          mobileStorageService: _storage,
+                          runtimeService: _runtime,
+                          resourceBudget: _resourceBudget,
+                          settingsController: widget.settingsController,
+                        ),
                       ),
-                    ),
-                  ),
+                    );
+                  },
             icon: const Icon(Icons.queue),
           ),
           if (_task != null)
@@ -2453,6 +3227,41 @@ class _StitchHomePageState extends State<StitchHomePage>
               label: const Text('导入原片'),
             )
           : null,
+    );
+  }
+
+  Future<void> _openSettings() async {
+    final controller = widget.settingsController;
+    if (controller == null) return;
+    await controller.ready;
+    if (_android) {
+      final budget = _resourceBudget;
+      if (budget != null) {
+        _appMemoryReading = MemoryResourceReading(
+          totalMemoryMiB: budget.totalMemoryMiB,
+          availableMemoryMiB: budget.availableMemoryMiB,
+          logicalCpuCount: budget.cpuCount,
+          valid:
+              budget.totalMemoryMiB > 0 &&
+              budget.availableMemoryMiB > 0 &&
+              budget.availableMemoryMiB <= budget.totalMemoryMiB,
+          source: 'android-runtime',
+        );
+      }
+    } else {
+      await _syncAppResources();
+    }
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => SettingsPage(
+          controller: controller,
+          android: _android,
+          mobile: _mobile,
+          memoryReading: _appMemoryReading,
+          mobileStorageService: _storage,
+        ),
+      ),
     );
   }
 
@@ -2540,7 +3349,15 @@ class _StitchHomePageState extends State<StitchHomePage>
             if (task.phase != StitchPhase.completed) ...[
               const SizedBox(height: 12),
               LinearProgressIndicator(
-                value: task.progress == 0 ? null : task.progress,
+                value:
+                    task.progress == 0 &&
+                        const {
+                          StitchPhase.running,
+                          StitchPhase.pausing,
+                          StitchPhase.exporting,
+                        }.contains(task.phase)
+                    ? null
+                    : task.progress,
               ),
               const SizedBox(height: 6),
               Text(
@@ -2552,6 +3369,27 @@ class _StitchHomePageState extends State<StitchHomePage>
                 task.error!,
                 style: TextStyle(color: Theme.of(context).colorScheme.error),
               ),
+            if (task.publishError != null)
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    StitchLocalizations.of(
+                      context,
+                    ).outputCopyFailed(task.publishError!),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed: _busy ? null : () => _retryPublish(task),
+                    icon: const Icon(Icons.refresh),
+                    label: Text(
+                      StitchLocalizations.of(context).retryOutputCopy,
+                    ),
+                  ),
+                ],
+              ),
             if (task.pauseReason != null && task.phase == StitchPhase.pausing)
               Text(
                 task.pauseReason!,
@@ -2562,7 +3400,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                 'task-diagnostics-${task.id}-$_diagnosticsPanelGeneration',
               ),
               tilePadding: EdgeInsets.zero,
-              title: Text(StitchLocalizations.of(context).compositionInfoLogs),
+              expandedAlignment: Alignment.centerLeft,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              title: Text(StitchLocalizations.of(context).stitchDetails),
               children: [
                 if (_api.isAvailable)
                   Text(
@@ -2571,7 +3411,10 @@ class _StitchHomePageState extends State<StitchHomePage>
                   ),
                 if (task.phase == StitchPhase.completed &&
                     task.stage == 'export-failed')
-                  const ListTile(title: Text('整图导出失败，可重试')),
+                  const ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text('整图导出失败，可重试'),
+                  ),
                 if ((task.autoExportOnCompletion &&
                         task.phase == StitchPhase.completed) ||
                     (task.phase == StitchPhase.exporting &&
@@ -2582,6 +3425,22 @@ class _StitchHomePageState extends State<StitchHomePage>
                 if (task.resultStats case final stats?)
                   ..._performanceStatsLines(stats),
                 const Text('水平参考：以网格中心照片为准'),
+              ],
+            ),
+            ExpansionTile(
+              key: ValueKey(
+                'task-stitch-log-${task.id}-$_diagnosticsPanelGeneration',
+              ),
+              tilePadding: EdgeInsets.zero,
+              expandedAlignment: Alignment.centerLeft,
+              expandedCrossAxisAlignment: CrossAxisAlignment.start,
+              title: Text(StitchLocalizations.of(context).stitchingLog),
+              children: [
+                StitchingLog(
+                  timeline: task.timeline,
+                  eventLabel: _timelineEventLabel,
+                  totalLabel: _timelineTotal(task),
+                ),
               ],
             ),
             Wrap(
@@ -2789,8 +3648,64 @@ class _StitchHomePageState extends State<StitchHomePage>
     'export' => '导出完整图像',
     'export-failed' => '整图导出失败，可重试',
     'done' => '完成',
-    _ => stage,
+    _ => StitchLocalizations.of(context).timelineStage(stage),
   };
+
+  String _timelineEventLabel(StitchTimelineEvent event) {
+    final l = StitchLocalizations.of(context);
+    final subject = event.stage != null
+        ? l.timelineStage(event.stage!)
+        : event.kind;
+    if (event.state != null) {
+      final state = event.operation == 'export' && event.state == 'running'
+          ? 'exporting'
+          : event.state!;
+      return l.timelineTransition(subject, l.phaseLabel(state));
+    }
+    return l.text(switch (event.kind) {
+      'started' => '合成已开始',
+      'finished' => '合成已完成',
+      'export-started' => '整图导出已开始',
+      'export-finished' => '整图导出已完成',
+      _ => subject,
+    });
+  }
+
+  String _timelineTotal(StitchTask task) {
+    final summary = task.timeline.summary(
+      autoExportExpected: task.autoExportOnCompletion,
+    );
+    final duration = summary.wallClockDuration;
+    final l = StitchLocalizations.of(context);
+    final started = summary.startedAtUtc == null
+        ? l.timelineTimeUnknown
+        : _timelineDate(summary.startedAtUtc!);
+    final finished = summary.finishedAtUtc == null
+        ? (summary.isInProgress ? l.timelineInProgress : l.timelineTimeUnknown)
+        : _timelineDate(summary.finishedAtUtc!);
+    if (duration == null) {
+      return l.timelineBounds(started, finished, l.timelineDurationUnknown);
+    }
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    final seconds = duration.inSeconds % 60;
+    String two(int value) => value.toString().padLeft(2, '0');
+    final elapsed = '${two(hours)}:${two(minutes)}:${two(seconds)}';
+    return l.timelineBounds(
+      started,
+      finished,
+      l.timelineTotal(
+        elapsed,
+        pausedIncluded: task.timeline.events.any((e) => e.state == 'paused'),
+      ),
+    );
+  }
+
+  String _timelineDate(DateTime value) {
+    final local = value.toLocal();
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${local.year}-${two(local.month)}-${two(local.day)} ${two(local.hour)}:${two(local.minute)}:${two(local.second)}';
+  }
 
   List<Widget> _performanceStatsLines(Map<String, Object?> stats) {
     final lines = <Widget>[];
@@ -2845,6 +3760,31 @@ class _StitchHomePageState extends State<StitchHomePage>
     final alignment = stats['alignment'];
     if (alignment is Map && alignment['qualityStatus'] is String) {
       lines.add(Text('配准质量状态：${alignment['qualityStatus']}'));
+    }
+    final edgeDiagnostics = alignment is Map
+        ? alignment['edgeDiagnostics']
+        : null;
+    if (edgeDiagnostics is List && edgeDiagnostics.isNotEmpty) {
+      var adjustedEdges = 0;
+      var ambiguousEdges = 0;
+      for (final edge in edgeDiagnostics) {
+        if (edge is! Map) continue;
+        final weight = edge['reliabilityWeightScale'];
+        if (edge['disposition'] == 'accepted' &&
+            weight is num &&
+            weight < 0.999) {
+          adjustedEdges++;
+        }
+        if (edge['loopConflictAmbiguous'] == true) ambiguousEdges++;
+      }
+      lines.add(
+        Text(
+          StitchLocalizations.of(context).neighborReliabilitySummary(
+            adjustedEdges: adjustedEdges,
+            ambiguousEdges: ambiguousEdges,
+          ),
+        ),
+      );
     }
     final overlapEstimate = alignment is Map
         ? alignment['gridOverlapEstimate']
@@ -3232,7 +4172,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                     key: const Key('refine-grid-neighbors-option'),
                     contentPadding: EdgeInsets.zero,
                     title: const Text('精细校正相邻照片位置'),
-                    subtitle: const Text('结合四个方向的相邻照片校正网格配准，可能需要更长时间。'),
+                    subtitle: const Text(
+                      '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。',
+                    ),
                     value: _refineGridNeighbors,
                     onChanged: enabled ? _updateRefineGridNeighbors : null,
                   ),
@@ -3240,7 +4182,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                     key: const Key('deghost-blending-option'),
                     contentPadding: EdgeInsets.zero,
                     title: const Text('抑制接缝重影'),
-                    subtitle: const Text('减少错位边缘的宽区域叠加；场景视差仍需检查。关闭可与传统羽化结果对照。'),
+                    subtitle: const Text(
+                      '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。',
+                    ),
                     value: _seamBlendMode == SeamBlendMode.deghost,
                     onChanged: enabled
                         ? (value) => _updateSeamBlendMode(
@@ -3273,9 +4217,9 @@ class _StitchHomePageState extends State<StitchHomePage>
               contentPadding: EdgeInsets.zero,
               title: const Text('并行图像匹配'),
               subtitle: _autoGridOverlap && _refineGridNeighbors
-                  ? const Text('中心照片提供水平/垂直估算；启用精细校正后，此项用于四邻照片配准。')
+                  ? const Text('中心照片提供水平/垂直估算；启用精细校正后，此项用于八个方向相邻照片配准。')
                   : _autoGridOverlap
-                  ? const Text('自动网格只估算中心相邻照片；启用精细校正后可并行四邻照片配准。')
+                  ? const Text('自动网格只估算中心相邻照片；启用精细校正后可并行配准八个方向的相邻照片。')
                   : null,
               value: _performanceOptions.parallelMatching,
               onChanged: enabled && (!_autoGridOverlap || _refineGridNeighbors)
@@ -3319,22 +4263,6 @@ class _StitchHomePageState extends State<StitchHomePage>
                   : null,
             ),
             CheckboxListTile(
-              key: const Key('four-neighbor-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('优先尝试四邻方向（自适应）'),
-              subtitle: _refineGridNeighbors
-                  ? const Text('精细校正会固定检查四个方向的相邻照片；关闭精细校正后可恢复此项设置。')
-                  : _autoGridOverlap
-                  ? const Text('自动网格使用固定的中心相邻照片估算；此项在自动模式下暂停使用。')
-                  : null,
-              value: _performanceOptions.fourNeighborFirst,
-              onChanged: enabled && !_autoGridOverlap && !_refineGridNeighbors
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(fourNeighborFirst: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
               key: const Key('fast-registration-option'),
               contentPadding: EdgeInsets.zero,
               title: const Text('快速配准'),
@@ -3352,9 +4280,9 @@ class _StitchHomePageState extends State<StitchHomePage>
               title: const Text('ORB 快速特征'),
               subtitle: Text(
                 _autoGridOverlap && _refineGridNeighbors
-                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的四邻照片配准。'
+                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
                     : _autoGridOverlap
-                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻照片配准。'
+                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
                     : _performanceOptions.orbFeatures
                     ? 'ORB 使用 BF 匹配；FLANN 已关闭。'
                     : '默认使用 SIFT 特征。',
@@ -3377,9 +4305,9 @@ class _StitchHomePageState extends State<StitchHomePage>
               title: const Text('FLANN 近似匹配'),
               subtitle: Text(
                 _autoGridOverlap && _refineGridNeighbors
-                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的四邻照片配准。'
+                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
                     : _autoGridOverlap
-                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻配准。'
+                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
                     : _performanceOptions.orbFeatures
                     ? 'ORB 模式不可用；请先切回 SIFT。'
                     : '默认使用 BF 精确匹配。',
@@ -3537,7 +4465,18 @@ class _StitchHomePageState extends State<StitchHomePage>
               '照片与网格映射（${_mappingCells.length}/${task.photos.length}）',
               style: Theme.of(context).textTheme.titleMedium,
             ),
-            const Text('照片不可从网格移除；点按照片切换“强制按网格放置”。完整文件名可长按查看。'),
+            Text(
+              StitchLocalizations.of(context).text(
+                '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。',
+              ),
+            ),
+            if (_grid.pendingForceGridCells.isNotEmpty)
+              Text(
+                StitchLocalizations.of(
+                  context,
+                ).pendingLegacyGridLocks(_grid.pendingForceGridCells.length),
+                style: const TextStyle(color: Colors.deepOrange),
+              ),
             if (error != null)
               Text(error, style: const TextStyle(color: Colors.deepOrange)),
             if (_mappingCells.isEmpty)
@@ -3555,6 +4494,8 @@ class _StitchHomePageState extends State<StitchHomePage>
                     minimumCellWidth,
                     math.min(160.0, box.maxWidth / columns),
                   );
+                  final lockButtonSize = cellWidth < 50 ? 20.0 : 32.0;
+                  final lockIconSize = cellWidth < 50 ? 12.0 : 16.0;
                   final gridWidth = cellWidth * columns;
                   final cellHeight = cellWidth * 10 / 16;
                   final byCell = <GridCell, int>{
@@ -3583,77 +4524,134 @@ class _StitchHomePageState extends State<StitchHomePage>
                             index % columns,
                           );
                           final photo = task.photos[byCell[cell]!];
-                          final forced = task.grid.forceGridCells.contains(
-                            cell,
-                          );
+                          final placement = _grid.placementFor(photo, cell);
+                          final forced = placement.kind == 'hardGridLock';
                           final label =
                               '${photo.originalName} · ${cell.row + 1},${cell.column + 1}';
                           return Tooltip(
                             message: '$label${forced ? ' · 强制按网格放置' : ''}',
-                            child: InkWell(
-                              onTap: _editable
-                                  ? () async {
-                                      final updated = task.copyWith(
-                                        grid: task.grid.toggleForced(cell),
-                                      );
-                                      await _persist(updated);
-                                      _setGrid(updated.grid);
-                                    }
-                                  : null,
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  Container(
-                                    color: Colors.black12,
-                                    alignment: Alignment.center,
-                                    child: Image.file(
-                                      File(photo.storedPath),
-                                      fit: BoxFit.contain,
-                                      cacheWidth: 256,
-                                      errorBuilder: (_, _, _) =>
-                                          const Icon(Icons.broken_image),
+                            child: Stack(
+                              fit: StackFit.expand,
+                              children: [
+                                Container(
+                                  color: Colors.black12,
+                                  alignment: Alignment.center,
+                                  child: Image.file(
+                                    File(photo.storedPath),
+                                    key: ValueKey(
+                                      'photo-grid-image-${cell.row}-${cell.column}',
+                                    ),
+                                    fit: BoxFit.contain,
+                                    cacheWidth: 256,
+                                    errorBuilder: (_, _, _) =>
+                                        const Icon(Icons.broken_image),
+                                  ),
+                                ),
+                                Positioned(
+                                  left: 2,
+                                  bottom: 2,
+                                  child: Container(
+                                    color: Colors.black54,
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 3,
+                                    ),
+                                    child: Text(
+                                      '${cell.row + 1},${cell.column + 1}',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 9,
+                                      ),
                                     ),
                                   ),
+                                ),
+                                if (forced)
+                                  Positioned.fill(
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        border: Border.all(
+                                          color: Colors.amber,
+                                          width: 3,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                if (forced)
                                   Positioned(
-                                    left: 2,
-                                    bottom: 2,
-                                    child: Container(
-                                      color: Colors.black54,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 3,
+                                    right: 0,
+                                    top: 0,
+                                    child: IconButton(
+                                      key: ValueKey(
+                                        'grid-lock-${cell.row}-${cell.column}',
                                       ),
-                                      child: Text(
-                                        '${cell.row + 1},${cell.column + 1}',
-                                        style: const TextStyle(
-                                          color: Colors.white,
-                                          fontSize: 9,
-                                        ),
-                                      ),
-                                    ),
-                                  ),
-                                  if (forced)
-                                    Positioned.fill(
-                                      child: DecoratedBox(
-                                        decoration: BoxDecoration(
-                                          border: Border.all(
-                                            color: Colors.amber,
-                                            width: 3,
+                                      tooltip: StitchLocalizations.of(context)
+                                          .text(
+                                            placement.origin ==
+                                                    GridConstraintOrigin
+                                                        .legacyUnknown
+                                                ? '旧任务锁定位置来源未知；点按可解除锁定'
+                                                : '解除网格位置锁定',
                                           ),
-                                        ),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: BoxConstraints.tightFor(
+                                        width: lockButtonSize,
+                                        height: lockButtonSize,
                                       ),
-                                    ),
-                                  if (forced)
-                                    const Positioned(
-                                      right: 2,
-                                      top: 2,
-                                      child: Icon(
+                                      onPressed: _editable
+                                          ? () async {
+                                              final updated = task.copyWith(
+                                                grid: _grid.setPhotoLock(
+                                                  cell,
+                                                  photo.storedPath,
+                                                  locked: false,
+                                                ),
+                                              );
+                                              await _persist(updated);
+                                              _setGrid(updated.grid);
+                                            }
+                                          : null,
+                                      icon: Icon(
                                         Icons.push_pin,
                                         color: Colors.amber,
-                                        size: 16,
+                                        size: lockIconSize,
                                       ),
                                     ),
-                                ],
-                              ),
+                                  ),
+                                if (!forced && _editable)
+                                  Positioned(
+                                    right: 0,
+                                    top: 0,
+                                    child: IconButton(
+                                      key: ValueKey(
+                                        'grid-lock-${cell.row}-${cell.column}',
+                                      ),
+                                      tooltip: StitchLocalizations.of(
+                                        context,
+                                      ).text('锁定网格位置'),
+                                      visualDensity: VisualDensity.compact,
+                                      padding: EdgeInsets.zero,
+                                      constraints: BoxConstraints.tightFor(
+                                        width: lockButtonSize,
+                                        height: lockButtonSize,
+                                      ),
+                                      onPressed: () async {
+                                        final updated = task.copyWith(
+                                          grid: _grid.setPhotoLock(
+                                            cell,
+                                            photo.storedPath,
+                                            locked: true,
+                                          ),
+                                        );
+                                        await _persist(updated);
+                                        _setGrid(updated.grid);
+                                      },
+                                      icon: Icon(
+                                        Icons.push_pin_outlined,
+                                        size: lockIconSize,
+                                      ),
+                                    ),
+                                  ),
+                              ],
                             ),
                           );
                         },

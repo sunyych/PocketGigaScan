@@ -2,6 +2,7 @@ use image::{GrayImage, Luma};
 use lumia_gigascan_core::ffi::{lumia_gigascan_free, lumia_gigascan_spherical_json};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     ffi::{CStr, CString},
     fs,
     sync::atomic::{AtomicU64, Ordering},
@@ -52,6 +53,46 @@ fn run(feature: &str, matcher: &str, parallel: bool) -> Value {
     result
 }
 
+fn run_low_contrast_retry(parallel: bool) -> Value {
+    let dir = std::env::temp_dir().join(format!(
+        "lg-retry-match-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    let mut image = GrayImage::new(320, 240);
+    let mut state = 0x51a7_991du32;
+    for y in 0..240 {
+        for x in 0..320 {
+            if x % 8 == 0 && y % 8 == 0 {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+            }
+            image.put_pixel(x, y, Luma([118 + (state % 5) as u8]));
+        }
+    }
+    let path = dir.join("low-contrast.png");
+    image.save(&path).unwrap();
+    let tiles = (0..4)
+        .map(|index| json!({"row":index / 2,"column":index % 2,"path":path}))
+        .collect::<Vec<_>>();
+    let request = CString::new(
+        json!({
+            "rows":2,"columns":2,"tiles":tiles,
+            "fx":190.0,"fy":188.0,"cx":159.5,"cy":119.5,"sourceWidth":320,"sourceHeight":240,
+            "neighborMode":"four","parallelMatching":parallel,"workers":4
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let ptr = unsafe { lumia_gigascan_spherical_json(request.as_ptr()) };
+    let result = unsafe { serde_json::from_slice(CStr::from_ptr(ptr).to_bytes()) }.unwrap();
+    unsafe { lumia_gigascan_free(ptr) };
+    let _ = fs::remove_dir_all(dir);
+    result
+}
+
 #[test]
 fn serial_and_parallel_edge_matching_are_equivalent() {
     let serial = run("sift", "bf", false);
@@ -65,6 +106,90 @@ fn serial_and_parallel_edge_matching_are_equivalent() {
     assert_eq!(serial["layout"]["report"]["requestedMatchingWorkers"], 4);
     assert_eq!(serial["layout"]["report"]["effectiveMatchingWorkers"], 1);
     assert_eq!(parallel["layout"]["report"]["effectiveMatchingWorkers"], 4);
+}
+
+#[test]
+fn serial_and_parallel_low_contrast_retry_preserve_edge_results() {
+    let serial = run_low_contrast_retry(false);
+    let parallel = run_low_contrast_retry(true);
+    fn edges(result: &Value) -> &Value {
+        result
+            .pointer("/layout/report/edgeDiagnostics")
+            .or_else(|| result.pointer("/error/diagnostics/edges"))
+            .unwrap_or_else(|| panic!("missing edge diagnostics: {result:#}"))
+    }
+    let serial_edges = edges(&serial);
+    let parallel_edges = edges(&parallel);
+    let serial_edge_list = serial_edges.as_array().unwrap();
+    assert_eq!(serial_edge_list.len(), 6);
+    let pairs = serial_edge_list
+        .iter()
+        .map(|edge| {
+            let from = edge["from"].as_u64().unwrap();
+            let to = edge["to"].as_u64().unwrap();
+            (from.min(to), from.max(to))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        pairs.len(),
+        serial_edge_list.len(),
+        "neighbor pairs must be unique"
+    );
+    assert_eq!(
+        pairs,
+        [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)]
+            .into_iter()
+            .collect(),
+        "a 2x2 grid has four cardinal pairs and both immediate diagonals"
+    );
+    assert_eq!(
+        pairs
+            .iter()
+            .filter(|(from, to)| (*from, *to) == (0, 3) || (*from, *to) == (1, 2))
+            .count(),
+        2
+    );
+    assert_eq!(
+        serial_edges
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                (
+                    edge["from"].clone(),
+                    edge["to"].clone(),
+                    edge["usedRetry"].clone(),
+                    edge["usedClaheRetry"].clone(),
+                    edge["selectedAttempt"].clone(),
+                    edge["initial"].clone(),
+                    edge["retry"].clone(),
+                    edge["claheRetry"].clone(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        parallel_edges
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|edge| {
+                (
+                    edge["from"].clone(),
+                    edge["to"].clone(),
+                    edge["usedRetry"].clone(),
+                    edge["usedClaheRetry"].clone(),
+                    edge["selectedAttempt"].clone(),
+                    edge["initial"].clone(),
+                    edge["retry"].clone(),
+                    edge["claheRetry"].clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    );
+    assert!(serial_edges
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edge| edge["retry"].is_object() || edge["claheRetry"].is_object()));
 }
 
 #[test]

@@ -2,6 +2,7 @@ use image::{GrayImage, Luma};
 use lumia_gigascan_core::ffi::{lumia_gigascan_free, lumia_gigascan_spherical_json};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     ffi::{CStr, CString},
     fs,
     path::PathBuf,
@@ -157,7 +158,7 @@ fn spherical_abi_registers_a_true_nine_view_textured_sphere() {
         }
     }
     let request = CString::new(
-        json!({"rows":3,"columns":3,"tiles":tiles,"fx":FX,"fy":FY,"cx":CX,"cy":CY,"sourceWidth":W,"sourceHeight":H,"outputDir":"unused","neighborMode":"eight","workers":1})
+        json!({"rows":3,"columns":3,"tiles":tiles,"fx":FX,"fy":FY,"cx":CX,"cy":CY,"sourceWidth":W,"sourceHeight":H,"outputDir":"unused","neighborMode":"four","workers":1})
             .to_string(),
     )
     .unwrap();
@@ -177,6 +178,7 @@ fn spherical_abi_registers_a_true_nine_view_textured_sphere() {
     assert_eq!(parallel["ok"], true, "{parallel:#}");
     assert_eq!(parallel["layout"]["report"]["neighborMode"], "eight");
     assert_eq!(layout["report"]["neighborMode"], "eight");
+    assert_eq!(layout["report"]["totalEdges"], 20);
     assert_eq!(layout["report"]["effectiveWorkers"], 1);
     assert_eq!(parallel["layout"]["report"]["effectiveWorkers"], 4);
     assert_eq!(
@@ -196,6 +198,90 @@ fn spherical_abi_registers_a_true_nine_view_textured_sphere() {
             > 0
     );
     assert_eq!(parallel["layout"]["report"]["totalEdges"], 20);
+
+    let call_request = |request: &Value| {
+        let request = CString::new(request.to_string()).unwrap();
+        let pointer = unsafe { lumia_gigascan_spherical_json(request.as_ptr()) };
+        let response: Value =
+            unsafe { serde_json::from_slice(CStr::from_ptr(pointer).to_bytes()) }.unwrap();
+        unsafe { lumia_gigascan_free(pointer) };
+        response
+    };
+    let mut soft_grid_request: Value = serde_json::from_str(request.to_str().unwrap()).unwrap();
+    soft_grid_request["placementMode"] = json!("grid-assisted");
+    soft_grid_request["allowNominalGridFallback"] = json!(true);
+    soft_grid_request["tiles"][4]["placementConstraint"] = json!({
+        "kind":"gridPrior",
+        "origin":"operator"
+    });
+    let soft_grid = call_request(&soft_grid_request);
+    assert_eq!(soft_grid["ok"], true, "{soft_grid:#}");
+    assert_eq!(soft_grid["layout"]["report"]["totalEdges"], 20);
+    assert_eq!(soft_grid["layout"]["report"]["visualTileCount"], 9);
+    assert_eq!(soft_grid["layout"]["report"]["forcedGridTileCount"], 0);
+    assert_eq!(soft_grid["layout"]["tiles"][4]["positionSource"], "visual");
+    assert_eq!(
+        soft_grid["layout"]["tiles"][4]["placementConstraint"],
+        json!({"kind":"gridPrior","origin":"operator"})
+    );
+    assert_eq!(
+        soft_grid["layout"]["report"]["edgeDiagnostics"]
+            .as_array()
+            .unwrap()
+            .len(),
+        20
+    );
+    assert_eq!(
+        soft_grid["layout"]["report"]["edgeDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["disposition"] == "forced_grid_cell")
+            .count(),
+        0,
+        "estimated grid placement is a soft prior; all twenty local edges remain eligible"
+    );
+
+    let mut hard_grid_request = soft_grid_request.clone();
+    hard_grid_request["tiles"][4]["placementConstraint"] = json!({
+        "kind":"hardGridLock",
+        "origin":"operator"
+    });
+    let hard_grid = call_request(&hard_grid_request);
+    assert_eq!(hard_grid["ok"], true, "{hard_grid:#}");
+    assert_eq!(hard_grid["layout"]["tiles"].as_array().unwrap().len(), 9);
+    assert_eq!(hard_grid["layout"]["report"]["forcedGridTileCount"], 1);
+    assert_eq!(hard_grid["layout"]["report"]["visualTileCount"], 8);
+    assert_eq!(hard_grid["layout"]["tiles"][4]["forceGrid"], true);
+    assert_eq!(
+        hard_grid["layout"]["tiles"][4]["placementConstraint"],
+        json!({"kind":"hardGridLock","origin":"operator"})
+    );
+    assert_eq!(
+        hard_grid["layout"]["tiles"][4]["positionSource"],
+        "gridEstimated"
+    );
+    assert_eq!(
+        hard_grid["layout"]["report"]["edgeDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["disposition"] == "forced_grid_cell")
+            .count(),
+        8,
+        "legacy per-cell hard markers exclude exactly the center's eight incident edges"
+    );
+
+    let mut contradictory_request = soft_grid_request;
+    contradictory_request["tiles"][4]["forceGrid"] = json!(true);
+    let contradictory = call_request(&contradictory_request);
+    assert_eq!(contradictory["ok"], false, "{contradictory:#}");
+    assert_eq!(contradictory["error"]["code"], "INVALID_ARGUMENT");
+    assert!(contradictory["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cannot be combined"));
+
     for index in 0..9 {
         let serial: [f64; 9] =
             serde_json::from_value(layout["tiles"][index]["cameraToWorld"].clone()).unwrap();
@@ -210,6 +296,28 @@ fn spherical_abi_registers_a_true_nine_view_textured_sphere() {
             "parallel pose changed for tile {index}"
         );
     }
+
+    // Exercise the independent central-cardinal overlap estimator followed by
+    // grid refinement. Legacy `adaptive` must resolve to the same exact local
+    // eight-neighbor pair set, including its diagonals.
+    let mut auto_request: Value = serde_json::from_str(request.to_str().unwrap()).unwrap();
+    auto_request["neighborMode"] = json!("adaptive");
+    auto_request["autoGridOverlap"] = json!(true);
+    auto_request["refineGridNeighbors"] = json!(true);
+    let auto_json = CString::new(auto_request.to_string()).unwrap();
+    let auto_ptr = unsafe { lumia_gigascan_spherical_json(auto_json.as_ptr()) };
+    let auto: Value =
+        unsafe { serde_json::from_slice(CStr::from_ptr(auto_ptr).to_bytes()) }.unwrap();
+    unsafe { lumia_gigascan_free(auto_ptr) };
+    assert_eq!(auto["ok"], true, "{auto:#}");
+    assert_eq!(auto["layout"]["report"]["neighborMode"], "eight");
+    assert_eq!(auto["layout"]["report"]["totalEdges"], 20);
+    assert_eq!(
+        auto["layout"]["report"]["gridNeighborRefinement"]["strategy"],
+        "fixed-eight-neighbor-visual-ray-solver"
+    );
+    assert!(auto["layout"]["report"]["gridOverlapEstimate"]["horizontal"]["pairs"].is_array());
+    assert!(auto["layout"]["report"]["gridOverlapEstimate"]["vertical"]["pairs"].is_array());
     assert_eq!(layout["projection"], "spherical");
     assert_eq!(layout["schemaVersion"], 1);
     assert_eq!(layout["tiles"].as_array().unwrap().len(), 9);
@@ -320,14 +428,33 @@ fn grid_assisted_mode_places_blank_center_from_neighboring_rows_and_columns() {
     assert_eq!(layout["tiles"][4]["positionSource"], "gridEstimated");
     assert_eq!(layout["tiles"].as_array().unwrap().len(), 9);
     assert_eq!(layout["tiles"][4]["forceGrid"], true);
+    let forced_incident_pairs = report["edgeDiagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|edge| edge["disposition"] == "forced_grid_cell")
+        .map(|edge| {
+            let from = edge["from"].as_u64().unwrap();
+            let to = edge["to"].as_u64().unwrap();
+            (from.min(to), from.max(to))
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(forced_incident_pairs.len(), 8);
     assert_eq!(
-        report["edgeDiagnostics"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|edge| edge["disposition"] == "forced_grid_cell")
-            .count(),
-        4
+        forced_incident_pairs,
+        [
+            (0, 4),
+            (1, 4),
+            (2, 4),
+            (3, 4),
+            (4, 5),
+            (4, 6),
+            (4, 7),
+            (4, 8)
+        ]
+        .into_iter()
+        .collect(),
+        "the hard-locked center excludes each immediate neighbor pair once"
     );
     assert!(report["synthesizedGridEdgeCount"].as_u64().unwrap() >= 2);
     assert!(report["globalRayReprojectionRmsPx"].as_f64().unwrap() < 12.0);
@@ -345,6 +472,20 @@ fn grid_assisted_mode_places_blank_center_from_neighboring_rows_and_columns() {
     assert_eq!(unforced["layout"]["tiles"].as_array().unwrap().len(), 9);
     assert_eq!(unforced["layout"]["report"]["forcedGridTileCount"], 0);
     assert_eq!(unforced["layout"]["tiles"][4]["forceGrid"], false);
+    assert_eq!(
+        unforced["layout"]["tiles"][4]["positionSource"],
+        "gridEstimated"
+    );
+    assert_eq!(
+        unforced["layout"]["report"]["edgeDiagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|edge| edge["disposition"] == "forced_grid_cell")
+            .count(),
+        0,
+        "soft grid placement must not suppress this tile's neighbor edges"
+    );
 }
 
 #[test]
@@ -436,6 +577,10 @@ fn explicit_nominal_fov_fallback_places_blank_grid_and_reports_unknown_visual_qu
     assert_eq!(report["geometryModel"], "nominal-fov-grid");
     assert_eq!(layout["tiles"][4]["forceGrid"], true);
     assert_eq!(layout["tiles"][4]["positionSource"], "gridEstimated");
+    assert_eq!(
+        layout["tiles"][4]["placementConstraint"],
+        json!({"kind":"hardGridLock","origin":"legacyUnknown"})
+    );
     let center_pose = layout["tiles"][4]["cameraToWorld"].as_array().unwrap();
     for (value, expected) in center_pose
         .iter()
@@ -487,6 +632,30 @@ fn explicit_nominal_fov_fallback_places_blank_grid_and_reports_unknown_visual_qu
         let warning = warning.as_str().unwrap().to_ascii_lowercase();
         !warning.contains("inf") && !warning.contains("reprojection is")
     }));
+
+    let mut nominal_soft = opted_in.clone();
+    nominal_soft["tiles"] = json!(nominal_soft["tiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .map(|mut tile| {
+            tile.as_object_mut().unwrap().remove("forceGrid");
+            tile
+        })
+        .collect::<Vec<_>>());
+    let nominal_soft = call(&nominal_soft);
+    assert_eq!(nominal_soft["ok"], true, "{nominal_soft:#}");
+    assert_eq!(nominal_soft["layout"]["report"]["forcedGridTileCount"], 0);
+    assert!(nominal_soft["layout"]["tiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tile| tile["forceGrid"] == false));
+    assert_eq!(
+        nominal_soft["layout"]["tiles"][4]["placementConstraint"],
+        json!({"kind":"none","origin":null})
+    );
 
     let mut invalid = base;
     invalid["gridHorizontalOverlap"] = json!(0.9);

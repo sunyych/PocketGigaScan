@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/imported_photo.dart';
+import 'platform_file_dialogs.dart';
 
 class ImportFailure implements Exception {
   const ImportFailure(this.message);
@@ -37,16 +38,12 @@ class _DigestCapture implements Sink<Digest> {
 }
 
 class PhotoImporter {
-  Future<List<PlatformFile>?> pickJpegs() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: const ['jpg', 'jpeg'],
-      allowMultiple: true,
-      withData: false,
-      withReadStream: true,
-    );
-    return result?.files;
-  }
+  PhotoImporter({PlatformFileDialogs? dialogs})
+    : _dialogs = dialogs ?? PlatformFileDialogs();
+
+  final PlatformFileDialogs _dialogs;
+
+  Future<List<PlatformFile>?> pickJpegs() => _dialogs.pickJpegs();
 
   Future<ImportBatch> copyIntoTask(
     List<PlatformFile> selected,

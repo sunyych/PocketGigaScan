@@ -198,6 +198,8 @@ impl StitchJob {
         u64,
         u64,
         u64,
+        register::RetryStageTimings,
+        register::RetryStageTimings,
         Vec<register::SphericalMatchEdge>,
     )> {
         if self.cancel.is_cancelled() {
@@ -230,6 +232,8 @@ impl StitchJob {
             initial_matching_ms,
             low_contrast_retry_ms,
             clahe_retry_ms,
+            low_contrast_timings,
+            clahe_timings,
         ) = edges;
         Ok((
             primary,
@@ -243,6 +247,8 @@ impl StitchJob {
             initial_matching_ms,
             low_contrast_retry_ms,
             clahe_retry_ms,
+            low_contrast_timings,
+            clahe_timings,
             edges,
         ))
     }

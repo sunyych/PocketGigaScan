@@ -18,7 +18,11 @@ const MAX_PIXEL_REFINEMENT_ITERATIONS: usize = 30;
 const MAX_GRID_COMPONENT_POSE_ITERATIONS: usize = 30;
 const GRID_COMPONENT_HUBER_ANGLE_RAD: f64 = 0.01;
 const GRID_COMPONENT_STEP_TOLERANCE_RAD: f64 = 1e-7;
-const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 7;
+const WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS: usize = 16;
+const WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS: f64 = 48.0;
+const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 8;
+const FAST_REGISTRATION_MEGA_PIXELS: f64 = 0.6;
+const PRECISION_RECOVERY_MEGA_PIXELS: f64 = 2.0;
 const APPROVED_V2_SNAPSHOT_PRODUCER_SHA256: &str =
     "3a1eb012a9f1756b8772f217088fbe904b6ec0803457a72d3d0a36c6f2b9911e";
 fn current_pixel_solver_parameters() -> Value {
@@ -63,7 +67,7 @@ impl From<Error> for SphericalFailure {
 type Mat = [f64; 9];
 const ID: Mat = [1., 0., 0., 0., 1., 0., 0., 0., 1.];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Request {
     rows: usize,
@@ -112,7 +116,16 @@ fn default_local_texture_warp() -> bool {
     true
 }
 fn default_neighbor_mode() -> String {
-    "four".into()
+    "eight".into()
+}
+
+fn normalize_neighbor_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        // These values were persisted by older builds. They remain readable,
+        // but all product execution now uses the fixed eight-neighbor graph.
+        "four" | "eight" | "adaptive" => Some("eight"),
+        _ => None,
+    }
 }
 fn default_seam_blend_mode() -> String {
     "feather".into()
@@ -132,13 +145,127 @@ fn default_feature_type() -> String {
 fn default_matcher_type() -> String {
     "bf".into()
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct InputTile {
     row: usize,
     column: usize,
     path: String,
     #[serde(default, rename = "forceGrid")]
     force_grid: bool,
+    #[serde(default, rename = "placementConstraint")]
+    placement_constraint: Option<InputPlacementConstraint>,
+}
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PlacementConstraintKind {
+    GridPrior,
+    HardGridLock,
+}
+
+impl PlacementConstraintKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::GridPrior => "gridPrior",
+            Self::HardGridLock => "hardGridLock",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum PlacementConstraintOrigin {
+    Operator,
+    SystemFallback,
+    LegacyUnknown,
+}
+
+impl PlacementConstraintOrigin {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Operator => "operator",
+            Self::SystemFallback => "systemFallback",
+            Self::LegacyUnknown => "legacyUnknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct InputPlacementConstraint {
+    kind: PlacementConstraintKind,
+    origin: PlacementConstraintOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedPlacementConstraint {
+    kind: Option<PlacementConstraintKind>,
+    origin: Option<PlacementConstraintOrigin>,
+}
+
+impl ResolvedPlacementConstraint {
+    fn none() -> Self {
+        Self {
+            kind: None,
+            origin: None,
+        }
+    }
+
+    fn hard_grid_lock(origin: PlacementConstraintOrigin) -> Self {
+        Self {
+            kind: Some(PlacementConstraintKind::HardGridLock),
+            origin: Some(origin),
+        }
+    }
+
+    fn is_hard_grid_lock(self) -> bool {
+        self.kind == Some(PlacementConstraintKind::HardGridLock)
+    }
+
+    fn diagnostic(self) -> Value {
+        json!({
+            "kind":self.kind.map(PlacementConstraintKind::as_str).unwrap_or("none"),
+            "origin":self.origin.map(PlacementConstraintOrigin::as_str)
+        })
+    }
+}
+
+impl InputTile {
+    fn resolved_placement_constraint(&self) -> Result<ResolvedPlacementConstraint> {
+        match (self.force_grid, self.placement_constraint) {
+            (
+                true,
+                Some(InputPlacementConstraint {
+                    kind: PlacementConstraintKind::GridPrior,
+                    ..
+                }),
+            ) => Err(Error::Invalid(
+                "forceGrid cannot be combined with placementConstraint.kind gridPrior".into(),
+            )),
+            (
+                true,
+                Some(InputPlacementConstraint {
+                    kind: PlacementConstraintKind::HardGridLock,
+                    origin,
+                }),
+            ) => Ok(ResolvedPlacementConstraint::hard_grid_lock(origin)),
+            (true, None) => Ok(ResolvedPlacementConstraint::hard_grid_lock(
+                PlacementConstraintOrigin::LegacyUnknown,
+            )),
+            (false, Some(constraint)) => Ok(ResolvedPlacementConstraint {
+                kind: Some(constraint.kind),
+                origin: Some(constraint.origin),
+            }),
+            (false, None) => Ok(ResolvedPlacementConstraint::none()),
+        }
+    }
+}
+
+fn placement_constraint_diagnostics(constraints: &[ResolvedPlacementConstraint]) -> Value {
+    json!({
+        "tiles":constraints.iter().map(|constraint| constraint.diagnostic()).collect::<Vec<_>>(),
+        "hardGridLockCount":constraints.iter().filter(|constraint| constraint.is_hard_grid_lock()).count(),
+        "gridPriorCount":constraints.iter().filter(|constraint| constraint.kind == Some(PlacementConstraintKind::GridPrior)).count()
+    })
 }
 #[derive(Clone)]
 struct Constraint {
@@ -375,6 +502,328 @@ fn root_anchored_visual_tiles(count: usize, constraints: &[Constraint]) -> Vec<b
     seen
 }
 
+fn correspondence_coverage(points: &[[f64; 4]], req: &Request) -> (usize, usize, f64) {
+    let mut source = 0u16;
+    let mut target = 0u16;
+    for point in points {
+        let cell = |x: f64, y: f64| -> Option<usize> {
+            if !x.is_finite()
+                || !y.is_finite()
+                || x < 0.0
+                || y < 0.0
+                || x >= req.source_width as f64
+                || y >= req.source_height as f64
+            {
+                return None;
+            }
+            let column = ((x / req.source_width as f64) * 4.0).floor() as usize;
+            let row = ((y / req.source_height as f64) * 4.0).floor() as usize;
+            Some(row.min(3) * 4 + column.min(3))
+        };
+        if let Some(index) = cell(point[0], point[1]) {
+            source |= 1 << index;
+        }
+        if let Some(index) = cell(point[2], point[3]) {
+            target |= 1 << index;
+        }
+    }
+    let source_count = source.count_ones() as usize;
+    let target_count = target.count_ones() as usize;
+    // A normal overlap often occupies only two columns of the 4x4 grid. Use
+    // eight cells as full credit and keep a non-zero floor so a valid blurry
+    // edge remains usable when its support is spatially narrow.
+    let score = 0.25 + 0.75 * (source_count.min(target_count) as f64 / 8.0).clamp(0.0, 1.0);
+    (source_count, target_count, score)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CorrespondenceSupportShape {
+    unique_points: usize,
+    source_cells: usize,
+    target_cells: usize,
+    source_rows: usize,
+    target_rows: usize,
+    source_columns: usize,
+    target_columns: usize,
+    source_thin_axis_extent: f64,
+    target_thin_axis_extent: f64,
+}
+
+fn correspondence_support_shape(points: &[[f64; 4]], req: &Request) -> CorrespondenceSupportShape {
+    let mut unique = std::collections::HashSet::<[u64; 4]>::new();
+    let mut source_cells = 0u16;
+    let mut target_cells = 0u16;
+    let mut source_rows = 0u8;
+    let mut target_rows = 0u8;
+    let mut source_columns = 0u8;
+    let mut target_columns = 0u8;
+    let mut source_min_x = f64::INFINITY;
+    let mut source_max_x = f64::NEG_INFINITY;
+    let mut source_min_y = f64::INFINITY;
+    let mut source_max_y = f64::NEG_INFINITY;
+    let mut target_min_x = f64::INFINITY;
+    let mut target_max_x = f64::NEG_INFINITY;
+    let mut target_min_y = f64::INFINITY;
+    let mut target_max_y = f64::NEG_INFINITY;
+    for point in points {
+        if !point.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        let source_cell = |x: f64, y: f64| -> Option<(usize, usize)> {
+            if x < 0.0 || y < 0.0 || x >= req.source_width as f64 || y >= req.source_height as f64 {
+                return None;
+            }
+            let column = ((x / req.source_width as f64) * 4.0).floor() as usize;
+            let row = ((y / req.source_height as f64) * 4.0).floor() as usize;
+            Some((row.min(3), column.min(3)))
+        };
+        let (Some((source_row, source_column)), Some((target_row, target_column))) = (
+            source_cell(point[0], point[1]),
+            source_cell(point[2], point[3]),
+        ) else {
+            continue;
+        };
+        unique.insert(point.map(f64::to_bits));
+        source_cells |= 1 << (source_row * 4 + source_column);
+        target_cells |= 1 << (target_row * 4 + target_column);
+        source_rows |= 1 << source_row;
+        target_rows |= 1 << target_row;
+        source_columns |= 1 << source_column;
+        target_columns |= 1 << target_column;
+        source_min_x = source_min_x.min(point[0]);
+        source_max_x = source_max_x.max(point[0]);
+        source_min_y = source_min_y.min(point[1]);
+        source_max_y = source_max_y.max(point[1]);
+        target_min_x = target_min_x.min(point[2]);
+        target_max_x = target_max_x.max(point[2]);
+        target_min_y = target_min_y.min(point[3]);
+        target_max_y = target_max_y.max(point[3]);
+    }
+    let source_thin_axis_extent = ((source_max_x - source_min_x) / req.source_width as f64)
+        .min((source_max_y - source_min_y) / req.source_height as f64);
+    let target_thin_axis_extent = ((target_max_x - target_min_x) / req.source_width as f64)
+        .min((target_max_y - target_min_y) / req.source_height as f64);
+    CorrespondenceSupportShape {
+        unique_points: unique.len(),
+        source_cells: source_cells.count_ones() as usize,
+        target_cells: target_cells.count_ones() as usize,
+        source_rows: source_rows.count_ones() as usize,
+        target_rows: target_rows.count_ones() as usize,
+        source_columns: source_columns.count_ones() as usize,
+        target_columns: target_columns.count_ones() as usize,
+        source_thin_axis_extent,
+        target_thin_axis_extent,
+    }
+}
+
+fn is_weak_support_loop_conflict(
+    points: &[[f64; 4]],
+    req: &Request,
+    cycle_residual_pixels: f64,
+) -> Option<CorrespondenceSupportShape> {
+    if !cycle_residual_pixels.is_finite()
+        || cycle_residual_pixels < WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS
+    {
+        return None;
+    }
+    let support = correspondence_support_shape(points, req);
+    let source_is_1d =
+        (support.source_cells <= 1 || support.source_rows <= 1 || support.source_columns <= 1)
+            && support.source_thin_axis_extent <= 0.125;
+    let target_is_1d =
+        (support.target_cells <= 1 || support.target_rows <= 1 || support.target_columns <= 1)
+            && support.target_thin_axis_extent <= 0.125;
+    (support.unique_points > 0
+        && support.source_thin_axis_extent.is_finite()
+        && support.target_thin_axis_extent.is_finite()
+        && support.unique_points < WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS
+        && source_is_1d
+        && target_is_1d)
+        .then_some(support)
+}
+
+fn remove_weak_support_loop_conflicts(
+    constraints: &mut Vec<Constraint>,
+    matched_edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    loop_residuals: &std::collections::HashMap<(usize, usize), f64>,
+    edge_diagnostics: &mut [Value],
+) -> Vec<Value> {
+    let mut retained = Vec::with_capacity(constraints.len());
+    let mut rejected = Vec::new();
+    for constraint in constraints.drain(..) {
+        let pair = (constraint.from, constraint.to);
+        let cycle_residual_pixels = loop_residuals.get(&pair).copied().unwrap_or(0.0);
+        let edge = matched_edges
+            .iter()
+            .find(|edge| edge.from == pair.0 && edge.to == pair.1);
+        let support = edge.and_then(|edge| {
+            is_weak_support_loop_conflict(&edge.points, req, cycle_residual_pixels)
+        });
+        let Some(support) = support else {
+            retained.push(constraint);
+            continue;
+        };
+        let mut detail = json!({
+            "from":pair.0,
+            "to":pair.1,
+            "disposition":"weak_support_loop_conflict",
+            "reason":"fewer_than_16_unique_inliers_with_one_dimensional_support_no_wider_than_one_eighth_of_each_image_and_cycle_conflict_at_least_48px",
+            "uniqueInlierCount":support.unique_points,
+            "sourceOccupiedCells":support.source_cells,
+            "targetOccupiedCells":support.target_cells,
+            "sourceOccupiedRows":support.source_rows,
+            "targetOccupiedRows":support.target_rows,
+            "sourceOccupiedColumns":support.source_columns,
+            "targetOccupiedColumns":support.target_columns,
+            "sourceThinAxisExtentFraction":support.source_thin_axis_extent,
+            "targetThinAxisExtentFraction":support.target_thin_axis_extent,
+            "cycleConsistencyPixels":cycle_residual_pixels,
+            "thresholds":{
+                "maximumUniqueInliersExclusive":WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS,
+                "minimumCycleConflictPixelsInclusive":WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS,
+                "maximumThinAxisExtentFractionInclusive":0.125
+            }
+        });
+        if let Some(diagnostic) = edge_diagnostics.iter_mut().find(|entry| {
+            entry["from"].as_u64() == Some(pair.0 as u64)
+                && entry["to"].as_u64() == Some(pair.1 as u64)
+        }) {
+            diagnostic["disposition"] = json!("weak_support_loop_conflict");
+            diagnostic["rejectionReason"] = detail["reason"].clone();
+            diagnostic["weakSupportLoopConflict"] = detail.clone();
+            detail["rayMedianResidualPx"] = diagnostic["rayMedianResidualPx"].clone();
+        }
+        detail["inliers"] = json!(edge.map_or(0, |edge| edge.inliers));
+        rejected.push(detail);
+    }
+    *constraints = retained;
+    rejected
+}
+
+/// Check each elementary grid loop once (O(rows*columns)). When an alternate
+/// three-edge route disagrees with the fourth edge, reduce only the weakest
+/// correspondence constraint in that loop. Constraints remain present, so
+/// every input tile stays connected and provenance is still visual evidence.
+fn weight_neighbor_loop_conflicts(
+    rows: usize,
+    columns: usize,
+    constraints: &mut [Constraint],
+    req: &Request,
+) -> (
+    std::collections::HashMap<(usize, usize), f64>,
+    std::collections::HashMap<(usize, usize), f64>,
+    std::collections::HashSet<(usize, usize)>,
+) {
+    use std::collections::HashMap;
+    let mut indices = HashMap::with_capacity(constraints.len());
+    let qualities = constraints
+        .iter()
+        .map(|constraint| constraint.weight)
+        .collect::<Vec<_>>();
+    for (index, edge) in constraints.iter().enumerate() {
+        indices.insert((edge.from, edge.to), index);
+    }
+    let mut worst_loop = HashMap::<(usize, usize), f64>::new();
+    let mut downweighted = HashMap::<(usize, usize), f64>::new();
+    let mut ambiguous = std::collections::HashSet::new();
+    let mut candidate_scales = HashMap::<(usize, usize), f64>::new();
+    for row in 0..rows.saturating_sub(1) {
+        for column in 0..columns.saturating_sub(1) {
+            let top_left = row * columns + column;
+            let top_right = top_left + 1;
+            let bottom_left = top_left + columns;
+            let bottom_right = bottom_left + 1;
+            let Some(&top) = indices.get(&(top_left, top_right)) else {
+                continue;
+            };
+            let Some(&right) = indices.get(&(top_right, bottom_right)) else {
+                continue;
+            };
+            let Some(&bottom) = indices.get(&(bottom_left, bottom_right)) else {
+                continue;
+            };
+            let Some(&left) = indices.get(&(top_left, bottom_left)) else {
+                continue;
+            };
+            // The bottom and left edges point opposite to the loop traversal.
+            let cycle = mul(
+                mul(
+                    mul(constraints[top].rotation, constraints[right].rotation),
+                    inverse(constraints[bottom].rotation).unwrap_or(ID),
+                ),
+                inverse(constraints[left].rotation).unwrap_or(ID),
+            );
+            let residual = log_rotation(cycle)
+                .iter()
+                .map(|value| value * value)
+                .sum::<f64>()
+                .sqrt();
+            if !residual.is_finite() {
+                continue;
+            }
+            let pixel_equivalent = residual * ((req.fx.abs() + req.fy.abs()) * 0.5);
+            for index in [top, right, bottom, left] {
+                let edge = &constraints[index];
+                worst_loop
+                    .entry((edge.from, edge.to))
+                    .and_modify(|value| *value = value.max(pixel_equivalent))
+                    .or_insert(pixel_equivalent);
+            }
+            if pixel_equivalent <= 12.0 {
+                continue;
+            }
+            let mut ranked = [top, right, bottom, left];
+            ranked.sort_by(|a, b| qualities[*a].total_cmp(&qualities[*b]));
+            let weakest = ranked[0];
+            // If support evidence is nearly tied, the loop alone cannot name
+            // the wrong edge. Preserve all four weights and expose ambiguity.
+            let ambiguous_choice = qualities[ranked[0]] >= qualities[ranked[1]] * 0.85;
+            let edge = &constraints[weakest];
+            let pair = (edge.from, edge.to);
+            if ambiguous_choice {
+                for index in [top, right, bottom, left] {
+                    ambiguous.insert((constraints[index].from, constraints[index].to));
+                }
+            } else {
+                candidate_scales
+                    .entry(pair)
+                    .and_modify(|value| *value = value.min(0.05))
+                    .or_insert(0.05);
+            }
+        }
+    }
+    for edge in constraints {
+        if let Some(scale) = candidate_scales.get(&(edge.from, edge.to)) {
+            edge.weight *= scale;
+            downweighted.insert((edge.from, edge.to), *scale);
+        }
+    }
+    ambiguous.retain(|pair| !candidate_scales.contains_key(pair));
+    (worst_loop, downweighted, ambiguous)
+}
+
+/// Convert final registration weights into relative pixel-optimizer confidence.
+/// This is support/residual/coverage/loop evidence, never a sharpness score.
+fn reliability_scales_from_constraints(
+    constraints: &[Constraint],
+) -> std::collections::HashMap<(usize, usize), f64> {
+    let mut weights = constraints
+        .iter()
+        .map(|constraint| constraint.weight)
+        .collect::<Vec<_>>();
+    let typical = median_value(&mut weights).unwrap_or(1.0).max(1e-9);
+    constraints
+        .iter()
+        .map(|constraint| {
+            (
+                (constraint.from, constraint.to),
+                (constraint.weight / typical).clamp(0.001, 1.0),
+            )
+        })
+        .collect()
+}
+
 fn visual_components(count: usize, constraints: &[Constraint]) -> Vec<Vec<usize>> {
     let mut adjacency = vec![Vec::<usize>::new(); count];
     for edge in constraints {
@@ -533,7 +982,9 @@ fn synthesize_grid_constraints(
                     continue;
                 }
                 let Some(step) = step else {
-                    return Err(format!("grid-assisted placement has no reliable {direction} rotation for neighbor edge {from}->{to}"));
+                    return Err(format!(
+                        "grid-assisted placement has no reliable {direction} rotation for neighbor edge {from}->{to}"
+                    ));
                 };
                 synthesized.push(Constraint {
                     from,
@@ -1255,23 +1706,38 @@ fn incident_pixel_cost(
     cost
 }
 
+#[cfg(test)]
 fn visual_pixel_huber_cost(
     poses: &[Mat],
     edges: &[&crate::pipeline::SphericalMatchEdge],
     req: &Request,
+) -> f64 {
+    visual_pixel_huber_cost_with_reliability(poses, edges, req, &std::collections::HashMap::new())
+}
+
+fn visual_pixel_huber_cost_with_reliability(
+    poses: &[Mat],
+    edges: &[&crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> f64 {
     let mut cost = 0.0;
     for edge in edges {
         let Some(residuals) = edge_pixel_residuals(poses, edge, req) else {
             return f64::INFINITY;
         };
-        cost += residuals
-            .into_iter()
-            .map(|residual| {
-                huber_cost(residual[0].hypot(residual[1]), 3.0)
-                    + huber_cost(residual[2].hypot(residual[3]), 3.0)
-            })
-            .sum::<f64>();
+        let reliability = reliability_scales
+            .get(&(edge.from, edge.to))
+            .copied()
+            .unwrap_or(1.0);
+        cost += reliability
+            * residuals
+                .into_iter()
+                .map(|residual| {
+                    huber_cost(residual[0].hypot(residual[1]), 3.0)
+                        + huber_cost(residual[2].hypot(residual[3]), 3.0)
+                })
+                .sum::<f64>();
     }
     cost
 }
@@ -1365,6 +1831,7 @@ struct JointPruneOutcome {
     final_refinement: Option<Value>,
 }
 
+#[cfg(test)]
 fn prune_visual_edges_with_joint_leave_one_out(
     poses: &mut [Mat],
     visual_constraints: &mut Vec<Constraint>,
@@ -1372,6 +1839,26 @@ fn prune_visual_edges_with_joint_leave_one_out(
     req: &Request,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     candidate_filter: Option<&std::collections::HashSet<(usize, usize)>>,
+) -> std::result::Result<JointPruneOutcome, Error> {
+    prune_visual_edges_with_joint_leave_one_out_weighted(
+        poses,
+        visual_constraints,
+        matched_edges,
+        req,
+        checkpoint,
+        candidate_filter,
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn prune_visual_edges_with_joint_leave_one_out_weighted(
+    poses: &mut [Mat],
+    visual_constraints: &mut Vec<Constraint>,
+    matched_edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    candidate_filter: Option<&std::collections::HashSet<(usize, usize)>>,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> std::result::Result<JointPruneOutcome, Error> {
     let mut outcome = JointPruneOutcome {
         rejected_edges: Vec::new(),
@@ -1510,13 +1997,14 @@ fn prune_visual_edges_with_joint_leave_one_out(
                 .map(|edge| edge.2)
                 .unwrap_or(f64::INFINITY);
             let mut trial_poses = poses.to_vec();
-            let stats = refine_visual_component_pixels_mode(
+            let stats = refine_visual_component_pixels_with_reliability(
                 &mut trial_poses,
                 &trial_constraints,
                 &trial_edges,
                 req,
                 checkpoint,
                 false,
+                reliability_scales,
             )?;
             let (trial_rms, _, _, _, mut trial_edge_errors, trial_complete) =
                 global_reprojection_metrics(&trial_poses, &trial_constraints, &trial_edges, req);
@@ -2002,6 +2490,7 @@ fn assemble_pixel_normal_equations(
     edges: &[&crate::pipeline::SphericalMatchEdge],
     req: &Request,
     variable_by_tile: &[Option<usize>],
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
     damping: f64,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<(NormalMatrix, Vec<f64>), Error> {
@@ -2019,12 +2508,18 @@ fn assemble_pixel_normal_equations(
     rhs.resize(dimension, 0.0);
     let epsilon = 1e-7;
     for (edge_index, edge) in edges.iter().enumerate() {
+        let reliability = reliability_scales
+            .get(&(edge.from, edge.to))
+            .copied()
+            .unwrap_or(1.0);
         for (point_index, point) in edge.points.iter().enumerate() {
             if point_index % 256 == 0 {
                 checkpoint("pixel-bundle-assembly").map_err(|_| Error::Cancelled)?;
             }
             let Some(base) = edge_point_pixel_residual(poses, edge, point, req) else {
-                return Err(Error::Registration(format!("pixel bundle projection failed on edge {edge_index}, correspondence {point_index}")));
+                return Err(Error::Registration(format!(
+                    "pixel bundle projection failed on edge {edge_index}, correspondence {point_index}"
+                )));
             };
             let tiles = [edge.from, edge.to];
             let mut jacobians = [[[0.0; 4]; 3]; 2];
@@ -2055,7 +2550,7 @@ fn assemble_pixel_normal_equations(
             }
             for pair_start in [0usize, 2usize] {
                 let radius = base[pair_start].hypot(base[pair_start + 1]);
-                let robust_weight = if radius > 3.0 { 3.0 / radius } else { 1.0 };
+                let robust_weight = reliability * if radius > 3.0 { 3.0 / radius } else { 1.0 };
                 for lhs_side in 0..2 {
                     let Some(lhs_variable) = variable_by_tile[tiles[lhs_side]] else {
                         continue;
@@ -2093,6 +2588,7 @@ fn assemble_pixel_normal_equations(
     Ok((normal, rhs))
 }
 
+#[cfg(test)]
 fn refine_visual_component_pixels(
     poses: &mut [Mat],
     visual_constraints: &[Constraint],
@@ -2116,9 +2612,18 @@ fn refine_visual_component_pixels(
     ),
     Error,
 > {
-    refine_visual_component_pixels_mode(poses, visual_constraints, edges, req, checkpoint, true)
+    refine_visual_component_pixels_with_reliability(
+        poses,
+        visual_constraints,
+        edges,
+        req,
+        checkpoint,
+        true,
+        &std::collections::HashMap::new(),
+    )
 }
 
+#[cfg(test)]
 fn refine_visual_component_pixels_mode(
     poses: &mut [Mat],
     visual_constraints: &[Constraint],
@@ -2126,6 +2631,42 @@ fn refine_visual_component_pixels_mode(
     req: &Request,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     reinitialize_from_rotation_graph: bool,
+) -> std::result::Result<
+    (
+        usize,
+        usize,
+        f64,
+        f64,
+        usize,
+        bool,
+        usize,
+        f64,
+        bool,
+        usize,
+        usize,
+        f64,
+    ),
+    Error,
+> {
+    refine_visual_component_pixels_with_reliability(
+        poses,
+        visual_constraints,
+        edges,
+        req,
+        checkpoint,
+        reinitialize_from_rotation_graph,
+        &std::collections::HashMap::new(),
+    )
+}
+
+fn refine_visual_component_pixels_with_reliability(
+    poses: &mut [Mat],
+    visual_constraints: &[Constraint],
+    edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    reinitialize_from_rotation_graph: bool,
+    reliability_scales: &std::collections::HashMap<(usize, usize), f64>,
 ) -> std::result::Result<
     (
         usize,
@@ -2252,12 +2793,14 @@ fn refine_visual_component_pixels_mode(
         for _ in &visual_edges {
             checkpoint("pixel-refinement-edge").map_err(|_| Error::Cancelled)?;
         }
-        let old_global_cost = visual_pixel_huber_cost(poses, &visual_edges, req);
+        let old_global_cost =
+            visual_pixel_huber_cost_with_reliability(poses, &visual_edges, req, reliability_scales);
         let (normal, rhs) = assemble_pixel_normal_equations(
             poses,
             &visual_edges,
             req,
             &variable_by_tile,
+            reliability_scales,
             damping,
             checkpoint,
         )?;
@@ -2335,7 +2878,13 @@ fn refine_visual_component_pixels_mode(
                 poses[tile] = normalize_rotation(mul(exp_rotation(step), original_poses[tile]))
                     .unwrap_or(original_poses[tile]);
             }
-            if visual_pixel_huber_cost(poses, &visual_edges, req) < old_global_cost {
+            if visual_pixel_huber_cost_with_reliability(
+                poses,
+                &visual_edges,
+                req,
+                reliability_scales,
+            ) < old_global_cost
+            {
                 accepted = true;
                 break;
             }
@@ -2350,7 +2899,8 @@ fn refine_visual_component_pixels_mode(
         }
         damping = (damping * 0.3).max(1e-8);
         completed_sweeps = sweep + 1;
-        let new_global_cost = visual_pixel_huber_cost(poses, &visual_edges, req);
+        let new_global_cost =
+            visual_pixel_huber_cost_with_reliability(poses, &visual_edges, req, reliability_scales);
         if (old_global_cost - new_global_cost) <= old_global_cost.max(1.0) * 1e-8 {
             converged = true;
             break;
@@ -2710,10 +3260,14 @@ pub fn reorient_layout_to_grid_center(layout: &mut Value) -> std::result::Result
 fn align_measured_grid_only(
     req: Request,
     tiles: Vec<CaptureTile>,
-    forced_grid_indices: Vec<bool>,
+    placement_constraints: Vec<ResolvedPlacementConstraint>,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
     alignment_started: std::time::Instant,
 ) -> std::result::Result<Value, SphericalFailure> {
+    let forced_grid_indices = placement_constraints
+        .iter()
+        .map(|constraint| constraint.is_hard_grid_lock())
+        .collect::<Vec<_>>();
     let estimate = grid_overlap::estimate(
         req.rows,
         req.columns,
@@ -2739,16 +3293,15 @@ fn align_measured_grid_only(
         }),
     };
     if req.refine_grid_neighbors {
-        // Keep the measured central step as a grid fallback, while reusing the
-        // existing four-neighbor visual-ray solver for every usable adjacent
-        // pair. No all-pairs comparisons are introduced by this path.
+        // Keep the measured central step as a grid fallback while refining
+        // with the same fixed eight-neighbor visual-ray graph as manual mode.
         let central_overlap = estimate.report.clone();
         let mut refined_req = req;
         refined_req.auto_grid_overlap = false;
         refined_req.refine_grid_neighbors = false;
         refined_req.placement_mode = "grid-assisted".into();
         refined_req.allow_nominal_grid_fallback = true;
-        refined_req.neighbor_mode = "four".into();
+        refined_req.neighbor_mode = "eight".into();
         let horizontal_fov =
             2.0 * (f64::from(refined_req.source_width) / (2.0 * refined_req.fx)).atan();
         let vertical_fov =
@@ -2763,10 +3316,10 @@ fn align_measured_grid_only(
         layout["report"]["autoGridOverlap"] = json!(true);
         layout["report"]["refineGridNeighbors"] = json!(true);
         layout["report"]["gridOverlapEstimate"] = central_overlap.clone();
-        layout["report"]["geometryModel"] = json!("central-overlap+four-neighbor-visual-ray-grid");
+        layout["report"]["geometryModel"] = json!("central-overlap+eight-neighbor-visual-ray-grid");
         layout["report"]["gridNeighborRefinement"] = json!({
             "enabled": true,
-            "strategy": "existing-four-neighbor-visual-ray-solver",
+            "strategy": "fixed-eight-neighbor-visual-ray-solver",
             "allPairsMatching": false,
             "fallbackSource": "centralMeasuredOverlap",
             "visualTileCount": layout["report"]["visualTileCount"],
@@ -2861,6 +3414,7 @@ fn align_measured_grid_only(
         "gridEstimatedTileIndices":(0..tiles.len()).collect::<Vec<_>>(),
         "forcedGridTileCount":forced_grid_indices.iter().filter(|v| **v).count(),
         "forcedGridTileIndices":forced_grid_indices.iter().enumerate().filter_map(|(i,v)| v.then_some(i)).collect::<Vec<_>>(),
+        "placementConstraints":placement_constraint_diagnostics(&placement_constraints),
         "qualityStatus":"needs-visual-review",
         "qualityWarnings":["all grid positions are estimated from central overlap samples; inspect the complete panorama visually"],
         "estimatedPositionsVerified":false,
@@ -2896,7 +3450,8 @@ fn align_measured_grid_only(
     let layout_tiles = tiles.iter().enumerate().map(|(index, tile)| json!({
         "row":tile.row,"column":tile.column,"path":tile.path,
         "width":req.source_width,"height":req.source_height,"fx":req.fx,"fy":req.fy,"cx":req.cx,"cy":req.cy,
-        "cameraToWorld":poses[index],"positionSource":"gridEstimated","forceGrid":forced_grid_indices[index]
+        "cameraToWorld":poses[index],"positionSource":"gridEstimated","forceGrid":forced_grid_indices[index],
+        "placementConstraint":placement_constraints[index].diagnostic()
     })).collect::<Vec<_>>();
     let mut layout = json!({"schemaVersion":1,"projection":"spherical","tiles":layout_tiles,"renderBlendMode":req.seam_blend_mode,"report":report});
     reorient_layout_to_grid_center(&mut layout).map_err(|message| SphericalFailure {
@@ -3187,6 +3742,21 @@ fn warp_pixel(
     }
 }
 
+fn should_extend_source_warp_for_quality(
+    completed_rounds: usize,
+    base_limit: usize,
+    previous_worst_px: f64,
+    current_worst_px: f64,
+    quality_limit_px: f64,
+    minimum_improvement_px: f64,
+) -> bool {
+    completed_rounds == base_limit
+        && previous_worst_px.is_finite()
+        && current_worst_px.is_finite()
+        && current_worst_px > quality_limit_px
+        && previous_worst_px - current_worst_px >= minimum_improvement_px
+}
+
 fn fit_source_plane_warps(
     poses: &[Mat],
     visual_constraints: &[Constraint],
@@ -3223,11 +3793,16 @@ fn fit_source_plane_warps(
         .iter()
         .map(|edge| edge.2)
         .fold(0.0_f64, f64::max);
+    const BASE_MAX_OUTER_ITERATIONS: usize = 8;
+    const MAX_ADDITIONAL_QUALITY_ITERATIONS: usize = 4;
+    const MAX_OUTER_ITERATIONS: usize =
+        BASE_MAX_OUTER_ITERATIONS + MAX_ADDITIONAL_QUALITY_ITERATIONS;
     let mut accepted_rounds = 0usize;
     let mut attempted_rounds = 0usize;
     let mut termination_reason = "iteration_limit";
     let mut converged = false;
-    for outer_iteration in 0..8 {
+    let mut extended_for_quality = false;
+    for outer_iteration in 0..MAX_OUTER_ITERATIONS {
         checkpoint("source-plane-warp-outer-iteration").map_err(|_| Error::Cancelled)?;
         attempted_rounds += 1;
         let current_warps = warps.clone();
@@ -3467,11 +4042,11 @@ fn fit_source_plane_warps(
                 && trial_rms + 1e-4 < current_rms
                 && trial_worst <= current_worst + 1e-3
             {
-                accepted = Some(trial_warps);
+                accepted = Some((trial_warps, trial_worst));
                 break;
             }
         }
-        if let Some(accepted_warps) = accepted {
+        if let Some((accepted_warps, accepted_worst)) = accepted {
             let mut max_step = 0.0_f64;
             for (old, new) in current_warps.iter().zip(&accepted_warps) {
                 if let Some(new) = new {
@@ -3488,6 +4063,26 @@ fn fit_source_plane_warps(
             if max_step <= 0.05 {
                 converged = true;
                 termination_reason = "offset_step_tolerance";
+                break;
+            }
+            if extended_for_quality && accepted_worst <= 12.0 {
+                termination_reason = "quality_limit_reached";
+                break;
+            }
+            let completed_rounds = outer_iteration + 1;
+            if completed_rounds == BASE_MAX_OUTER_ITERATIONS
+                && should_extend_source_warp_for_quality(
+                    completed_rounds,
+                    BASE_MAX_OUTER_ITERATIONS,
+                    current_worst,
+                    accepted_worst,
+                    12.0,
+                    0.01,
+                )
+            {
+                extended_for_quality = true;
+            } else if completed_rounds == BASE_MAX_OUTER_ITERATIONS {
+                termination_reason = "iteration_limit";
                 break;
             }
         } else {
@@ -3540,7 +4135,10 @@ fn fit_source_plane_warps(
         "maximumOffsetEuclideanPx":crate::texture_warp::SOURCE_WARP_MAX_DISPLACEMENT_PX,
         "maximumLocalStrain":crate::texture_warp::SOURCE_WARP_MAX_LOCAL_STRAIN,
         "irlsIterations":5,
-        "maximumOuterIterations":8,
+        "maximumOuterIterations":MAX_OUTER_ITERATIONS,
+        "baseMaximumOuterIterations":BASE_MAX_OUTER_ITERATIONS,
+        "maximumAdditionalQualityIterations":MAX_ADDITIONAL_QUALITY_ITERATIONS,
+        "extendedForQuality":extended_for_quality,
         "proposalDamping":0.5,
         "minimumSupportPoints":32,
         "minimumOccupiedSupportQuadrants":2,
@@ -3607,6 +4205,7 @@ fn diagnostic_correspondence_snapshot(
     edges: &[crate::pipeline::SphericalMatchEdge],
     warps: Option<&[Option<crate::texture_warp::SourcePlaneWarp>]>,
 ) -> Value {
+    let reliability_scales = reliability_scales_from_constraints(constraints);
     let source_hashes = tiles
         .iter()
         .enumerate()
@@ -3626,6 +4225,7 @@ fn diagnostic_correspondence_snapshot(
                 "to":edge.to,
                 "rotation":constraint.rotation,
                 "weight":constraint.weight,
+                "reliabilityWeightScale":reliability_scales.get(&(constraint.from,constraint.to)).copied().unwrap_or(1.0),
                 "matches":edge.matches,
                 "inliers":edge.inliers,
                 "inlierRatio":edge.inlier_ratio,
@@ -3672,12 +4272,10 @@ fn validate(req: &Request) -> Result<()> {
             "placementMode must be visual or grid-assisted".into(),
         ));
     }
-    if req.neighbor_mode != "four"
-        && req.neighbor_mode != "eight"
-        && req.neighbor_mode != "adaptive"
-    {
+    if normalize_neighbor_mode(&req.neighbor_mode).is_none() {
         return Err(Error::Invalid(
-            "neighborMode must be 'four' or 'eight'".into(),
+            "neighborMode must be four, eight, or adaptive (legacy values are normalized to eight)"
+                .into(),
         ));
     }
     if !req.auto_grid_overlap {
@@ -3742,6 +4340,7 @@ fn validate(req: &Request) -> Result<()> {
     }
     let mut cells = vec![false; req.tiles.len()];
     for t in &req.tiles {
+        t.resolved_placement_constraint()?;
         if t.row >= req.rows || t.column >= req.columns || t.path.trim().is_empty() {
             return Err(Error::Invalid("tile cell/path is invalid".into()));
         }
@@ -3785,10 +4384,15 @@ fn align(
                 .unwrap_or(1),
         )
         .max(1);
-    let mut forced_grid_indices = vec![false; tiles.len()];
+    let mut placement_constraints = vec![ResolvedPlacementConstraint::none(); tiles.len()];
     for tile in &req.tiles {
-        forced_grid_indices[tile.row * req.columns + tile.column] = tile.force_grid;
+        placement_constraints[tile.row * req.columns + tile.column] =
+            tile.resolved_placement_constraint()?;
     }
+    let forced_grid_indices = placement_constraints
+        .iter()
+        .map(|constraint| constraint.is_hard_grid_lock())
+        .collect::<Vec<_>>();
     let mut job = StitchJob::new(StitchOptions {
         rows: req.rows,
         columns: req.columns,
@@ -3820,7 +4424,7 @@ fn align(
         return align_measured_grid_only(
             req,
             tiles,
-            forced_grid_indices,
+            placement_constraints,
             checkpoint,
             alignment_started,
         );
@@ -3852,6 +4456,8 @@ fn align(
         initial_matching_ms,
         low_contrast_retry_ms,
         clahe_retry_ms,
+        low_contrast_timings,
+        clahe_timings,
         matched_edges,
     ) = job.spherical_match_edges(
         (req.registration_megapixels * 1_000_000.0).round() as usize,
@@ -3885,7 +4491,10 @@ fn align(
                            disposition: &str,
                            ray_median: Option<f64>,
                            ray_rms: Option<f64>| {
-        json!({"from":edge.from,"to":edge.to,"initial":attempt_diagnostic(&edge.initial),"retry":edge.retry.as_ref().map(&attempt_diagnostic),"claheRetry":edge.clahe_retry.as_ref().map(&attempt_diagnostic),"selectedAttempt":if edge.used_clahe_retry {"clahe"} else if edge.used_retry {"lowContrast"} else {"initial"},"usedRetry":edge.used_retry,"usedClaheRetry":edge.used_clahe_retry,"matches":edge.matches,"inliers":edge.inliers,"inlierRatio":edge.inlier_ratio,"rayMedianResidualPx":ray_median,"rayRmsResidualPx":ray_rms,"disposition":disposition})
+        {
+            let (source_cells, target_cells, score) = correspondence_coverage(&edge.points, &req);
+            json!({"from":edge.from,"to":edge.to,"initial":attempt_diagnostic(&edge.initial),"retry":edge.retry.as_ref().map(&attempt_diagnostic),"claheRetry":edge.clahe_retry.as_ref().map(&attempt_diagnostic),"selectedAttempt":if edge.used_clahe_retry {"clahe"} else if edge.used_retry {"lowContrast"} else {"initial"},"usedRetry":edge.used_retry,"usedClaheRetry":edge.used_clahe_retry,"matches":edge.matches,"inliers":edge.inliers,"inlierRatio":edge.inlier_ratio,"rayMedianResidualPx":ray_median,"rayRmsResidualPx":ray_rms,"spatialCoverage":{"sourceOccupiedCells":source_cells,"targetOccupiedCells":target_cells,"score":score},"cycleConsistencyPixels":Value::Null,"reliabilityWeightScale":score,"loopConflictAmbiguous":false,"disposition":disposition})
+        }
     };
     for edge in &matched_edges {
         if touches_forced_grid_cell(edge.from, edge.to, &forced_grid_indices) {
@@ -3938,8 +4547,11 @@ fn align(
         let from = edge.from;
         let to = edge.to;
         let source_to_target = transpose(target_from_source);
-        let weight = (edge.inliers as f64 * edge.inlier_ratio.max(0.05) / (1. + median_residual))
+        let (_, _, coverage_score) = correspondence_coverage(&edge.points, &req);
+        let base_weight = (edge.inliers as f64 * edge.inlier_ratio.max(0.05)
+            / (1. + median_residual))
             .clamp(0.1, 1000.);
+        let weight = base_weight * coverage_score;
         constraints.push(Constraint {
             from,
             to,
@@ -3954,6 +4566,36 @@ fn align(
             Some(median_residual),
             Some(rms_residual),
         ));
+    }
+    let (loop_residuals, loop_scales, ambiguous_loops) =
+        weight_neighbor_loop_conflicts(req.rows, req.columns, &mut constraints, &req);
+    // Carry the same inlier/residual/coverage/loop evidence into the pixel
+    // bundle. The floor keeps a valid low-texture edge participating.
+    let reliability_scales = reliability_scales_from_constraints(&constraints);
+    for diagnostic in &mut edge_diagnostics {
+        let pair = (
+            diagnostic["from"].as_u64().unwrap_or(u64::MAX) as usize,
+            diagnostic["to"].as_u64().unwrap_or(u64::MAX) as usize,
+        );
+        if let Some(residual) = loop_residuals.get(&pair) {
+            diagnostic["cycleConsistencyPixels"] = json!(residual);
+        }
+        diagnostic["reliabilityWeightScale"] =
+            json!(reliability_scales.get(&pair).copied().unwrap_or(1.0));
+        diagnostic["loopConflictAmbiguous"] = json!(ambiguous_loops.contains(&pair));
+    }
+    let weak_support_loop_rejected_edges = remove_weak_support_loop_conflicts(
+        &mut constraints,
+        &matched_edges,
+        &req,
+        &loop_residuals,
+        &mut edge_diagnostics,
+    );
+    for rejected in &weak_support_loop_rejected_edges {
+        let inliers = rejected["inliers"].as_u64().unwrap_or(0) as f64;
+        let median_residual = rejected["rayMedianResidualPx"].as_f64().unwrap_or(0.0);
+        pairwise_residual_sum = (pairwise_residual_sum - median_residual * inliers).max(0.0);
+        pairwise_residual_weight = (pairwise_residual_weight - inliers).max(0.0);
     }
     let mut visual_constraints = constraints.clone();
     let root_graph_reachable = connected_tiles(tiles.len(), &visual_constraints);
@@ -4032,6 +4674,8 @@ fn align(
                             "visualTileCount": visual_seen.iter().filter(|connected| **connected).count(),
                             "totalTileCount": tiles.len(),
                             "acceptedVisualEdgeCount": visual_constraints.len(),
+                            "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+                            "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
                             "horizontalGridStep": grid_step_diagnostic(robust_grid_step(&visual_constraints.iter().filter(|edge| edge.from / req.columns == edge.to / req.columns && edge.to % req.columns == edge.from % req.columns + 1).map(|edge| edge.rotation).collect::<Vec<_>>()).as_ref()),
                             "verticalGridStep": grid_step_diagnostic(robust_grid_step(&visual_constraints.iter().filter(|edge| edge.from % req.columns == edge.to % req.columns && edge.to / req.columns == edge.from / req.columns + 1).map(|edge| edge.rotation).collect::<Vec<_>>()).as_ref()),
                             "edges": edge_diagnostics
@@ -4058,12 +4702,16 @@ fn align(
                 if !angle.is_finite() || angle <= 1e-6 || angle >= fov * 0.9 {
                     return Err(SphericalFailure {
                         code: "REGISTRATION_FAILED",
-                        message: format!("grid-assisted {axis} step {angle:.4}rad is outside the useful overlap range"),
+                        message: format!(
+                            "grid-assisted {axis} step {angle:.4}rad is outside the useful overlap range"
+                        ),
                         diagnostics: Some(json!({
                             "placementMode": "grid-assisted",
                             "axis": axis,
                             "stepRadians": angle,
                             "maximumOverlapStepRadians": fov * 0.9,
+                            "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+                            "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
                             "gridHorizontalStep": grid_step_diagnostic(horizontal_grid_step.as_ref()),
                             "gridVerticalStep": grid_step_diagnostic(vertical_grid_step.as_ref()),
                             "edges": edge_diagnostics
@@ -4086,7 +4734,7 @@ fn align(
             message: "visual registration graph is disconnected; no spherical layout emitted"
                 .into(),
             diagnostics: Some(
-                json!({"placementMode":if is_grid_assisted { "grid-assisted" } else { "visual" },"featureCount":feature_count,"retryFeatureCount":retry_feature_count,"retryEndpointTileCount":retry_endpoint_count,"claheRetryFeatureCount":clahe_retry_feature_count,"featureCacheConfiguredEstimateBytes":tiles.len() as u64*2*2500*576,"featureCacheEstimateIsConfiguredNotHardBound":true,"attemptedEdgeCount":matched_edges.len(),"acceptedEdgeCount":visual_constraints.len(),"synthesizedGridEdgeCount":synthesized_grid_edges.len(),"connectedTileCount":seen.iter().filter(|connected| **connected).count(),"visualTileCount":visual_seen.iter().filter(|connected| **connected).count(),"totalTileCount":tiles.len(),"disconnectedTileIndices":disconnected_tiles,"gridEstimatedTileIndices":visual_seen.iter().enumerate().filter_map(|(i, connected)| (!connected).then_some(i)).collect::<Vec<_>>(),"gridHorizontalStepRadians":horizontal_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridVerticalStepRadians":vertical_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridHorizontalStep":grid_step_diagnostic(horizontal_grid_step.as_ref()),"gridVerticalStep":grid_step_diagnostic(vertical_grid_step.as_ref()),"synthesizedGridEdges":synthesized_grid_edges,"edges":edge_diagnostics}),
+                json!({"placementMode":if is_grid_assisted { "grid-assisted" } else { "visual" },"featureCount":feature_count,"retryFeatureCount":retry_feature_count,"retryEndpointTileCount":retry_endpoint_count,"claheRetryFeatureCount":clahe_retry_feature_count,"featureCacheConfiguredEstimateBytes":tiles.len() as u64*2*2500*576,"featureCacheEstimateIsConfiguredNotHardBound":true,"attemptedEdgeCount":matched_edges.len(),"acceptedEdgeCount":visual_constraints.len(),"weakSupportLoopRejectedVisualEdges":weak_support_loop_rejected_edges,"weakSupportLoopRejectedVisualEdgeCount":weak_support_loop_rejected_edges.len(),"synthesizedGridEdgeCount":synthesized_grid_edges.len(),"connectedTileCount":seen.iter().filter(|connected| **connected).count(),"visualTileCount":visual_seen.iter().filter(|connected| **connected).count(),"totalTileCount":tiles.len(),"disconnectedTileIndices":disconnected_tiles,"gridEstimatedTileIndices":visual_seen.iter().enumerate().filter_map(|(i, connected)| (!connected).then_some(i)).collect::<Vec<_>>(),"gridHorizontalStepRadians":horizontal_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridVerticalStepRadians":vertical_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridHorizontalStep":grid_step_diagnostic(horizontal_grid_step.as_ref()),"gridVerticalStep":grid_step_diagnostic(vertical_grid_step.as_ref()),"synthesizedGridEdges":synthesized_grid_edges,"edges":edge_diagnostics}),
             ),
         };
         // Keep the failure actionable in logs that only display the message field.
@@ -4115,12 +4763,14 @@ fn align(
         pixel_dense_cholesky_fallback_count,
         pixel_max_accepted_linear_residual,
     ) = if is_grid_assisted {
-        refine_visual_component_pixels(
+        refine_visual_component_pixels_with_reliability(
             &mut poses,
             &visual_constraints,
             &matched_edges,
             &req,
             checkpoint,
+            true,
+            &reliability_scales,
         )?
     } else {
         (0, 0, 0.0, 0.0, 0, true, 0, 0.0, true, 0, 0, 0.0)
@@ -4128,13 +4778,14 @@ fn align(
     let cycle_pruning_disabled_until_joint_loo = false;
     let pixel_post_prune_started = std::time::Instant::now();
     let prune_outcome = if is_grid_assisted {
-        prune_visual_edges_with_joint_leave_one_out(
+        prune_visual_edges_with_joint_leave_one_out_weighted(
             &mut poses,
             &mut visual_constraints,
             &matched_edges,
             &req,
             checkpoint,
             None,
+            &reliability_scales,
         )?
     } else {
         JointPruneOutcome {
@@ -4279,21 +4930,23 @@ fn align(
         && synthesized_grid_edges
             .iter()
             .any(|edge| edge["rotationSource"] == "nominalFovOverlap");
-    if cycle_prune_budget_exceeded
-        || (!nominal_only_layout && !global_reprojection_rms.is_finite())
-        || !complete_reprojection_evidence && !nominal_only_layout
-        || (!nominal_only_layout
-            && (global_reprojection_rms > MAX_GLOBAL_REPROJECTION_RMS_PIXELS
-                || maximum_edge_reprojection_rms > MAX_EDGE_REPROJECTION_RMS_PIXELS))
-    {
+    let reprojection_quality_failed = !nominal_only_layout
+        && (!global_reprojection_rms.is_finite()
+            || !complete_reprojection_evidence
+            || global_reprojection_rms > MAX_GLOBAL_REPROJECTION_RMS_PIXELS
+            || maximum_edge_reprojection_rms > MAX_EDGE_REPROJECTION_RMS_PIXELS);
+    if cycle_prune_budget_exceeded || reprojection_quality_failed {
         let message = format!(
             "global matched-ray reprojection is {:.2}px RMS (worst edge {:.2}px; limit {:.1}px); supplied intrinsics or scene parallax may be unsuitable",
-            global_reprojection_rms, maximum_edge_reprojection_rms, MAX_GLOBAL_REPROJECTION_RMS_PIXELS
+            global_reprojection_rms,
+            maximum_edge_reprojection_rms,
+            MAX_GLOBAL_REPROJECTION_RMS_PIXELS
         );
         return Err(SphericalFailure {
             code: "REGISTRATION_FAILED",
             message,
             diagnostics: Some(json!({
+                "failureReason":if reprojection_quality_failed { "reprojection_quality_gate" } else { "cycle_prune_budget_exceeded" },
                 "featureCount":feature_count,
                 "retryFeatureCount":retry_feature_count,
                 "retryEndpointTileCount":retry_endpoint_count,
@@ -4323,6 +4976,8 @@ fn align(
                 "cycleRejectedVisualEdges":cycle_rejected_visual_edges,
                 "cycleLeaveOneOutEvaluations":cycle_loo_evaluations,
                 "cyclePruneBudgetExceeded":cycle_prune_budget_exceeded,
+                "weakSupportLoopRejectedVisualEdges":weak_support_loop_rejected_edges,
+                "weakSupportLoopRejectedVisualEdgeCount":weak_support_loop_rejected_edges.len(),
                 "cyclePruningDisabledUntilJointLeaveOneOut":cycle_pruning_disabled_until_joint_loo,
                 "pixelPcgMaxIterations":pixel_pcg_max_iterations,
                 "pixelPcgMaxRelativeResidual":pixel_pcg_max_relative_residual,
@@ -4393,7 +5048,10 @@ fn align(
         "cycleRejectedVisualEdges": cycle_rejected_visual_edges,
         "cycleLeaveOneOutEvaluations": cycle_loo_evaluations,
         "cyclePruneBudgetExceeded": cycle_prune_budget_exceeded,
+        "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+        "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
         "cyclePruningDisabledUntilJointLeaveOneOut": cycle_pruning_disabled_until_joint_loo,
+        "reliabilityWeightScaleDefinition": "relative confidence = final edge constraint weight / median accepted visual constraint weight, clamped to [0.001, 1.0]; it is not a blur score",
         "cyclePruneBudgetPolicy": "max(1, floor(componentVisualEdgeCount / 20)); the minimum of one can exceed 5% for components smaller than 20 edges",
         "postPrunePixelRefinement": post_prune_pixel_refinement,
         "gridComponentPoseRefinement": grid_component_pose_refinement,
@@ -4443,7 +5101,19 @@ fn align(
     report["featureExtractionMs"] = json!(primary_feature_extraction_ms);
     report["initialMatchingMs"] = json!(initial_matching_ms);
     report["lowContrastRetryMs"] = json!(low_contrast_retry_ms);
+    report["lowContrastRetryExtractionMs"] = json!(low_contrast_timings.extraction_ms);
+    report["lowContrastRetryMatchingMs"] = json!(low_contrast_timings.matching_ms);
+    report["lowContrastRetryExtractedEndpointCount"] =
+        json!(low_contrast_timings.extracted_endpoint_count);
+    report["lowContrastRetryUniqueExtractedFeatureCount"] =
+        json!(low_contrast_timings.extracted_feature_count);
     report["claheRetryMs"] = json!(clahe_retry_ms);
+    report["claheRetryExtractionMs"] = json!(clahe_timings.extraction_ms);
+    report["claheRetryMatchingMs"] = json!(clahe_timings.matching_ms);
+    report["claheRetryExtractedEndpointCount"] = json!(clahe_timings.extracted_endpoint_count);
+    report["claheRetryUniqueExtractedFeatureCount"] = json!(clahe_timings.extracted_feature_count);
+    report["claheRetryFeatureCountSemantics"] =
+        json!("legacy-per-edge-sum-of-endpoint-feature-counts");
     report["poseOptimizationMs"] = json!(pose_optimization_ms);
     report["pixelRefinementCameraCount"] = json!(pixel_refined_camera_count);
     report["pixelReinitializedCameraCount"] = json!(pixel_reinitialized_camera_count);
@@ -4498,6 +5168,7 @@ fn align(
         .enumerate()
         .filter_map(|(index, forced)| forced.then_some(index))
         .collect::<Vec<_>>());
+    report["placementConstraints"] = placement_constraint_diagnostics(&placement_constraints);
     report["connectedTileCount"] =
         json!(visual_seen.iter().filter(|connected| **connected).count());
     report["visualTileCount"] = json!(visual_seen.iter().filter(|connected| **connected).count());
@@ -4537,26 +5208,30 @@ fn align(
         .enumerate()
         .filter_map(|(i, connected)| (!connected).then_some(i))
         .collect::<Vec<_>>());
-    report["gridHorizontalStepRadians"] =
-        json!(horizontal_grid_step
-            .as_ref()
-            .map(|step| log_rotation(step.rotation)
-                .iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-                .sqrt()));
-    report["gridVerticalStepRadians"] =
-        json!(vertical_grid_step
-            .as_ref()
-            .map(|step| log_rotation(step.rotation)
-                .iter()
-                .map(|value| value * value)
-                .sum::<f64>()
-                .sqrt()));
+    report["gridHorizontalStepRadians"] = json!(horizontal_grid_step.as_ref().map(|step| {
+        log_rotation(step.rotation)
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    }));
+    report["gridVerticalStepRadians"] = json!(vertical_grid_step.as_ref().map(|step| {
+        log_rotation(step.rotation)
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    }));
     report["gridHorizontalStep"] = grid_step_diagnostic(horizontal_grid_step.as_ref());
     report["gridVerticalStep"] = grid_step_diagnostic(vertical_grid_step.as_ref());
     report["gridEstimatedPlacementHasDirectVisualEvidence"] = json!(false);
     let mut quality_warnings = Vec::<String>::new();
+    if !weak_support_loop_rejected_edges.is_empty() {
+        quality_warnings.push(format!(
+            "{} neighbor edges with sparse one-dimensional support and severe loop conflicts were excluded; affected placements may rely on measured grid bridges and require visual review",
+            weak_support_loop_rejected_edges.len()
+        ));
+    }
     if is_grid_assisted && !pixel_refinement_converged {
         quality_warnings.push(format!(
             "joint symmetric pixel bundle did not converge within {} iterations",
@@ -4617,6 +5292,17 @@ fn align(
             "reference tile (0,0) has no accepted visual edge; other visual components still contribute to the solved layout but are positioned relative to the reference through synthesized grid edges".into(),
         );
     }
+    if !ambiguous_loops.is_empty() {
+        quality_warnings.push(format!(
+            "{} neighbor-loop conflicts have similar correspondence support across competing edges; loop evidence could not identify a single bad edge, so inspect the affected seams",
+            ambiguous_loops.len()
+        ));
+    } else if !loop_scales.is_empty() {
+        quality_warnings.push(format!(
+            "{} lower-support neighbor edges were downweighted after inconsistent 2x2 loops; inspect the affected seams",
+            loop_scales.len()
+        ));
+    }
     if nominal_only_layout {
         quality_warnings.push(
             "all camera placements use nominal FOV overlap without visual correspondence evidence; inspect the preview before use".into(),
@@ -4644,7 +5330,8 @@ fn align(
                 "visualComponentId":component_by_tile[i],
                 "visualConnectedToReference":visual_seen[i],
                 "gridBridgeRequired":!visual_seen[i],
-                "forceGrid":forced_grid_indices[i]
+                "forceGrid":forced_grid_indices[i],
+                "placementConstraint":placement_constraints[i].diagnostic()
             });
             if let Some(warp) = source_plane_warps
                 .get(i)
@@ -4681,16 +5368,265 @@ fn align(
     Ok(layout)
 }
 
+fn is_precision_recovery_quality_failure(failure: &SphericalFailure) -> bool {
+    failure.code == "REGISTRATION_FAILED"
+        && failure
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics["failureReason"] == "reprojection_quality_gate")
+}
+
+fn precision_recovery_enabled(input: &Value) -> std::result::Result<bool, SphericalFailure> {
+    match input.get("allowPrecisionRecovery") {
+        None => Ok(true),
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        Some(_) => Err(SphericalFailure {
+            code: "INVALID_REQUEST",
+            message: "allowPrecisionRecovery must be a boolean when provided".into(),
+            diagnostics: None,
+        }),
+    }
+}
+
+fn precision_recovery_eligible(request: &Request, enabled: bool) -> bool {
+    enabled
+        && request.placement_mode == "grid-assisted"
+        && (request.registration_megapixels - FAST_REGISTRATION_MEGA_PIXELS).abs() < 1e-9
+}
+
+fn compact_failure_summary(failure: &SphericalFailure) -> Value {
+    let diagnostics = failure.diagnostics.as_ref();
+    let field = |name: &str| {
+        diagnostics
+            .map(|value| value[name].clone())
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "code":failure.code,
+        "message":failure.message,
+        "failureReason":field("failureReason"),
+        "globalRayReprojectionRmsPx":field("globalRayReprojectionRmsPx"),
+        "maximumEdgeReprojectionRmsPx":field("maximumEdgeReprojectionRmsPx"),
+        "completeCorrespondenceEvidence":field("completeCorrespondenceEvidence"),
+        "matchedEdgeCount":field("matchedEdgeCount"),
+        "worstEdges":field("worstEdges")
+    })
+}
+
+fn precision_recovery_report(
+    enabled: bool,
+    eligible: bool,
+    status: &str,
+    requested_megapixels: f64,
+    actual_megapixels: f64,
+    first_attempt_ms: u128,
+    precision_attempt_ms: Option<u128>,
+    first_failure: Option<Value>,
+    total_ms: u128,
+) -> Value {
+    let mut attempts = vec![json!({
+        "registrationMegapixels":requested_megapixels,
+        "status":if first_failure.is_some() { "reprojectionQualityFailed" } else { "completed" },
+        "elapsedMs":first_attempt_ms,
+        "failure":first_failure.clone()
+    })];
+    if let Some(elapsed_ms) = precision_attempt_ms {
+        attempts.push(json!({
+            "registrationMegapixels":PRECISION_RECOVERY_MEGA_PIXELS,
+            "status":if status == "recovered" { "completed" } else { "failed" },
+            "elapsedMs":elapsed_ms
+        }));
+    }
+    json!({
+        "enabled":enabled,
+        "eligible":eligible,
+        "attempted":precision_attempt_ms.is_some(),
+        "status":status,
+        "requestedRegistrationMegapixels":requested_megapixels,
+        "actualRegistrationMegapixels":actual_megapixels,
+        "attempts":attempts,
+        "firstFailure":first_failure,
+        "totalAlignmentMs":total_ms
+    })
+}
+
+fn annotate_precision_recovery_layout(
+    layout: &mut Value,
+    recovery: Value,
+    requested_megapixels: f64,
+    actual_megapixels: f64,
+    total_ms: u128,
+) {
+    layout["report"]["requestedRegistrationMegapixels"] = json!(requested_megapixels);
+    layout["report"]["actualRegistrationMegapixels"] = json!(actual_megapixels);
+    layout["report"]["precisionRecovery"] = recovery;
+    layout["report"]["totalAlignmentMs"] = json!(total_ms);
+}
+
+fn align_with_precision_recovery(
+    request: Request,
+    recovery_enabled: bool,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    mut run_attempt: impl FnMut(
+        Request,
+        &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    ) -> std::result::Result<Value, SphericalFailure>,
+) -> std::result::Result<Value, SphericalFailure> {
+    let total_started = std::time::Instant::now();
+    let requested_megapixels = request.registration_megapixels;
+    let eligible = precision_recovery_eligible(&request, recovery_enabled);
+    let first_started = std::time::Instant::now();
+    let first_result = run_attempt(request.clone(), checkpoint);
+    let first_attempt_ms = first_started.elapsed().as_millis();
+    match first_result {
+        Ok(mut layout) => {
+            let total_ms = total_started.elapsed().as_millis();
+            let actual_megapixels = layout["report"]["registrationMegapixels"]
+                .as_f64()
+                .unwrap_or(requested_megapixels);
+            let status = if !recovery_enabled {
+                "disabled"
+            } else if eligible {
+                "notNeeded"
+            } else {
+                "notEligible"
+            };
+            let recovery = precision_recovery_report(
+                recovery_enabled,
+                eligible,
+                status,
+                requested_megapixels,
+                actual_megapixels,
+                first_attempt_ms,
+                None,
+                None,
+                total_ms,
+            );
+            annotate_precision_recovery_layout(
+                &mut layout,
+                recovery,
+                requested_megapixels,
+                actual_megapixels,
+                total_ms,
+            );
+            Ok(layout)
+        }
+        Err(first_failure) if eligible && is_precision_recovery_quality_failure(&first_failure) => {
+            let first_failure_summary = compact_failure_summary(&first_failure);
+            drop(first_failure);
+            if let Err(message) = checkpoint("precision-recovery-start") {
+                return Err(SphericalFailure {
+                    code: "CANCELLED",
+                    message,
+                    diagnostics: Some(json!({
+                        "failureReason":"precision_recovery_cancelled_before_retry",
+                        "requestedRegistrationMegapixels":requested_megapixels,
+                        "actualRegistrationMegapixels":Value::Null,
+                        "precisionRecovery":precision_recovery_report(
+                            recovery_enabled,
+                            eligible,
+                            "cancelledBeforeRetry",
+                            requested_megapixels,
+                            requested_megapixels,
+                            first_attempt_ms,
+                            None,
+                            Some(first_failure_summary),
+                            total_started.elapsed().as_millis()
+                        )
+                    })),
+                });
+            }
+            let mut precision_request = request.clone();
+            precision_request.registration_megapixels = PRECISION_RECOVERY_MEGA_PIXELS;
+            let precision_started = std::time::Instant::now();
+            match run_attempt(precision_request, checkpoint) {
+                Ok(mut layout) => {
+                    let precision_attempt_ms = precision_started.elapsed().as_millis();
+                    let total_ms = total_started.elapsed().as_millis();
+                    let recovery = precision_recovery_report(
+                        recovery_enabled,
+                        eligible,
+                        "recovered",
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        first_attempt_ms,
+                        Some(precision_attempt_ms),
+                        Some(first_failure_summary),
+                        total_ms,
+                    );
+                    annotate_precision_recovery_layout(
+                        &mut layout,
+                        recovery,
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        total_ms,
+                    );
+                    Ok(layout)
+                }
+                Err(mut precision_failure) => {
+                    let precision_attempt_ms = precision_started.elapsed().as_millis();
+                    let total_ms = total_started.elapsed().as_millis();
+                    let precision_failure_summary = compact_failure_summary(&precision_failure);
+                    let recovery = precision_recovery_report(
+                        recovery_enabled,
+                        eligible,
+                        if precision_failure.code == "CANCELLED" {
+                            "cancelledDuringRetry"
+                        } else {
+                            "precisionRecoveryFailed"
+                        },
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        first_attempt_ms,
+                        Some(precision_attempt_ms),
+                        Some(first_failure_summary),
+                        total_ms,
+                    );
+                    if let Some(diagnostics) = precision_failure.diagnostics.as_mut() {
+                        diagnostics["requestedRegistrationMegapixels"] =
+                            json!(requested_megapixels);
+                        diagnostics["actualRegistrationMegapixels"] =
+                            json!(PRECISION_RECOVERY_MEGA_PIXELS);
+                        diagnostics["precisionRecovery"] = recovery;
+                        diagnostics["precisionFailure"] = precision_failure_summary;
+                        diagnostics["totalAlignmentMs"] = json!(total_ms);
+                    } else {
+                        precision_failure.diagnostics = Some(json!({
+                            "requestedRegistrationMegapixels":requested_megapixels,
+                            "actualRegistrationMegapixels":PRECISION_RECOVERY_MEGA_PIXELS,
+                            "precisionRecovery":recovery,
+                            "precisionFailure":precision_failure_summary,
+                            "totalAlignmentMs":total_ms
+                        }));
+                    }
+                    Err(precision_failure)
+                }
+            }
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
 pub fn align_json_with_checkpoint(
     input: &str,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<Value, SphericalFailure> {
-    let request: Request = serde_json::from_str(input).map_err(|e| SphericalFailure {
+    let input_value: Value = serde_json::from_str(input).map_err(|e| SphericalFailure {
         code: "INVALID_REQUEST",
         message: format!("invalid spherical request JSON: {e}"),
         diagnostics: None,
     })?;
-    align(request, checkpoint)
+    let recovery_enabled = precision_recovery_enabled(&input_value)?;
+    let mut request: Request =
+        serde_json::from_value(input_value).map_err(|e| SphericalFailure {
+            code: "INVALID_REQUEST",
+            message: format!("invalid spherical request JSON: {e}"),
+            diagnostics: None,
+        })?;
+    if let Some(normalized) = normalize_neighbor_mode(&request.neighbor_mode) {
+        request.neighbor_mode = normalized.into();
+    }
+    align_with_precision_recovery(request, recovery_enabled, checkpoint, align)
 }
 
 pub fn align_json_detailed(input: &str) -> std::result::Result<Value, SphericalFailure> {
@@ -5039,6 +5975,8 @@ fn refine_correspondence_snapshot_excluding_internal(
         .ok_or_else(|| failure("accepted visual edge list is missing".into()))?;
     let mut constraints = Vec::with_capacity(cache_edges.len());
     let mut edges = Vec::with_capacity(cache_edges.len());
+    let mut cached_reliability_scales = std::collections::HashMap::new();
+    let mut reconstructed_legacy_reliability = false;
     for item in cache_edges {
         let from = item["from"].as_u64().unwrap_or(u64::MAX) as usize;
         let to = item["to"].as_u64().unwrap_or(u64::MAX) as usize;
@@ -5068,6 +6006,26 @@ fn refine_correspondence_snapshot_excluding_internal(
             rotation,
             weight: item["weight"].as_f64().unwrap_or(1.0),
         });
+        if item.get("reliabilityWeightScale").is_none() {
+            if !legacy_fit_compatible {
+                return Err(failure(
+                    "snapshot edge is missing its reliability weight; regenerate the alignment snapshot".into(),
+                ));
+            }
+            reconstructed_legacy_reliability = true;
+        } else {
+            let Some(scale) = item["reliabilityWeightScale"].as_f64() else {
+                return Err(failure(
+                    "cached edge reliability weight is not numeric".into(),
+                ));
+            };
+            if !scale.is_finite() || !(0.0..=1.0).contains(&scale) || scale <= 0.0 {
+                return Err(failure(
+                    "cached edge reliability weight is outside the valid range".into(),
+                ));
+            }
+            cached_reliability_scales.insert((from, to), scale);
+        }
         let attempt = crate::pipeline::SphericalMatchAttempt {
             from_features: 0,
             to_features: 0,
@@ -5153,9 +6111,13 @@ fn refine_correspondence_snapshot_excluding_internal(
             "existing diagnostic exclusions split a visual component".into(),
         ));
     }
+    // The snapshot stores the final constraint weight (including spatial and
+    // loop reliability). Reconstruct the same relative scales during replay.
+    let mut reliability_scales = reliability_scales_from_constraints(&constraints);
+    reliability_scales.extend(cached_reliability_scales);
     let mut refined_poses = poses;
     let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
-    let outcome = prune_visual_edges_with_joint_leave_one_out(
+    let outcome = prune_visual_edges_with_joint_leave_one_out_weighted(
         &mut refined_poses,
         &mut constraints,
         &edges,
@@ -5166,6 +6128,7 @@ fn refine_correspondence_snapshot_excluding_internal(
         } else {
             Some(&newly_requested)
         },
+        &reliability_scales,
     )
     .map_err(|error| failure(format!("offline joint leave-one-out failed: {error}")))?;
     let accepted_new = outcome
@@ -5438,6 +6401,11 @@ fn refine_correspondence_snapshot_excluding_internal(
         "excludedEdgesHeldOut":held_out_diagnostics,
         "diagnosticCorrespondenceSnapshot":snapshot
     });
+    result["reliabilityScaleCompatibility"] = json!(if reconstructed_legacy_reliability {
+        "reconstructed_from_legacy_constraint_weights"
+    } else {
+        "restored_from_snapshot"
+    });
     if let (Some(warps), Some(metrics)) = (diagnostic_warps, corrected_metrics) {
         let tiles = req
             .tiles
@@ -5501,6 +6469,234 @@ fn refine_correspondence_snapshot_excluding_internal(
 mod tests {
     use super::*;
 
+    fn precision_recovery_request() -> Request {
+        serde_json::from_value(json!({
+            "rows":1,"columns":2,
+            "tiles":[
+                {"row":0,"column":0,"path":"a.jpg","placementConstraint":{"kind":"gridPrior","origin":"operator"}},
+                {"row":0,"column":1,"path":"b.jpg","forceGrid":true}
+            ],
+            "fx":75000.0,"fy":75000.0,"cx":1919.5,"cy":1079.5,
+            "sourceWidth":3840,"sourceHeight":2160,
+            "placementMode":"grid-assisted","allowNominalGridFallback":true,
+            "gridHorizontalOverlap":0.3,"gridVerticalOverlap":0.3,
+            "neighborMode":"eight","workers":4,"parallelMatching":true,
+            "registrationMegapixels":0.6,"featureType":"sift","matcherType":"bf",
+            "localTextureWarp":true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn precision_recovery_flag_defaults_true_and_rejects_non_boolean_values() {
+        assert!(precision_recovery_enabled(&json!({})).unwrap());
+        assert!(precision_recovery_enabled(&json!({"allowPrecisionRecovery":true})).unwrap());
+        assert!(!precision_recovery_enabled(&json!({"allowPrecisionRecovery":false})).unwrap());
+        for value in [json!(null), json!(0), json!("false"), json!([])] {
+            let error =
+                precision_recovery_enabled(&json!({"allowPrecisionRecovery":value})).unwrap_err();
+            assert_eq!(error.code, "INVALID_REQUEST");
+        }
+    }
+
+    fn precision_quality_failure() -> SphericalFailure {
+        SphericalFailure {
+            code: "REGISTRATION_FAILED",
+            message: "quality gate failed".into(),
+            diagnostics: Some(json!({
+                "failureReason":"reprojection_quality_gate",
+                "globalRayReprojectionRmsPx":2.3,
+                "maximumEdgeReprojectionRmsPx":124.0,
+                "completeCorrespondenceEvidence":true,
+                "matchedEdgeCount":700,
+                "worstEdges":[{"from":74,"to":75,"rmsPx":124.0}]
+            })),
+        }
+    }
+
+    #[test]
+    fn precision_recovery_retries_once_at_two_mp_without_changing_geometry_request() {
+        let request = precision_recovery_request();
+        assert!(precision_recovery_eligible(&request, true));
+        let mut calls = Vec::new();
+        let mut runner =
+            |attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls.push(attempt.clone());
+                if calls.len() == 1 {
+                    Err(precision_quality_failure())
+                } else {
+                    Ok(
+                        json!({"report":{"registrationMegapixels":attempt.registration_megapixels,"totalAlignmentMs":20}}),
+                    )
+                }
+            };
+        let mut checkpoint_stages = Vec::new();
+        let mut checkpoint = |stage: &str| {
+            checkpoint_stages.push(stage.to_owned());
+            Ok(())
+        };
+        let layout =
+            align_with_precision_recovery(request.clone(), true, &mut checkpoint, &mut runner)
+                .unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], request);
+        let mut expected_precision_request = request;
+        expected_precision_request.registration_megapixels = 2.0;
+        assert_eq!(calls[1], expected_precision_request);
+        assert_eq!(checkpoint_stages, vec!["precision-recovery-start"]);
+        assert_eq!(layout["report"]["requestedRegistrationMegapixels"], 0.6);
+        assert_eq!(layout["report"]["actualRegistrationMegapixels"], 2.0);
+        assert_eq!(layout["report"]["precisionRecovery"]["status"], "recovered");
+        assert_eq!(
+            layout["report"]["precisionRecovery"]["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            layout["report"]["totalAlignmentMs"],
+            layout["report"]["precisionRecovery"]["totalAlignmentMs"]
+        );
+    }
+
+    #[test]
+    fn precision_recovery_preserves_precise_failure_and_first_failure_without_third_attempt() {
+        let request = precision_recovery_request();
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                if calls == 1 {
+                    Err(precision_quality_failure())
+                } else {
+                    Err(SphericalFailure {
+                        code: "REGISTRATION_FAILED",
+                        message: "2 MP still fails the unchanged gate".into(),
+                        diagnostics: Some(json!({
+                            "failureReason":"reprojection_quality_gate",
+                            "maximumEdgeReprojectionRmsPx":13.0
+                        })),
+                    })
+                }
+            };
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let failure =
+            align_with_precision_recovery(request, true, &mut checkpoint, &mut runner).unwrap_err();
+        assert_eq!(calls, 2);
+        assert_eq!(failure.message, "2 MP still fails the unchanged gate");
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionFailure"]
+                ["maximumEdgeReprojectionRmsPx"],
+            13.0
+        );
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionRecovery"]["firstFailure"]
+                ["maximumEdgeReprojectionRmsPx"],
+            124.0
+        );
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionRecovery"]["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn precision_recovery_does_not_retry_non_gate_disabled_or_non_fast_requests() {
+        let request = precision_recovery_request();
+        let failures = [
+            SphericalFailure {
+                code: "REGISTRATION_FAILED",
+                message: "graph failure".into(),
+                diagnostics: Some(json!({"failureReason":"disconnected_graph"})),
+            },
+            SphericalFailure {
+                code: "CANCELLED",
+                message: "cancelled".into(),
+                diagnostics: None,
+            },
+        ];
+        for failure in failures {
+            let mut calls = 0;
+            let mut runner = |_attempt: Request,
+                              _checkpoint: &mut dyn FnMut(
+                &str,
+            )
+                -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(SphericalFailure {
+                    code: failure.code,
+                    message: failure.message.clone(),
+                    diagnostics: failure.diagnostics.clone(),
+                })
+            };
+            let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+            assert!(align_with_precision_recovery(
+                request.clone(),
+                true,
+                &mut checkpoint,
+                &mut runner
+            )
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(precision_quality_failure())
+            };
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        assert!(align_with_precision_recovery(
+            request.clone(),
+            false,
+            &mut checkpoint,
+            &mut runner
+        )
+        .is_err());
+        assert_eq!(calls, 1);
+        let mut precise_request = request.clone();
+        precise_request.registration_megapixels = 2.0;
+        assert!(!precision_recovery_eligible(&precise_request, true));
+        let mut visual_request = request;
+        visual_request.placement_mode = "visual".into();
+        assert!(!precision_recovery_eligible(&visual_request, true));
+    }
+
+    #[test]
+    fn precision_recovery_honors_cancellation_before_second_attempt() {
+        let request = precision_recovery_request();
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(precision_quality_failure())
+            };
+        let mut checkpoint = |stage: &str| {
+            if stage == "precision-recovery-start" {
+                Err("cancelled".into())
+            } else {
+                Ok(())
+            }
+        };
+        let failure =
+            align_with_precision_recovery(request, true, &mut checkpoint, &mut runner).unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(failure.code, "CANCELLED");
+        assert_eq!(
+            failure.diagnostics.unwrap()["precisionRecovery"]["status"],
+            "cancelledBeforeRetry"
+        );
+    }
+
     #[test]
     fn warp_step_comparison_handles_grid_level_changes_without_losing_field() {
         let coarse = crate::texture_warp::SourcePlaneWarp {
@@ -5515,6 +6711,249 @@ mod tests {
         };
         assert!(source_warp_max_step(Some(&coarse), &fine, 101, 101) < 1e-9);
         assert!(source_warp_max_step(Some(&fine), &coarse, 101, 101) < 1e-9);
+    }
+
+    #[test]
+    fn source_warp_quality_extension_is_bounded_and_requires_continued_improvement() {
+        assert!(should_extend_source_warp_for_quality(
+            8, 8, 12.4, 12.0857, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            7, 8, 12.4, 12.0857, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8, 8, 12.01, 11.99, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8, 8, 12.4, 12.395, 12.0, 0.01
+        ));
+        assert!(!should_extend_source_warp_for_quality(
+            8,
+            8,
+            12.4,
+            f64::NAN,
+            12.0,
+            0.01
+        ));
+    }
+
+    fn source_warp_extension_fixture(
+        first_edge_shift_px: f64,
+        second_edge_shift_px: f64,
+    ) -> (
+        Request,
+        Vec<Constraint>,
+        Vec<crate::pipeline::SphericalMatchEdge>,
+    ) {
+        let req = Request {
+            rows: 1,
+            columns: 3,
+            tiles: vec![
+                InputTile {
+                    row: 0,
+                    column: 0,
+                    path: "fixture-0".into(),
+                    force_grid: false,
+                    placement_constraint: None,
+                },
+                InputTile {
+                    row: 0,
+                    column: 1,
+                    path: "fixture-1".into(),
+                    force_grid: false,
+                    placement_constraint: None,
+                },
+                InputTile {
+                    row: 0,
+                    column: 2,
+                    path: "fixture-2".into(),
+                    force_grid: false,
+                    placement_constraint: None,
+                },
+            ],
+            fx: 1000.0,
+            fy: 1000.0,
+            cx: 500.0,
+            cy: 400.0,
+            source_width: 1000,
+            source_height: 800,
+            output_dir: String::new(),
+            placement_mode: String::new(),
+            allow_nominal_grid_fallback: false,
+            auto_grid_overlap: false,
+            refine_grid_neighbors: false,
+            seam_blend_mode: default_seam_blend_mode(),
+            grid_horizontal_overlap: None,
+            grid_vertical_overlap: None,
+            neighbor_mode: default_neighbor_mode(),
+            workers: default_workers(),
+            parallel_matching: default_parallel_matching(),
+            registration_megapixels: default_registration_megapixels(),
+            feature_type: default_feature_type(),
+            matcher_type: default_matcher_type(),
+            include_diagnostic_correspondences: false,
+            local_texture_warp: true,
+        };
+        let points = (0..8)
+            .flat_map(|row| {
+                (0..8).map(move |column| {
+                    let x = 180.0 + column as f64 * 90.0;
+                    let y = 90.0 + row as f64 * 88.0;
+                    [x, y, x - second_edge_shift_px, y]
+                })
+            })
+            .collect::<Vec<_>>();
+        let first_edge_points = points
+            .iter()
+            .map(|point| [point[0], point[1], point[0] - first_edge_shift_px, point[1]])
+            .collect();
+        let first_edge = reprojection_fixture_edge(first_edge_points);
+        let mut second_edge = reprojection_fixture_edge(points);
+        second_edge.from = 1;
+        second_edge.to = 2;
+        let constraints = vec![
+            Constraint {
+                from: 0,
+                to: 1,
+                rotation: ID,
+                weight: 1.0,
+            },
+            Constraint {
+                from: 1,
+                to: 2,
+                rotation: ID,
+                weight: 1.0,
+            },
+        ];
+        (req, constraints, vec![first_edge, second_edge])
+    }
+
+    #[test]
+    fn source_warp_solver_uses_only_bounded_extra_rounds_to_reach_quality_limit() {
+        let (req, constraints, edges) = source_warp_extension_fixture(26.0, 0.0);
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let (warps, _, summary) = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        )
+        .unwrap();
+
+        let attempted = summary["attemptedRounds"].as_u64().unwrap();
+        let final_worst = summary["finalWorstEdgeRmsPx"].as_f64().unwrap();
+        let compact_summary = format!(
+            "attempted={}, accepted={}, extended={}, termination={}, converged={}, initialWorst={:.4}, finalWorst={:.4}, initialRms={:.4}, finalRms={:.4}",
+            attempted,
+            summary["acceptedRounds"].as_u64().unwrap_or(0),
+            summary["extendedForQuality"].as_bool().unwrap_or(false),
+            summary["terminationReason"].as_str().unwrap_or("unknown"),
+            summary["converged"].as_bool().unwrap_or(false),
+            summary["initialWorstEdgeRmsPx"].as_f64().unwrap_or(f64::NAN),
+            final_worst,
+            summary["initialSymmetricRmsPx"].as_f64().unwrap_or(f64::NAN),
+            summary["finalSymmetricRmsPx"].as_f64().unwrap_or(f64::NAN),
+        );
+        assert_eq!(
+            summary["extendedForQuality"].as_bool(),
+            Some(true),
+            "{compact_summary}"
+        );
+        assert!(attempted > 8 && attempted <= 12, "{compact_summary}");
+        assert_eq!(summary["maximumOuterIterations"], 12, "{compact_summary}");
+        assert_eq!(
+            summary["terminationReason"], "quality_limit_reached",
+            "{compact_summary}"
+        );
+        assert!(
+            !summary["converged"].as_bool().unwrap(),
+            "{compact_summary}"
+        );
+        assert!(final_worst <= 12.0, "{compact_summary}");
+        assert!(summary["completeEvidence"].as_bool().unwrap());
+        assert_eq!(warps.len(), 3);
+        for warp in warps.iter().flatten() {
+            crate::texture_warp::validate_source_plane_warp(
+                warp,
+                req.source_width,
+                req.source_height,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn source_warp_solver_can_be_cancelled_during_bounded_quality_extension() {
+        let (req, constraints, edges) = source_warp_extension_fixture(32.0, 0.0);
+        let mut outer_iterations = 0usize;
+        let mut checkpoint = |stage: &str| {
+            if stage == "source-plane-warp-outer-iteration" {
+                outer_iterations += 1;
+                if outer_iterations == 9 {
+                    return Err("cancel during quality extension".to_owned());
+                }
+            }
+            Ok(())
+        };
+        let result = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(outer_iterations, 9);
+    }
+
+    #[test]
+    fn source_warp_solver_stays_fail_closed_after_bounded_budget_is_exhausted() {
+        let (req, constraints, edges) = source_warp_extension_fixture(32.0, 0.0);
+        let mut checkpoint = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let (warps, _, summary) = fit_source_plane_warps(
+            &[ID, ID, ID],
+            &constraints,
+            &edges,
+            &req,
+            &mut checkpoint,
+            0.025,
+        )
+        .unwrap();
+        let attempted = summary["attemptedRounds"].as_u64().unwrap();
+        let final_worst = summary["finalWorstEdgeRmsPx"].as_f64().unwrap();
+        let compact_summary = format!(
+            "attempted={attempted}, extended={}, termination={}, converged={}, finalWorst={final_worst:.4}",
+            summary["extendedForQuality"].as_bool().unwrap_or(false),
+            summary["terminationReason"].as_str().unwrap_or("unknown"),
+            summary["converged"].as_bool().unwrap_or(false),
+        );
+        assert_eq!(attempted, 12, "{compact_summary}");
+        assert_eq!(
+            summary["extendedForQuality"].as_bool(),
+            Some(true),
+            "{compact_summary}"
+        );
+        assert_eq!(
+            summary["terminationReason"], "iteration_limit",
+            "{compact_summary}"
+        );
+        assert!(
+            !summary["converged"].as_bool().unwrap(),
+            "{compact_summary}"
+        );
+        assert!(final_worst > 12.0, "{compact_summary}");
+        assert!(summary["completeEvidence"].as_bool().unwrap());
+        assert!(warps.iter().flatten().all(|warp| {
+            crate::texture_warp::validate_source_plane_warp(
+                warp,
+                req.source_width,
+                req.source_height,
+            )
+            .is_ok()
+        }));
     }
 
     #[test]
@@ -5564,7 +7003,7 @@ mod tests {
             "solverParameters":current_pixel_solver_parameters(),
             "grid":{"rows":1,"columns":2},
             "intrinsics":{"fx":100.0,"fy":100.0,"cx":50.0,"cy":50.0,"sourceWidth":100,"sourceHeight":100},
-            "matchingParameters":{"featureType":"sift","matcherType":"bf","registrationMegapixels":2.0,"neighborMode":"four"},
+            "matchingParameters":{"featureType":"sift","matcherType":"bf","registrationMegapixels":2.0,"neighborMode":"eight"},
             "warmStartPoses":[],
             "sourceIdentities":[{"tileIndex":0,"sha256":"a".repeat(64)},{"tileIndex":1,"sha256":"b".repeat(64)}],
             "acceptedVisualEdges":[]
@@ -5601,7 +7040,7 @@ mod tests {
         );
 
         let mut mismatched_matching = base;
-        mismatched_matching["matchingParameters"]["neighborMode"] = json!("eight");
+        mismatched_matching["matchingParameters"]["neighborMode"] = json!("four");
         rehash_snapshot(&mut mismatched_matching);
         assert!(
             refine_correspondence_snapshot_json(&request, &mismatched_matching.to_string())
@@ -5661,6 +7100,7 @@ mod tests {
                 .collect::<Vec<_>>();
             accepted_edges.push(json!({
                 "from":from,"to":to,"rotation":mul(transpose(poses[from]), poses[to]),"weight":1.0,
+                "reliabilityWeightScale":if from == 0 && to == 1 { 0.0171875 } else { 1.0 },
                 "points":points,"matches":corners.len(),"inliers":corners.len(),"inlierRatio":1.0,"homographyResidualPx":0.5
             }));
         }
@@ -5695,6 +7135,34 @@ mod tests {
             &[(0, 2)],
         )
         .unwrap();
+        assert_eq!(
+            initial["diagnosticCorrespondenceSnapshot"]["acceptedVisualEdges"][0]
+                ["reliabilityWeightScale"],
+            0.0171875
+        );
+        let mut invalid_scale_snapshot = snapshot.clone();
+        invalid_scale_snapshot["acceptedVisualEdges"][0]["reliabilityWeightScale"] = json!(0.0);
+        rehash_snapshot(&mut invalid_scale_snapshot);
+        assert!(refine_correspondence_snapshot_json(
+            &request_json,
+            &invalid_scale_snapshot.to_string()
+        )
+        .unwrap_err()
+        .message
+        .contains("reliability weight"));
+        let mut missing_scale_snapshot = snapshot.clone();
+        missing_scale_snapshot["acceptedVisualEdges"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("reliabilityWeightScale");
+        rehash_snapshot(&mut missing_scale_snapshot);
+        assert!(refine_correspondence_snapshot_json(
+            &request_json,
+            &missing_scale_snapshot.to_string()
+        )
+        .unwrap_err()
+        .message
+        .contains("missing its reliability weight"));
         assert_eq!(initial["retainedGraphGatePassed"], true);
         assert_eq!(initial["qualityGatePassed"], false);
         assert_eq!(initial["productionLayoutEmitted"], false);
@@ -6085,6 +7553,7 @@ mod tests {
                         column,
                         path: "fixture.png".into(),
                         force_grid: false,
+                        placement_constraint: None,
                     })
                 })
                 .collect(),
@@ -6114,6 +7583,428 @@ mod tests {
     }
 
     #[test]
+    fn correspondence_coverage_distinguishes_broad_and_concentrated_support() {
+        let req = grid_request(1, 2);
+        let broad = (0..4)
+            .flat_map(|row| {
+                (0..4).map(move |column| {
+                    let x = 10.0 + column as f64 * 20.0;
+                    let y = 10.0 + row as f64 * 20.0;
+                    [x, y, x, y]
+                })
+            })
+            .collect::<Vec<_>>();
+        let concentrated = vec![[20.0, 20.0, 20.0, 20.0]; 16];
+        let (_, _, broad_score) = correspondence_coverage(&broad, &req);
+        let (source_cells, target_cells, concentrated_score) =
+            correspondence_coverage(&concentrated, &req);
+        assert_eq!((source_cells, target_cells), (1, 1));
+        assert_eq!(broad_score, 1.0);
+        assert!(concentrated_score < broad_score);
+        assert!(
+            concentrated_score > 0.0,
+            "valid narrow evidence stays usable"
+        );
+    }
+
+    #[test]
+    fn weak_support_loop_gate_uses_unique_points_two_dimensionality_and_strong_conflicts() {
+        let mut req = grid_request(2, 2);
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let concentrated = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let support = is_weak_support_loop_conflict(&concentrated, &req, 519.66)
+            .expect("the captured 76->77 support is concentrated and cycle-inconsistent");
+        assert_eq!(support.unique_points, 8);
+        assert_eq!((support.source_cells, support.target_cells), (1, 1));
+        assert!(is_weak_support_loop_conflict(&concentrated, &req, 0.0).is_none());
+        assert!(is_weak_support_loop_conflict(&concentrated, &req, 47.99).is_none());
+
+        let thin_strip = vec![
+            [215.4879, 1834.3816, 179.9837, 108.2603],
+            [1019.9611, 1966.0636, 986.3790, 234.3513],
+            [1388.5734, 1961.8910, 1359.2621, 228.9494],
+            [1466.8462, 1906.6553, 1437.8077, 177.1837],
+            [1525.7592, 1968.2759, 1499.7667, 238.9680],
+            [1742.7124, 1874.4271, 1714.1636, 145.5794],
+            [1801.5751, 1914.5775, 1776.7408, 179.7659],
+            [3038.2991, 1903.6947, 3007.5598, 176.5578],
+            [3038.2991, 1903.6947, 3007.5598, 176.5578],
+            [3168.2136, 2020.5734, 3135.1353, 285.7805],
+        ];
+        let strip_support = is_weak_support_loop_conflict(&thin_strip, &req, 945.89)
+            .expect("the captured 50->76 support is a narrow horizontal strip");
+        assert_eq!(strip_support.unique_points, 9);
+        assert_eq!(
+            (strip_support.source_rows, strip_support.target_rows),
+            (1, 1)
+        );
+
+        let normal_horizontal_overlap = (0..15)
+            .map(|index| {
+                let column = index % 3;
+                let row = index / 3;
+                let source_x = 3075.0 + column as f64 * 370.0;
+                let source_y = 120.0 + row as f64 * 390.0;
+                [source_x, source_y, source_x - 3072.0, source_y]
+            })
+            .collect::<Vec<_>>();
+        let normal_support = correspondence_support_shape(&normal_horizontal_overlap, &req);
+        assert_eq!(normal_support.unique_points, 15);
+        assert!(normal_support.source_thin_axis_extent > 0.125);
+        assert!(normal_support.target_thin_axis_extent > 0.125);
+        assert!(
+            is_weak_support_loop_conflict(&normal_horizontal_overlap, &req, 900.0).is_none(),
+            "a normal 20% horizontal overlap with broad vertical support stays visual"
+        );
+
+        let dense_thin_strip = (0..20)
+            .map(|index| {
+                let x = 400.0 + index as f64 * 150.0;
+                [
+                    x,
+                    1900.0 + index as f64 * 4.0,
+                    x - 30.0,
+                    180.0 + index as f64 * 4.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            is_weak_support_loop_conflict(&dense_thin_strip, &req, 900.0).is_none(),
+            "high-support edges remain fail-closed even when the loop residual is large"
+        );
+
+        let broad = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        assert!(is_weak_support_loop_conflict(&broad, &req, 900.0).is_none());
+    }
+
+    #[test]
+    fn weak_support_loop_rejection_keeps_neighbor_graph_and_all_tile_indices() {
+        use crate::pipeline::{SphericalMatchAttempt, SphericalMatchEdge};
+        let mut req = grid_request(2, 2);
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let weak_points = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let dense_points = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let mut constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: ID,
+                weight: 1.0,
+            })
+            .collect::<Vec<_>>();
+        constraints[0].rotation = ry(0.001);
+        let make_edge = |from, to, points: Vec<[f64; 4]>| SphericalMatchEdge {
+            from,
+            to,
+            from_features: points.len(),
+            to_features: points.len(),
+            matches: points.len(),
+            inliers: points.len(),
+            inlier_ratio: 1.0,
+            homography_residual: 1.0,
+            reason: 0,
+            initial: SphericalMatchAttempt {
+                from_features: points.len(),
+                to_features: points.len(),
+                matches: points.len(),
+                inliers: points.len(),
+                inlier_ratio: 1.0,
+                reason: 0,
+                contrast_threshold: 0.015,
+                clahe: false,
+            },
+            points,
+            retry: None,
+            clahe_retry: None,
+            used_retry: false,
+            used_clahe_retry: false,
+        };
+        let edges = pairs
+            .iter()
+            .map(|&(from, to)| {
+                make_edge(
+                    from,
+                    to,
+                    if (from, to) == (0, 1) {
+                        weak_points.clone()
+                    } else {
+                        dense_points.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = pairs
+            .iter()
+            .map(|&(from, to)| json!({"from":from,"to":to,"disposition":"accepted"}))
+            .collect::<Vec<_>>();
+        let (residuals, _, _) = weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(residuals[&(0, 1)] > WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS);
+        let rejected = remove_weak_support_loop_conflicts(
+            &mut constraints,
+            &edges,
+            &req,
+            &residuals,
+            &mut diagnostics,
+        );
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["from"], 0);
+        assert_eq!(rejected[0]["to"], 1);
+        assert_eq!(diagnostics[0]["disposition"], "weak_support_loop_conflict");
+        assert_eq!(constraints.len(), 3);
+        assert_eq!(
+            connected_tiles(4, &constraints),
+            vec![true, true, true, true],
+            "removing one conflicted neighbor must retain every tile through the other neighbors"
+        );
+    }
+
+    #[test]
+    fn weak_support_loop_gate_uses_measured_grid_bridges_and_marks_isolated_tile_estimated() {
+        use crate::pipeline::{SphericalMatchAttempt, SphericalMatchEdge};
+        let rows = 3;
+        let columns = 3;
+        let mut req = grid_request(rows, columns);
+        req.placement_mode = "grid-assisted".into();
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let true_poses = (0..rows)
+            .flat_map(|row| {
+                (0..columns)
+                    .map(move |column| exp_rotation([row as f64 * 0.02, column as f64 * 0.03, 0.0]))
+            })
+            .collect::<Vec<_>>();
+        let mut constraints = constraints_for_grid_poses(rows, columns, &true_poses);
+        let weak_pairs = [(1, 4), (3, 4), (4, 5), (4, 7)];
+        for edge in &mut constraints {
+            if weak_pairs.contains(&(edge.from, edge.to)) {
+                let perturbation = if edge.from / columns == edge.to / columns {
+                    ry(0.001)
+                } else {
+                    rx(-0.001)
+                };
+                edge.rotation = mul(edge.rotation, perturbation);
+            }
+        }
+        let weak_points = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let dense_points = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        let make_edge = |from, to, points: Vec<[f64; 4]>| SphericalMatchEdge {
+            from,
+            to,
+            from_features: points.len(),
+            to_features: points.len(),
+            matches: points.len(),
+            inliers: points.len(),
+            inlier_ratio: 1.0,
+            homography_residual: 1.0,
+            reason: 0,
+            initial: SphericalMatchAttempt {
+                from_features: points.len(),
+                to_features: points.len(),
+                matches: points.len(),
+                inliers: points.len(),
+                inlier_ratio: 1.0,
+                reason: 0,
+                contrast_threshold: 0.015,
+                clahe: false,
+            },
+            points,
+            retry: None,
+            clahe_retry: None,
+            used_retry: false,
+            used_clahe_retry: false,
+        };
+        let edges = constraints
+            .iter()
+            .map(|edge| {
+                make_edge(
+                    edge.from,
+                    edge.to,
+                    if weak_pairs.contains(&(edge.from, edge.to)) {
+                        weak_points.clone()
+                    } else {
+                        dense_points.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = constraints
+            .iter()
+            .map(|edge| json!({"from":edge.from,"to":edge.to,"disposition":"accepted"}))
+            .collect::<Vec<_>>();
+        let (loop_residuals, _, _) =
+            weight_neighbor_loop_conflicts(rows, columns, &mut constraints, &req);
+        for pair in weak_pairs {
+            assert!(loop_residuals[&pair] >= WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS);
+        }
+        let rejected = remove_weak_support_loop_conflicts(
+            &mut constraints,
+            &edges,
+            &req,
+            &loop_residuals,
+            &mut diagnostics,
+        );
+        assert_eq!(rejected.len(), weak_pairs.len());
+
+        let root_visual_tiles = root_anchored_visual_tiles(rows * columns, &constraints);
+        assert!(
+            !root_visual_tiles[4],
+            "the isolated center has no visual pose evidence"
+        );
+        let (grid_constraints, grid_edges, horizontal_step, vertical_step) =
+            synthesize_grid_constraints(
+                rows,
+                columns,
+                &constraints,
+                &root_visual_tiles,
+                None,
+                None,
+                0.05,
+                0.05,
+            )
+            .expect("remaining visual neighbors provide measured row and column steps");
+        assert!(horizontal_step
+            .as_ref()
+            .is_some_and(|step| step.source != "nominalFovOverlap"));
+        assert!(vertical_step
+            .as_ref()
+            .is_some_and(|step| step.source != "nominalFovOverlap"));
+        assert!(grid_edges
+            .iter()
+            .any(|edge| edge["from"] == 1 && edge["to"] == 4));
+        let mut all_placement_constraints = constraints.clone();
+        all_placement_constraints.extend(grid_constraints);
+        assert_eq!(
+            connected_tiles(rows * columns, &all_placement_constraints),
+            vec![true; rows * columns],
+            "all original grid cells remain placeable after weak visual edges are excluded"
+        );
+        assert!(
+            !root_visual_tiles[4],
+            "the bridged center remains grid-estimated"
+        );
+    }
+
+    #[test]
+    fn neighbor_loop_uses_noncommuting_rotations_and_scales_only_weak_conflict() {
+        let mut req = grid_request(2, 2);
+        req.fx = 400.0;
+        req.fy = 420.0;
+        let truth = [
+            ID,
+            mul(rx(0.08), ry(0.12)),
+            mul(rz(-0.1), rx(0.15)),
+            mul(ry(0.2), rz(0.05)),
+        ];
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let mut constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: mul(transpose(truth[from]), truth[to]),
+                weight: if (from, to) == (0, 1) { 0.1 } else { 10.0 },
+            })
+            .collect::<Vec<_>>();
+        let (positive_residuals, positive_scales, _) =
+            weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(positive_residuals[&(0, 1)] < 12.0);
+        assert!(positive_scales.is_empty());
+
+        constraints[0].rotation = mul(constraints[0].rotation, ry(0.2));
+        let (negative_residuals, negative_scales, ambiguous) =
+            weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(negative_residuals[&(0, 1)] > 12.0);
+        assert_eq!(negative_scales.get(&(0, 1)), Some(&0.05));
+        assert!(ambiguous.is_empty());
+        assert!(constraints[0].weight < 0.1);
+        assert!(constraints[1..].iter().all(|edge| edge.weight == 10.0));
+
+        let mut tied_constraints = constraints
+            .iter()
+            .cloned()
+            .map(|mut edge| {
+                edge.weight = 1.0;
+                edge
+            })
+            .collect::<Vec<_>>();
+        let (_, tied_scales, tied_ambiguity) =
+            weight_neighbor_loop_conflicts(2, 2, &mut tied_constraints, &req);
+        assert!(tied_scales.is_empty());
+        assert_eq!(tied_ambiguity.len(), 4);
+        assert!(tied_constraints.iter().all(|edge| edge.weight == 1.0));
+    }
+
+    #[test]
     fn accepts_large_grids_without_arbitrary_axis_or_photo_caps() {
         assert!(validate(&grid_request(16, 24)).is_ok());
         assert!(validate(&grid_request(32, 32)).is_ok());
@@ -6137,7 +8028,7 @@ mod tests {
             "fx":100.0,"fy":100.0,"cx":50.0,"cy":50.0,"sourceWidth":100,"sourceHeight":100
         });
         let legacy: Request = serde_json::from_value(request.clone()).unwrap();
-        assert_eq!(legacy.neighbor_mode, "four");
+        assert_eq!(legacy.neighbor_mode, "eight");
         assert_eq!(legacy.workers, 1);
         let eight: Request = serde_json::from_value(serde_json::json!({
             "rows":1,"columns":2,"tiles":request["tiles"],"fx":100,"fy":100,"cx":50,"cy":50,
@@ -6167,12 +8058,10 @@ mod tests {
     #[test]
     fn eight_neighbor_edge_counts_and_order_are_stable() {
         use crate::pipeline::spherical_neighbor_pairs;
-        let four = spherical_neighbor_pairs(16, 24, false);
-        let eight = spherical_neighbor_pairs(16, 24, true);
-        assert_eq!(four.len(), 728);
+        let eight = spherical_neighbor_pairs(16, 24);
         assert_eq!(eight.len(), 1418);
         assert_eq!(&eight[..4], &[(0, 1), (0, 24), (0, 25), (1, 2)]);
-        assert_eq!(spherical_neighbor_pairs(1, 3, true), vec![(0, 1), (1, 2)]);
+        assert_eq!(spherical_neighbor_pairs(1, 3), vec![(0, 1), (1, 2)]);
         assert!(eight.iter().all(|(from, to)| {
             let fr = from / 24;
             let fc = from % 24;
@@ -6191,6 +8080,47 @@ mod tests {
     }
 
     #[test]
+    fn fixed_eight_neighbor_pairs_have_exact_local_unique_counts_at_boundaries() {
+        use crate::pipeline::spherical_neighbor_pairs;
+        for (rows, columns) in [(1, 1), (1, 7), (8, 1), (2, 2), (3, 4), (16, 24)] {
+            let pairs = spherical_neighbor_pairs(rows, columns);
+            let expected = rows * columns.saturating_sub(1)
+                + columns * rows.saturating_sub(1)
+                + 2 * rows.saturating_sub(1) * columns.saturating_sub(1);
+            assert_eq!(pairs.len(), expected, "{rows}x{columns}");
+            let unique = pairs
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(unique.len(), pairs.len());
+            assert!(pairs.iter().all(|&(a, b)| {
+                a < b
+                    && a < rows * columns
+                    && b < rows * columns
+                    && (a / columns).abs_diff(b / columns) <= 1
+                    && (a % columns).abs_diff(b % columns) <= 1
+            }));
+        }
+        assert_eq!(spherical_neighbor_pairs(2, 2).len(), 6);
+    }
+
+    #[test]
+    fn legacy_manual_and_auto_refined_neighbor_spellings_normalize_to_fixed_eight() {
+        assert_eq!(normalize_neighbor_mode("four"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("adaptive"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("eight"), Some("eight"));
+        assert_eq!(normalize_neighbor_mode("six"), None);
+        // The auto-refined entry path rebuilds a request internally; its
+        // product mode is fixed explicitly before it enters align().
+        let mut refined = grid_request(2, 2);
+        refined.neighbor_mode = "four".into();
+        refined.neighbor_mode = normalize_neighbor_mode(&refined.neighbor_mode)
+            .unwrap()
+            .into();
+        assert_eq!(refined.neighbor_mode, "eight");
+    }
+
+    #[test]
     fn force_grid_removes_incident_visual_edges_but_retains_the_cell() {
         let mut forced = vec![false; 9];
         forced[4] = true;
@@ -6205,9 +8135,62 @@ mod tests {
         let parsed: Request = serde_json::from_value(request).unwrap();
         assert!(parsed.tiles[1].force_grid);
         assert!(!parsed.tiles[0].force_grid);
+        assert_eq!(
+            parsed.tiles[1].resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint::hard_grid_lock(PlacementConstraintOrigin::LegacyUnknown)
+        );
+        assert_eq!(
+            parsed.tiles[0].resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint::none()
+        );
         assert_eq!(parsed.tiles.len(), 2);
     }
 
+    #[test]
+    fn typed_placement_constraint_resolves_soft_prior_and_hard_lock() {
+        let soft: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"soft.png",
+            "placementConstraint":{"kind":"gridPrior","origin":"operator"}
+        }))
+        .unwrap();
+        assert_eq!(
+            soft.resolved_placement_constraint().unwrap(),
+            ResolvedPlacementConstraint {
+                kind: Some(PlacementConstraintKind::GridPrior),
+                origin: Some(PlacementConstraintOrigin::Operator),
+            }
+        );
+
+        let hard: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"hard.png",
+            "placementConstraint":{"kind":"hardGridLock","origin":"systemFallback"}
+        }))
+        .unwrap();
+        assert!(hard
+            .resolved_placement_constraint()
+            .unwrap()
+            .is_hard_grid_lock());
+        assert_eq!(
+            hard.resolved_placement_constraint().unwrap().origin,
+            Some(PlacementConstraintOrigin::SystemFallback)
+        );
+
+        let contradictory: InputTile = serde_json::from_value(serde_json::json!({
+            "row":0,"column":0,"path":"contradictory.png","forceGrid":true,
+            "placementConstraint":{"kind":"gridPrior","origin":"operator"}
+        }))
+        .unwrap();
+        assert!(contradictory
+            .resolved_placement_constraint()
+            .unwrap_err()
+            .to_string()
+            .contains("cannot be combined"));
+    }
+
+    fn rx(a: f64) -> Mat {
+        let (s, c) = a.sin_cos();
+        [1., 0., 0., 0., c, -s, 0., s, c]
+    }
     fn rz(a: f64) -> Mat {
         let (s, c) = a.sin_cos();
         [c, -s, 0., s, c, 0., 0., 0., 1.]
@@ -7532,6 +9515,107 @@ mod tests {
     }
 
     #[test]
+    fn pixel_bundle_keeps_peers_stable_when_a_loop_conflict_is_downweighted() {
+        let mut req = grid_request(2, 2);
+        req.fx = 500.0;
+        req.fy = 480.0;
+        req.cx = 200.0;
+        req.cy = 150.0;
+        req.source_width = 400;
+        req.source_height = 300;
+        let truth = [
+            ID,
+            mul(rx(0.04), ry(0.1)),
+            rz(-0.08),
+            mul(ry(0.12), rz(0.03)),
+        ];
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let corners = [
+            (30.0, 30.0),
+            (360.0, 30.0),
+            (30.0, 270.0),
+            (360.0, 270.0),
+            (100.0, 80.0),
+            (300.0, 220.0),
+            (190.0, 40.0),
+            (210.0, 260.0),
+        ];
+        let mut edges = pairs
+            .iter()
+            .map(|&(from, to)| {
+                let points = corners
+                    .iter()
+                    .map(|&(x, y)| {
+                        let world_ray = mul_vec(truth[from], camera_ray(x, y, &req));
+                        let target_ray = mul_vec(transpose(truth[to]), world_ray);
+                        let (tx, ty) = project_camera_ray(target_ray, &req).unwrap();
+                        [x, y, tx, ty]
+                    })
+                    .collect::<Vec<_>>();
+                let mut edge = reprojection_fixture_edge(points);
+                edge.from = from;
+                edge.to = to;
+                edge
+            })
+            .collect::<Vec<_>>();
+        for point in &mut edges[0].points {
+            point[2] += 35.0;
+        }
+        let constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: mul(transpose(truth[from]), truth[to]),
+                weight: 1.0,
+            })
+            .collect::<Vec<_>>();
+        let mut unweighted = truth;
+        let mut weighted = truth;
+        let mut no_cancel = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        refine_visual_component_pixels_mode(
+            &mut unweighted,
+            &constraints,
+            &edges,
+            &req,
+            &mut no_cancel,
+            true,
+        )
+        .unwrap();
+        let scales = std::collections::HashMap::from([((0, 1), 0.001)]);
+        refine_visual_component_pixels_with_reliability(
+            &mut weighted,
+            &constraints,
+            &edges,
+            &req,
+            &mut no_cancel,
+            true,
+            &scales,
+        )
+        .unwrap();
+        let pose_error = |poses: &[Mat]| {
+            poses
+                .iter()
+                .zip(truth)
+                .skip(1)
+                .map(|(pose, expected)| {
+                    log_rotation(mul(transpose(expected), *pose))
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                        .sqrt()
+                })
+                .sum::<f64>()
+        };
+        let unweighted_error = pose_error(&unweighted);
+        let weighted_error = pose_error(&weighted);
+        assert!(
+            weighted_error < unweighted_error * 0.5,
+            "weighted pixel optimization should protect the peer backbone: {weighted_error} vs {unweighted_error}"
+        );
+    }
+
+    #[test]
     fn pixel_refinement_converges_on_a_long_visual_loop_with_monotonic_cost() {
         let req = Request {
             rows: 1,
@@ -7852,7 +9936,10 @@ mod tests {
         assert_eq!(edges.len(), 728);
         assert_eq!(reinitialized, 383);
         assert_eq!(optimized, 383);
-        assert!(converged, "384 grid failed to converge after {iterations} iterations; PCG {pcg_max_iterations}, relres {pcg_max_residual:e}, failures {pcg_failures}");
+        assert!(
+            converged,
+            "384 grid failed to converge after {iterations} iterations; PCG {pcg_max_iterations}, relres {pcg_max_residual:e}, failures {pcg_failures}"
+        );
         assert!(iterations > 0 && iterations <= MAX_PIXEL_REFINEMENT_ITERATIONS);
         assert!(
             pcg_all_converged,

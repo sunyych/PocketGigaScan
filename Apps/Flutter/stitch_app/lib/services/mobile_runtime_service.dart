@@ -22,7 +22,7 @@ class MobileResourceBudget {
   /// Conservative process-wide values accepted by the native resource API.
   /// These are recommendations; callers may lower them for a particular job.
   int get recommendedTotalMemoryBudgetMiB => _hasValidReadings
-      ? (availableMemoryMiB ~/ 3).clamp(128, 4096).toInt()
+      ? (availableMemoryMiB ~/ 3).clamp(128, 128 * 1024).toInt()
       : 128;
 
   int get recommendedTotalCpuWorkers =>

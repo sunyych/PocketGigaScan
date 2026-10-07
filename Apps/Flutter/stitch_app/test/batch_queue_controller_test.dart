@@ -4,9 +4,12 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/services.dart';
 import 'package:stitch_app/models/batch_queue.dart';
+import 'package:stitch_app/models/app_settings.dart';
+import 'package:stitch_app/models/performance_options.dart';
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
+import 'package:stitch_app/models/stitch_timeline.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
@@ -86,6 +89,51 @@ class _MemoryTasks extends TaskRepository {
   }
 }
 
+class _AccessDeniedTaskRemoval extends _MemoryTasks {
+  _AccessDeniedTaskRemoval(super.taskRoot);
+
+  bool failNextRemoval = false;
+
+  @override
+  Future<void> removeTaskRecord(String id) async {
+    if (failNextRemoval) {
+      failNextRemoval = false;
+      throw FileSystemException(
+        'Access is denied',
+        '${taskRoot.path}${Platform.pathSeparator}$id${Platform.pathSeparator}.removed.tmp-test',
+        OSError('Access is denied', 5),
+      );
+    }
+    await super.removeTaskRecord(id);
+  }
+}
+
+class _AccessDeniedBatchQueueSave extends BatchQueueRepository {
+  _AccessDeniedBatchQueueSave(this.directory);
+
+  final Directory directory;
+  bool failNextSave = false;
+
+  @override
+  Future<Directory> root() async {
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  @override
+  Future<void> save(BatchQueue queue) async {
+    if (failNextSave) {
+      failNextSave = false;
+      throw FileSystemException(
+        'Access is denied',
+        '${directory.path}${Platform.pathSeparator}${queue.id}${Platform.pathSeparator}batch.json',
+        OSError('Access is denied', 5),
+      );
+    }
+    await super.save(queue);
+  }
+}
+
 class _GatedTaskLoads extends _MemoryTasks {
   _GatedTaskLoads(super.taskRoot);
 
@@ -111,9 +159,11 @@ class _Job {
   final int memory;
   String state = 'running';
   String operation = 'render';
+  String? stageOverride;
   String? destination;
   Object? error;
   double progress = 0.1;
+  final List<Map<String, Object?>> events = [];
 }
 
 class _FakeApi implements JobApi {
@@ -126,6 +176,7 @@ class _FakeApi implements JobApi {
   int exports = 0;
   int maxActive = 0;
   int resumeCalls = 0;
+  DateTime Function()? timelineClock;
   bool failCancel = false;
   bool failPause = false;
   bool completeExportWithoutOutput = false;
@@ -209,12 +260,15 @@ class _FakeApi implements JobApi {
       'jobId': jobId,
       'state': job.state,
       'operation': job.operation,
-      'stage': job.operation == 'export' ? 'export' : 'register',
+      'stage':
+          job.stageOverride ??
+          (job.operation == 'export' ? 'export' : 'register'),
       'progress': job.progress,
       'workersEffective': job.workers,
       'operationWorkers': job.operation == 'export' ? 1 : job.workers,
       'memoryBudgetMiB': job.memory,
       'exportDestination': job.destination,
+      'events': job.events,
       if (job.error != null) 'error': job.error,
     };
   }
@@ -250,6 +304,16 @@ class _FakeApi implements JobApi {
     final job = jobs[jobId]!;
     job.operation = 'export';
     job.destination = destination;
+    job.events.add({
+      'id': job.events.length + 1,
+      'timestampUtc': (timelineClock?.call() ?? DateTime.now())
+          .toUtc()
+          .millisecondsSinceEpoch,
+      'kind': 'transition',
+      'stage': 'export',
+      'state': 'running',
+      'operation': 'export',
+    });
     if (completeExportWithoutOutput) {
       job.state = 'completed';
       job.progress = 1;
@@ -259,6 +323,7 @@ class _FakeApi implements JobApi {
         'state': 'completed',
         'operation': 'export',
         'exportDestination': destination,
+        'events': job.events,
       };
     }
     job.state = 'running';
@@ -269,6 +334,7 @@ class _FakeApi implements JobApi {
       'state': 'running',
       'operation': 'export',
       'exportDestination': destination,
+      'events': job.events,
     };
   }
 
@@ -281,6 +347,16 @@ class _FakeApi implements JobApi {
   Future<void> finishExport(String jobId) async {
     final job = jobs[jobId]!;
     await File(job.destination!).writeAsBytes([137, 80, 78, 71]);
+    job.events.add({
+      'id': job.events.length + 1,
+      'timestampUtc': (timelineClock?.call() ?? DateTime.now())
+          .toUtc()
+          .millisecondsSinceEpoch,
+      'kind': 'transition',
+      'stage': 'export',
+      'state': 'completed',
+      'operation': 'export',
+    });
     job
       ..state = 'completed'
       ..progress = 1;
@@ -345,11 +421,14 @@ Future<void> _makeFolder(Directory parent, String name, int count) async {
   }
 }
 
-Future<void> _waitUntil(bool Function() condition, [String? reason]) async {
+Future<void> _waitUntil(
+  FutureOr<bool> Function() condition, [
+  String? reason,
+]) async {
   final elapsed = Stopwatch()..start();
   const timeout = Duration(seconds: 20);
   while (elapsed.elapsed < timeout) {
-    if (condition()) return;
+    if (await condition()) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
   fail(
@@ -366,6 +445,7 @@ void main() {
   late BatchQueueRepository queues;
   late _FakeApi api;
   late BatchQueueController controller;
+  BatchQueueController? secondaryController;
   late DateTime currentTime;
 
   setUp(() async {
@@ -381,6 +461,7 @@ void main() {
       ),
     );
     api = _FakeApi();
+    secondaryController = null;
     currentTime = DateTime.utc(2026, 10, 3);
     controller = BatchQueueController(
       api: api,
@@ -392,6 +473,8 @@ void main() {
   });
 
   tearDown(() async {
+    secondaryController?.dispose();
+    await secondaryController?.drain();
     controller.dispose();
     await controller.drain();
     if (await temporary.exists()) await temporary.delete(recursive: true);
@@ -698,6 +781,135 @@ void main() {
   });
 
   test(
+    'storage-denied task removal keeps durable queue ownership and can retry',
+    () async {
+      await _makeFolder(parent, 'storage-denied', 4);
+      final failingTasks = _AccessDeniedTaskRemoval(
+        Directory('${temporary.path}${Platform.pathSeparator}tasks'),
+      );
+      final failingController = secondaryController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: failingTasks,
+        clock: () => currentTime,
+      );
+      await failingController.initialize();
+      await failingController.addParent(parent.path);
+      final queue = failingController.queues.single;
+      final item = queue.items.single;
+      await failingController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.jobs.length == 1);
+      final taskId = failingController.queues.single.items.single.taskId!;
+      final task = failingTasks.values[taskId]!;
+      final original = File(task.photos.first.storedPath);
+      final output = Directory(task.outputDirectory)
+        ..createSync(recursive: true);
+      final exported = File(
+        '${output.path}${Platform.pathSeparator}panorama.png',
+      )..writeAsBytesSync([8, 7, 6, 5]);
+      failingTasks.failNextRemoval = true;
+
+      await expectLater(
+        failingController.removeTask(taskId),
+        throwsA(
+          isA<FileSystemException>().having(
+            (error) => error.osError?.errorCode,
+            'errno',
+            5,
+          ),
+        ),
+      );
+
+      expect(failingController.queues.single.items.single.taskId, taskId);
+      expect((await queues.loadAll()).single.items.single.taskId, taskId);
+      expect(failingTasks.values.containsKey(taskId), isTrue);
+      expect(failingTasks.removed, isNot(contains(taskId)));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+
+      await failingController.removeTask(taskId);
+
+      expect(failingController.queues.single.items, isEmpty);
+      expect((await queues.loadAll()).single.items, isEmpty);
+      expect(failingTasks.values.containsKey(taskId), isFalse);
+      expect(failingTasks.removed, contains(taskId));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+    },
+  );
+
+  test(
+    'queue-save denial keeps in-memory ownership and retry uses tombstoned task cache',
+    () async {
+      await _makeFolder(parent, 'queue-save-denied', 4);
+      final failingQueues = _AccessDeniedBatchQueueSave(
+        Directory('${temporary.path}${Platform.pathSeparator}retry-queues'),
+      );
+      final failingController = secondaryController = BatchQueueController(
+        api: api,
+        queueRepository: failingQueues,
+        taskRepository: tasks,
+        clock: () => currentTime,
+      );
+      await failingController.initialize();
+      await failingController.addParent(parent.path);
+      final queue = failingController.queues.single;
+      final item = queue.items.single;
+      await failingController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.jobs.length == 1);
+      final taskId = failingController.queues.single.items.single.taskId!;
+      final task = tasks.values[taskId]!;
+      final original = File(task.photos.first.storedPath);
+      final output = Directory(task.outputDirectory)
+        ..createSync(recursive: true);
+      final exported = File(
+        '${output.path}${Platform.pathSeparator}panorama.png',
+      )..writeAsBytesSync([8, 7, 6, 5]);
+      failingQueues.failNextSave = true;
+
+      await expectLater(
+        failingController.removeTask(taskId),
+        throwsA(
+          isA<FileSystemException>().having(
+            (error) => error.osError?.errorCode,
+            'errno',
+            5,
+          ),
+        ),
+      );
+
+      expect(failingController.queues.single.items.single.taskId, taskId);
+      expect(
+        (await failingQueues.loadAll()).single.items.single.taskId,
+        taskId,
+      );
+      expect(tasks.values.containsKey(taskId), isFalse);
+      expect(tasks.removed, contains(taskId));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+
+      await failingController.removeTask(taskId);
+
+      expect(failingController.queues.single.items, isEmpty);
+      expect((await failingQueues.loadAll()).single.items, isEmpty);
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+    },
+  );
+
+  test(
     'TIFF batch queue persists format and assigns TIFF export paths',
     () async {
       await _makeFolder(parent, 'tiff-panorama', 4);
@@ -719,7 +931,11 @@ void main() {
       await _waitUntil(() => job.operation == 'export');
       expect(job.destination, endsWith('.tif'));
       expect(job.destination, contains(queue.items.single.taskId!));
-      final restored = await queues.loadAll();
+      var restored = <BatchQueue>[];
+      await _waitUntil(() async {
+        restored = await queues.loadAll();
+        return restored.length == 1;
+      }, 'TIFF queue record to be persisted');
       expect(restored.single.outputFormat, ExportFormat.tiff);
     },
   );
@@ -949,6 +1165,51 @@ void main() {
       expect(pending.phase, StitchPhase.completed);
       expect(api.exports, 1);
       expect(runtimeEvents.last, 'stop');
+    },
+  );
+
+  test(
+    'completed batch export waits for raised shared memory budget',
+    () async {
+      await _makeFolder(parent, 'memory-export-pending', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1);
+      final job = api.jobs.values.single;
+
+      controller.desiredMemoryBudgetMiB = 256;
+      await api.finishRender(job.id);
+      await controller.tick();
+      await _waitUntil(
+        () =>
+            controller.queues.single.items.single.state == BatchItemState.ready,
+      );
+      final deferred = (await tasks.loadById(item.id))!;
+      expect(deferred.phase, StitchPhase.completed);
+      expect(deferred.stage, 'export-pending');
+      expect(api.exports, 0);
+
+      controller.desiredMemoryBudgetMiB = 1024;
+      await controller.tick();
+      await _waitUntil(() => api.exports == 1);
+      expect(job.operation, 'export');
+      await api.finishExport(job.id);
+      await controller.tick();
+      await _waitUntil(
+        () =>
+            controller.queues.single.items.single.state ==
+            BatchItemState.completed,
+      );
+      expect((await tasks.loadById(item.id))!.phase, StitchPhase.completed);
+      expect(api.exports, 1);
     },
   );
 
@@ -1330,6 +1591,472 @@ void main() {
       expect(
         (await reopened.taskForItem(restoredItem))?.sourceDirectory,
         importedTask.sourceDirectory,
+      );
+      reopened.dispose();
+      await reopened.drain();
+    },
+  );
+
+  test(
+    'grouped native stage suppresses duplicate UI rows across raw substep polls',
+    () async {
+      api.timelineClock = () => currentTime;
+      await _makeFolder(parent, 'grouped-stage', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1, 'grouped render start');
+      final job = api.jobs.values.single;
+      job
+        ..stageOverride = 'grid-component-pose-cost'
+        ..events.add({
+          'id': 1,
+          'timestampUtc': currentTime.millisecondsSinceEpoch,
+          'kind': 'transition',
+          'stage': 'optimize-grid-poses',
+          'state': 'running',
+          'operation': 'render',
+        });
+
+      await controller.tick();
+      job.stageOverride = 'grid-component-pose-line-search';
+      await controller.tick();
+
+      final task = (await tasks.loadById(item.taskId!))!;
+      expect(task.stage, 'grid-component-pose-line-search');
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              event.stage == 'optimize-grid-poses',
+        ),
+        isEmpty,
+      );
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              event.stage?.startsWith('grid-component-pose-') == true,
+        ),
+        isEmpty,
+      );
+      expect(
+        task.timeline.events.where(
+          (event) => event.stage == 'optimize-grid-poses',
+        ),
+        hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'retry family history suppresses a raw retry stage UI duplicate',
+    () async {
+      api.timelineClock = () => currentTime;
+      await _makeFolder(parent, 'retry-stage', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1, 'retry render start');
+      final job = api.jobs.values.single;
+      job
+        ..stageOverride = 'retry-matching'
+        ..events.add({
+          'id': 1,
+          'timestampUtc': currentTime.millisecondsSinceEpoch,
+          'kind': 'transition',
+          'stage': 'retry-neighbor-matching',
+          'state': 'running',
+          'operation': 'render',
+        });
+
+      await controller.tick();
+      job.stageOverride = 'retry-feature-extraction';
+      await controller.tick();
+      await controller.tick();
+
+      final task = (await tasks.loadById(item.taskId!))!;
+      expect(task.stage, 'retry-feature-extraction');
+      expect(api.starts, 1, reason: 'status polling must not restart render');
+      expect(
+        task.timeline.events.where(
+          (event) => event.stage == 'retry-neighbor-matching',
+        ),
+        hasLength(1),
+      );
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              canonicalStitchTimelineStage(event.stage) ==
+                  'retry-neighbor-matching',
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'completed batch export is automatically published after private export finishes',
+    () async {
+      const channel = MethodChannel('test.batch-export-auto-publish');
+      var attempts = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            expect(call.method, 'publishExport');
+            attempts++;
+            return {
+              'uri': 'content://provider/document/automatic',
+              'displayName': 'automatic.png',
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      final publisher = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        storageService: MobileStorageService(channel: channel),
+        clock: () => currentTime,
+      );
+      addTearDown(() async {
+        publisher.dispose();
+        await publisher.drain();
+      });
+      await publisher.initialize();
+      api.timelineClock = () => currentTime;
+      await _makeFolder(parent, 'auto-publish', 4);
+      await publisher.addParent(
+        parent.path,
+        settings: const AppSettings(
+          outputDirectory: 'content://provider/tree/output',
+        ),
+      );
+      final importedQueue = publisher.queues.single;
+      final importedItem = importedQueue.items.single;
+      // Synthetic JPEGs have no camera EXIF, so explicitly confirm the grid
+      // and view angle as an operator would before expecting a render to start.
+      await publisher.setSettings(
+        queueId: importedQueue.id,
+        itemId: importedItem.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1, 'batch render to start');
+      final jobId = api.jobs.keys.single;
+      await api.finishRender(jobId);
+      await publisher.tick();
+      await _waitUntil(() => api.exports == 1, 'private export to start');
+      final exportTask = (await tasks.loadById(
+        publisher.queues.single.items.single.taskId!,
+      ))!;
+      expect(exportTask.phase, StitchPhase.exporting);
+      expect(
+        exportTask.timeline.events.where(
+          (event) => event.operation == 'export' && event.state == 'running',
+        ),
+        hasLength(1),
+      );
+      expect(
+        exportTask.timeline.events.any(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              event.operation == 'export' &&
+              event.state == 'exporting',
+        ),
+        isFalse,
+      );
+      await api.finishExport(jobId);
+      await publisher.tick();
+      await _waitUntil(() => attempts == 1, 'automatic publication to finish');
+
+      final item = publisher.queues.single.items.single;
+      final task = (await tasks.loadById(item.taskId!))!;
+      expect(item.state, BatchItemState.completed);
+      expect(task.exportPath, isNotNull);
+      expect(await File(task.exportPath!).exists(), isTrue);
+      expect(task.publishedExportPath, 'content://provider/document/automatic');
+      expect(
+        task.timeline.events.any((event) => event.stage == 'publishing'),
+        isTrue,
+      );
+      expect(
+        task.timeline.events.any((event) => event.stage == 'published'),
+        isTrue,
+      );
+      final uiSequenceIds = task.timeline.events
+          .where((event) => event.id.startsWith('ui:'))
+          .map((event) => int.tryParse(event.id.split(':').last))
+          .whereType<int>()
+          .toList();
+      expect(uiSequenceIds, orderedEquals([...uiSequenceIds]..sort()));
+      expect(uiSequenceIds.toSet(), hasLength(uiSequenceIds.length));
+      expect(api.exports, 1, reason: 'publishing follows one native export');
+    },
+  );
+
+  test(
+    'task removal during a copy blocks stale metadata writes and preserves both exports',
+    () async {
+      const channel = MethodChannel('test.batch-export-generation-guard');
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      var attempts = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            attempts++;
+            entered.complete();
+            await release.future;
+            return {
+              'uri': 'content://provider/document/completed-copy',
+              'displayName': 'private.png',
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+      const taskId = '704-cafe';
+      const queueId = '705-cafe';
+      final child = Directory('${parent.path}${Platform.pathSeparator}guard')
+        ..createSync();
+      final privateExport = File(
+        '${temporary.path}${Platform.pathSeparator}guard.png',
+      )..writeAsBytesSync([5, 6, 7]);
+      tasks.values[taskId] = StitchTask(
+        id: taskId,
+        createdAt: currentTime,
+        sourceDirectory: child.path,
+        outputDirectory:
+            '${temporary.path}${Platform.pathSeparator}guard-render',
+        photos: const [],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 1,
+        phase: StitchPhase.completed,
+        exportPath: privateExport.path,
+        exportDirectory: 'content://provider/tree/output',
+        publishError: 'publish failed',
+      );
+      await queues.save(
+        BatchQueue(
+          id: queueId,
+          createdAt: currentTime,
+          parentDirectory: parent.path,
+          outputDirectory:
+              '${temporary.path}${Platform.pathSeparator}source_stitched',
+          exportDestination: 'content://provider/tree/output',
+          items: [
+            BatchQueueItem(
+              id: '706-cafe',
+              name: 'guard',
+              sourceDirectory: child.path,
+              state: BatchItemState.completed,
+              taskId: taskId,
+            ),
+          ],
+        ),
+      );
+      final publisher = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        storageService: MobileStorageService(channel: channel),
+        clock: () => currentTime,
+      );
+      await publisher.initialize();
+      final retry = publisher.retryPublish(queueId, '706-cafe');
+      await entered.future;
+      await publisher.removeTask(taskId);
+      release.complete();
+      await retry;
+      expect(await tasks.loadById(taskId), isNull);
+      expect(await privateExport.readAsBytes(), [5, 6, 7]);
+      expect(attempts, 1);
+      expect(api.exports, 0);
+      publisher.dispose();
+      await publisher.drain();
+    },
+  );
+
+  test(
+    'new batch tasks snapshot settings defaults and SAF destination',
+    () async {
+      final controller = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+      );
+      addTearDown(() async {
+        controller.dispose();
+        await controller.drain();
+      });
+      await controller.initialize();
+      await _makeFolder(parent, 'settings-snapshot', 4);
+      const settings = AppSettings(
+        exportFormat: ExportFormat.png,
+        refineGridNeighbors: false,
+        seamBlendMode: SeamBlendMode.feather,
+        localTextureWarp: false,
+        performance: PerformanceOptions(fastRegistration: true),
+        outputDirectory: 'content://provider/tree/panoramas',
+      );
+      await controller.addParent(parent.path, settings: settings);
+      final queue = controller.queues.single;
+      final task = (await tasks.loadById(queue.items.single.taskId!))!;
+      expect(queue.exportDestination, settings.outputDirectory);
+      expect(queue.outputFormat, ExportFormat.png);
+      expect(task.exportDirectory, settings.outputDirectory);
+      expect(task.exportFormat, ExportFormat.png);
+      expect(task.refineGridNeighbors, isFalse);
+      expect(task.seamBlendMode, SeamBlendMode.feather);
+      expect(task.localTextureWarp, isFalse);
+      expect(task.performanceOptions.fastRegistration, isTrue);
+    },
+  );
+
+  test(
+    'failed Android publication preserves private export and retries copy only once',
+    () async {
+      const channel = MethodChannel('test.batch-export-publish');
+      var attempts = 0;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            expect(call.method, 'publishExport');
+            attempts++;
+            if (attempts == 1) {
+              throw PlatformException(
+                code: 'PUBLISH_FAILED',
+                message: 'storage full',
+              );
+            }
+            return {
+              'uri': 'content://provider/document/new-copy',
+              'displayName': 'panorama.png',
+            };
+          });
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null),
+      );
+
+      const taskId = '701-cafe';
+      const queueId = '702-cafe';
+      final child = Directory('${parent.path}${Platform.pathSeparator}publish')
+        ..createSync();
+      final privateExport = File(
+        '${temporary.path}${Platform.pathSeparator}private.png',
+      )..writeAsBytesSync([1, 2, 3, 4]);
+      tasks.values[taskId] = StitchTask(
+        id: taskId,
+        createdAt: currentTime,
+        sourceDirectory: child.path,
+        outputDirectory: '${temporary.path}${Platform.pathSeparator}render',
+        photos: const [],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 1,
+        phase: StitchPhase.completed,
+        nativeJobId: 'native-job',
+        exportPath: privateExport.path,
+        exportDirectory: 'content://provider/tree/output',
+        publishedExportPath: 'content://provider/document/previous',
+        publishError: 'previous attempt failed',
+      );
+      await queues.save(
+        BatchQueue(
+          id: queueId,
+          createdAt: currentTime,
+          parentDirectory: parent.path,
+          outputDirectory:
+              '${temporary.path}${Platform.pathSeparator}source_stitched',
+          exportDestination: 'content://provider/tree/output',
+          items: [
+            BatchQueueItem(
+              id: '703-cafe',
+              name: 'publish',
+              sourceDirectory: child.path,
+              state: BatchItemState.completed,
+              taskId: taskId,
+            ),
+          ],
+        ),
+      );
+
+      BatchQueueController makePublisher() => BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        storageService: MobileStorageService(channel: channel),
+        clock: () => currentTime,
+      );
+      final publisher = makePublisher();
+      await publisher.initialize();
+      await publisher.retryPublish(queueId, '703-cafe');
+      var persisted = (await tasks.loadById(taskId))!;
+      expect(persisted.exportPath, privateExport.path);
+      expect(await privateExport.readAsBytes(), [1, 2, 3, 4]);
+      expect(
+        persisted.publishedExportPath,
+        'content://provider/document/previous',
+      );
+      expect(persisted.publishError, contains('PUBLISH_FAILED'));
+      expect(
+        persisted.timeline.events.any(
+          (event) => event.kind == 'publish-failed' && event.state == 'failed',
+        ),
+        isTrue,
+      );
+
+      await publisher.retryPublish(queueId, '703-cafe');
+      persisted = (await tasks.loadById(taskId))!;
+      expect(
+        persisted.publishedExportPath,
+        'content://provider/document/new-copy',
+      );
+      expect(persisted.publishError, isNull);
+      expect(
+        persisted.timeline.events.any(
+          (event) => event.kind == 'publish' && event.state == 'completed',
+        ),
+        isTrue,
+      );
+      expect(await privateExport.exists(), isTrue);
+      expect(attempts, 2);
+      expect(
+        api.exports,
+        0,
+        reason: 'publishing retries copy the completed file',
+      );
+      publisher.dispose();
+      await publisher.drain();
+
+      final reopened = makePublisher();
+      await reopened.initialize();
+      await reopened.retryPublish(queueId, '703-cafe');
+      expect(
+        attempts,
+        2,
+        reason: 'a completed publish is not duplicated on reopen',
       );
       reopened.dispose();
       await reopened.drain();

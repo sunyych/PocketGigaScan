@@ -3,7 +3,7 @@ use crate::{
     Error, Result,
 };
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::{c_char, c_void, CString},
     path::{Path, PathBuf},
 };
@@ -12,6 +12,22 @@ extern "C" {
     fn lg_sift_batch_begin() -> *mut c_void;
     fn lg_sift_batch_end(guard: *mut c_void);
     fn lg_sift_features_create_batch(
+        path: *const c_char,
+        feature_count: *mut i32,
+        maximum_pixels: usize,
+        contrast_threshold: f64,
+        guard: *mut c_void,
+        use_orb: i32,
+    ) -> *mut c_void;
+    fn lg_sift_features_create_contrast_batch(
+        path: *const c_char,
+        feature_count: *mut i32,
+        maximum_pixels: usize,
+        contrast_threshold: f64,
+        guard: *mut c_void,
+        use_orb: i32,
+    ) -> *mut c_void;
+    fn lg_sift_features_create_clahe_batch(
         path: *const c_char,
         feature_count: *mut i32,
         maximum_pixels: usize,
@@ -93,6 +109,38 @@ pub(crate) struct SphericalMatchEdge {
     pub clahe_retry: Option<SphericalMatchAttempt>,
     pub used_retry: bool,
     pub used_clahe_retry: bool,
+}
+
+fn missing_retry_endpoints(
+    batch: &[usize],
+    edges: &[SphericalMatchEdge],
+    mut is_cached: impl FnMut(usize) -> bool,
+) -> Vec<usize> {
+    let mut needed = Vec::with_capacity(batch.len().saturating_mul(2));
+    let mut seen = HashSet::with_capacity(batch.len().saturating_mul(2));
+    for &edge_index in batch {
+        let edge = &edges[edge_index];
+        for tile in [edge.from, edge.to] {
+            if !is_cached(tile) && seen.insert(tile) {
+                needed.push(tile);
+            }
+        }
+    }
+    needed
+}
+
+fn retry_endpoint_last_use(
+    edge_indices: &[usize],
+    edges: &[SphericalMatchEdge],
+    tile_count: usize,
+) -> Vec<Option<usize>> {
+    let mut last_use = vec![None; tile_count];
+    for (use_index, &edge_index) in edge_indices.iter().enumerate() {
+        let edge = &edges[edge_index];
+        last_use[edge.from] = Some(use_index);
+        last_use[edge.to] = Some(use_index);
+    }
+    last_use
 }
 
 #[derive(Clone)]
@@ -211,12 +259,9 @@ pub(crate) fn spherical_overlap_matches(
     Ok(output)
 }
 
-/// Stable row-major cell-index pairs; callers map cells to tile indices before matching.
-pub(crate) fn spherical_neighbor_pairs(
-    rows: usize,
-    columns: usize,
-    eight: bool,
-) -> Vec<(usize, usize)> {
+/// Stable row-major pairs for the fixed eight-neighbor grid graph. Each
+/// unordered immediate cardinal or diagonal pair is emitted once.
+pub(crate) fn spherical_neighbor_pairs(rows: usize, columns: usize) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     for row in 0..rows {
         for column in 0..columns {
@@ -227,10 +272,10 @@ pub(crate) fn spherical_neighbor_pairs(
             if row + 1 < rows {
                 pairs.push((from, from + columns));
             }
-            if eight && row + 1 < rows && column + 1 < columns {
+            if row + 1 < rows && column + 1 < columns {
                 pairs.push((from, from + columns + 1));
             }
-            if eight && row + 1 < rows && column > 0 {
+            if row + 1 < rows && column > 0 {
                 pairs.push((from, from + columns - 1));
             }
         }
@@ -319,7 +364,7 @@ pub(crate) fn spherical_match_edges(
     maximum_pixels: usize,
     thread_limit: i32,
     retry_contrast_threshold: f64,
-    neighbor_mode: &str,
+    _neighbor_mode: &str,
     matching_workers: usize,
     feature_type: &str,
     matcher_type: &str,
@@ -337,6 +382,8 @@ pub(crate) fn spherical_match_edges(
     u64,
     u64,
     u64,
+    RetryStageTimings,
+    RetryStageTimings,
 )> {
     if rows == 0 || columns == 0 || rows.checked_mul(columns) != Some(tiles.len()) {
         return Err(Error::Invalid("invalid spherical registration grid".into()));
@@ -363,7 +410,7 @@ pub(crate) fn spherical_match_edges(
         ));
     }
     let mut edges = Vec::new();
-    let pairs = spherical_neighbor_pairs(rows, columns, neighbor_mode == "eight");
+    let pairs = spherical_neighbor_pairs(rows, columns);
     let initial_match_started = std::time::Instant::now();
     let effective_matching_workers = matching_workers.min(pairs.len().max(1));
     let matching_guard = FeatureBatchGuard::begin()?;
@@ -401,70 +448,6 @@ pub(crate) fn spherical_match_edges(
             edges.push(result.map_err(|_| Error::Registration("matching worker panicked".into()))?);
         }
     }
-    if neighbor_mode == "adaptive" {
-        // Add only diagonal neighbors that join separate components of the
-        // accepted cardinal graph. This keeps recovery local to unresolved
-        // regions and avoids comparing unrelated tiles.
-        let mut parent = (0..tiles.len()).collect::<Vec<_>>();
-        fn root(parent: &mut [usize], mut index: usize) -> usize {
-            while parent[index] != index {
-                index = parent[index];
-            }
-            index
-        }
-        for edge in edges.iter().filter(|edge| edge.reason == 0) {
-            let (a, b) = (root(&mut parent, edge.from), root(&mut parent, edge.to));
-            if a != b {
-                parent[b] = a;
-            }
-        }
-        let diagonals = spherical_neighbor_pairs(rows, columns, true)
-            .into_iter()
-            .filter(|(a, b)| {
-                (a / columns).abs_diff(b / columns) == 1 && (a % columns).abs_diff(b % columns) == 1
-            })
-            .filter(|(a, b)| {
-                let from = cells[&(*a / columns, *a % columns)];
-                let to = cells[&(*b / columns, *b % columns)];
-                root(&mut parent, from) != root(&mut parent, to)
-            })
-            .collect::<Vec<_>>();
-        for batch in diagonals.chunks(effective_matching_workers) {
-            checkpoint("adaptive-diagonal-matching").map_err(|_| Error::Cancelled)?;
-            let results = std::thread::scope(|scope| {
-                batch
-                    .iter()
-                    .map(|&(a, b)| {
-                        let cells = &cells;
-                        let frames = &frames;
-                        let matcher_type = matcher_type;
-                        scope.spawn(move || {
-                            let from = cells[&(a / columns, a % columns)];
-                            let to = cells[&(b / columns, b % columns)];
-                            match_spherical_pair(
-                                from,
-                                to,
-                                &frames[from],
-                                &frames[to],
-                                0.015,
-                                false,
-                                matcher_type == "flann",
-                                matching_guard_token,
-                            )
-                        })
-                    })
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .map(|handle| handle.join())
-                    .collect::<Vec<_>>()
-            });
-            for result in results {
-                edges.push(
-                    result.map_err(|_| Error::Registration("matching worker panicked".into()))?,
-                );
-            }
-        }
-    }
     drop(matching_guard);
     checkpoint("initial-matching-complete").map_err(|_| Error::Cancelled)?;
     let initial_matching_ms = initial_match_started.elapsed().as_millis() as u64;
@@ -479,11 +462,7 @@ pub(crate) fn spherical_match_edges(
         .enumerate()
         .filter_map(|(index, edge)| (edge.reason != 0).then_some(index))
         .collect::<Vec<_>>();
-    let mut endpoint_last_use = vec![None; tiles.len()];
-    for (use_index, edge_index) in failed_edge_indices.iter().enumerate() {
-        endpoint_last_use[edges[*edge_index].from] = Some(use_index);
-        endpoint_last_use[edges[*edge_index].to] = Some(use_index);
-    }
+    let endpoint_last_use = retry_endpoint_last_use(&failed_edge_indices, &edges, tiles.len());
     let mut retry_frames = (0..tiles.len())
         .map(|_| None)
         .collect::<Vec<Option<NativeFeatures>>>();
@@ -492,77 +471,117 @@ pub(crate) fn spherical_match_edges(
     let mut peak_retry_features = 0usize;
     let mut active_retry_frames = 0usize;
     let mut peak_retry_frames = 0usize;
+    let mut low_contrast_timings = RetryStageTimings::default();
     let retry_started = std::time::Instant::now();
-    for (use_index, edge_index) in failed_edge_indices.into_iter().enumerate() {
+    let retry_batch_size = effective_matching_workers.min(failed_edge_indices.len().max(1));
+    let retry_total = failed_edge_indices.len();
+    let mut retry_completed = 0usize;
+    for batch in failed_edge_indices.chunks(retry_batch_size) {
         checkpoint("retry-matching").map_err(|_| Error::Cancelled)?;
-        let (edge_from, edge_to) = (edges[edge_index].from, edges[edge_index].to);
-        for index in [edge_from, edge_to] {
-            if retry_frames[index].is_none() {
-                checkpoint("retry-feature-extraction").map_err(|_| Error::Cancelled)?;
-                let frame = NativeFeatures::from_path_with_contrast(
-                    &tiles[index].path,
-                    maximum_pixels,
-                    thread_limit,
-                    retry_contrast_threshold,
-                    feature_type == "orb",
-                );
-                let count = feature_count(&frame);
-                retry_feature_count += count;
-                active_retry_features += count;
-                active_retry_frames += 1;
-                peak_retry_features = peak_retry_features.max(active_retry_features);
-                peak_retry_frames = peak_retry_frames.max(active_retry_frames);
-                retry_frames[index] = Some(frame);
-            }
-        }
-        let (Some(from), Some(to)) = (
-            retry_frames[edge_from].as_ref(),
-            retry_frames[edge_to].as_ref(),
-        ) else {
-            continue;
-        };
-        let retry_guard = FeatureBatchGuard::begin()?;
-        let retry = match_spherical_pair(
-            edge_from,
-            edge_to,
-            from,
-            to,
+        let missing = missing_retry_endpoints(batch, &edges, |index| retry_frames[index].is_some());
+        // With one worker keep the historical per-frame OpenCV thread limit.
+        // Otherwise, extract the same missing endpoints under one exclusive
+        // guard with one OpenCV thread per frame, bounded by matching_workers.
+        let extraction = extract_retry_endpoints(
+            &missing,
+            tiles,
+            maximum_pixels,
+            thread_limit,
             retry_contrast_threshold,
             false,
-            matcher_type == "flann",
-            retry_guard.token(),
-        );
-        drop(retry_guard);
-        let edge = &mut edges[edge_index];
-        edge.retry = Some(SphericalMatchAttempt {
-            from_features: retry.from_features,
-            to_features: retry.to_features,
-            matches: retry.matches,
-            inliers: retry.inliers,
-            inlier_ratio: retry.inlier_ratio,
-            reason: retry.reason,
-            contrast_threshold: retry_contrast_threshold,
-            clahe: false,
+            feature_type == "orb",
+            effective_matching_workers,
+            "retry-feature-extraction",
+            &mut retry_frames,
+            checkpoint,
+        )?;
+        low_contrast_timings.extraction_ms += extraction.extraction_ms;
+        low_contrast_timings.extracted_endpoint_count += extraction.extracted_endpoint_count;
+        low_contrast_timings.extracted_feature_count += extraction.extracted_feature_count;
+        retry_feature_count += extraction.extracted_feature_count;
+        active_retry_features += extraction.extracted_feature_count;
+        active_retry_frames += extraction.extracted_endpoint_count;
+        peak_retry_features = peak_retry_features.max(active_retry_features);
+        peak_retry_frames = peak_retry_frames.max(active_retry_frames);
+        let retry_guard = FeatureBatchGuard::begin()?;
+        let retry_guard_token = retry_guard.token();
+        let matching_started = std::time::Instant::now();
+        let retry_results = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|&edge_index| {
+                    let edge = &edges[edge_index];
+                    let source = retry_frames[edge.from]
+                        .as_ref()
+                        .expect("retry source endpoint extracted");
+                    let target = retry_frames[edge.to]
+                        .as_ref()
+                        .expect("retry target endpoint extracted");
+                    let (from, to) = (edge.from, edge.to);
+                    let use_flann = matcher_type == "flann";
+                    scope.spawn(move || {
+                        match_spherical_pair(
+                            from,
+                            to,
+                            source,
+                            target,
+                            retry_contrast_threshold,
+                            false,
+                            use_flann,
+                            retry_guard_token,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
         });
-        if retry.reason == 0 {
-            edge.from_features = retry.from_features;
-            edge.to_features = retry.to_features;
-            edge.matches = retry.matches;
-            edge.inliers = retry.inliers;
-            edge.inlier_ratio = retry.inlier_ratio;
-            edge.homography_residual = retry.homography_residual;
-            edge.reason = retry.reason;
-            edge.points = retry.points;
-            edge.used_retry = true;
-        }
-        for index in [edge_from, edge_to] {
-            if endpoint_last_use[index] == Some(use_index) {
-                if let Some(frame) = retry_frames[index].take() {
-                    active_retry_features -= feature_count(&frame);
-                    active_retry_frames -= 1;
+        low_contrast_timings.matching_ms += matching_started.elapsed().as_millis() as u64;
+        drop(retry_guard);
+        checkpoint("retry-matching").map_err(|_| Error::Cancelled)?;
+        for (batch_offset, (&edge_index, result)) in batch.iter().zip(retry_results).enumerate() {
+            checkpoint("retry-matching").map_err(|_| Error::Cancelled)?;
+            let retry =
+                result.map_err(|_| Error::Registration("matching worker panicked".into()))?;
+            let (edge_from, edge_to) = (edges[edge_index].from, edges[edge_index].to);
+            let edge = &mut edges[edge_index];
+            edge.retry = Some(SphericalMatchAttempt {
+                from_features: retry.from_features,
+                to_features: retry.to_features,
+                matches: retry.matches,
+                inliers: retry.inliers,
+                inlier_ratio: retry.inlier_ratio,
+                reason: retry.reason,
+                contrast_threshold: retry_contrast_threshold,
+                clahe: false,
+            });
+            if retry.reason == 0 {
+                edge.from_features = retry.from_features;
+                edge.to_features = retry.to_features;
+                edge.matches = retry.matches;
+                edge.inliers = retry.inliers;
+                edge.inlier_ratio = retry.inlier_ratio;
+                edge.homography_residual = retry.homography_residual;
+                edge.reason = retry.reason;
+                edge.points = retry.points;
+                edge.used_retry = true;
+            }
+            let use_index = retry_completed + batch_offset;
+            for index in [edge_from, edge_to] {
+                if endpoint_last_use[index] == Some(use_index) {
+                    if let Some(frame) = retry_frames[index].take() {
+                        active_retry_features -= feature_count(&frame);
+                        active_retry_frames -= 1;
+                    }
                 }
             }
         }
+        retry_completed += batch.len();
+        checkpoint(&format!(
+            "retry-matching-progress:{retry_completed}/{retry_total}"
+        ))
+        .map_err(|_| Error::Cancelled)?;
     }
     let retry_endpoint_count = endpoint_last_use
         .iter()
@@ -579,11 +598,7 @@ pub(crate) fn spherical_match_edges(
         .filter_map(|(index, edge)| (edge.reason != 0).then_some(index))
         .collect::<Vec<_>>();
     let mut clahe_retry_feature_count = 0usize;
-    let mut last_clahe_use = vec![None; tiles.len()];
-    for (use_index, edge_index) in failed_pairs.iter().enumerate() {
-        last_clahe_use[edges[*edge_index].from] = Some(use_index);
-        last_clahe_use[edges[*edge_index].to] = Some(use_index);
-    }
+    let last_clahe_use = retry_endpoint_last_use(&failed_pairs, &edges, tiles.len());
     let mut clahe_frames = (0..tiles.len())
         .map(|_| None)
         .collect::<Vec<Option<NativeFeatures>>>();
@@ -591,76 +606,117 @@ pub(crate) fn spherical_match_edges(
     let mut peak_clahe_features = 0usize;
     let mut active_clahe_frames = 0usize;
     let mut peak_clahe_frames = 0usize;
+    let mut clahe_timings = RetryStageTimings::default();
     let clahe_started = std::time::Instant::now();
-    for (use_index, edge_index) in failed_pairs.into_iter().enumerate() {
+    let clahe_batch_size = effective_matching_workers.min(failed_pairs.len().max(1));
+    let clahe_total = failed_pairs.len();
+    let mut clahe_completed = 0usize;
+    for batch in failed_pairs.chunks(clahe_batch_size) {
         checkpoint("clahe-retry").map_err(|_| Error::Cancelled)?;
-        let (from_index, to_index) = (edges[edge_index].from, edges[edge_index].to);
-        for index in [from_index, to_index] {
-            if clahe_frames[index].is_none() {
-                let frame = NativeFeatures::from_path_with_clahe(
-                    &tiles[index].path,
-                    maximum_pixels,
-                    thread_limit,
-                    retry_contrast_threshold,
-                    feature_type == "orb",
-                );
-                active_clahe_features += feature_count(&frame);
-                active_clahe_frames += 1;
-                peak_clahe_features = peak_clahe_features.max(active_clahe_features);
-                peak_clahe_frames = peak_clahe_frames.max(active_clahe_frames);
-                clahe_frames[index] = Some(frame);
-            }
-        }
-        let (Some(from), Some(to)) = (
-            clahe_frames[from_index].as_ref(),
-            clahe_frames[to_index].as_ref(),
-        ) else {
-            continue;
-        };
-        let edge = &mut edges[edge_index];
-        clahe_retry_feature_count += from.count + to.count;
-        let clahe_guard = FeatureBatchGuard::begin()?;
-        let clahe = match_spherical_pair(
-            edge.from,
-            edge.to,
-            &from,
-            &to,
+        let missing = missing_retry_endpoints(batch, &edges, |index| clahe_frames[index].is_some());
+        let extraction = extract_retry_endpoints(
+            &missing,
+            tiles,
+            maximum_pixels,
+            thread_limit,
             retry_contrast_threshold,
             true,
-            matcher_type == "flann",
-            clahe_guard.token(),
-        );
-        drop(clahe_guard);
-        edge.clahe_retry = Some(SphericalMatchAttempt {
-            from_features: clahe.from_features,
-            to_features: clahe.to_features,
-            matches: clahe.matches,
-            inliers: clahe.inliers,
-            inlier_ratio: clahe.inlier_ratio,
-            reason: clahe.reason,
-            contrast_threshold: retry_contrast_threshold,
-            clahe: true,
+            feature_type == "orb",
+            effective_matching_workers,
+            "clahe-retry",
+            &mut clahe_frames,
+            checkpoint,
+        )?;
+        clahe_timings.extraction_ms += extraction.extraction_ms;
+        clahe_timings.extracted_endpoint_count += extraction.extracted_endpoint_count;
+        clahe_timings.extracted_feature_count += extraction.extracted_feature_count;
+        active_clahe_features += extraction.extracted_feature_count;
+        active_clahe_frames += extraction.extracted_endpoint_count;
+        peak_clahe_features = peak_clahe_features.max(active_clahe_features);
+        peak_clahe_frames = peak_clahe_frames.max(active_clahe_frames);
+        let clahe_guard = FeatureBatchGuard::begin()?;
+        let clahe_guard_token = clahe_guard.token();
+        let matching_started = std::time::Instant::now();
+        let clahe_results = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|&edge_index| {
+                    let edge = &edges[edge_index];
+                    let source = clahe_frames[edge.from]
+                        .as_ref()
+                        .expect("CLAHE source endpoint extracted");
+                    let target = clahe_frames[edge.to]
+                        .as_ref()
+                        .expect("CLAHE target endpoint extracted");
+                    let (from, to) = (edge.from, edge.to);
+                    let use_flann = matcher_type == "flann";
+                    scope.spawn(move || {
+                        match_spherical_pair(
+                            from,
+                            to,
+                            source,
+                            target,
+                            retry_contrast_threshold,
+                            true,
+                            use_flann,
+                            clahe_guard_token,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| handle.join())
+                .collect::<Vec<_>>()
         });
-        if clahe.reason == 0 {
-            edge.from_features = clahe.from_features;
-            edge.to_features = clahe.to_features;
-            edge.matches = clahe.matches;
-            edge.inliers = clahe.inliers;
-            edge.inlier_ratio = clahe.inlier_ratio;
-            edge.homography_residual = clahe.homography_residual;
-            edge.reason = clahe.reason;
-            edge.points = clahe.points;
-            edge.used_clahe_retry = true;
-            edge.used_retry = false;
-        }
-        for index in [from_index, to_index] {
-            if last_clahe_use[index] == Some(use_index) {
-                if let Some(frame) = clahe_frames[index].take() {
-                    active_clahe_features -= feature_count(&frame);
-                    active_clahe_frames -= 1;
+        clahe_timings.matching_ms += matching_started.elapsed().as_millis() as u64;
+        drop(clahe_guard);
+        checkpoint("clahe-retry").map_err(|_| Error::Cancelled)?;
+        for (batch_offset, (&edge_index, result)) in batch.iter().zip(clahe_results).enumerate() {
+            checkpoint("clahe-retry").map_err(|_| Error::Cancelled)?;
+            let clahe =
+                result.map_err(|_| Error::Registration("matching worker panicked".into()))?;
+            let (from_index, to_index) = (edges[edge_index].from, edges[edge_index].to);
+            // Historical field is the per-edge sum of endpoint counts (so a
+            // tile reused by several failed pairs contributes several times).
+            clahe_retry_feature_count += clahe.from_features + clahe.to_features;
+            let edge = &mut edges[edge_index];
+            edge.clahe_retry = Some(SphericalMatchAttempt {
+                from_features: clahe.from_features,
+                to_features: clahe.to_features,
+                matches: clahe.matches,
+                inliers: clahe.inliers,
+                inlier_ratio: clahe.inlier_ratio,
+                reason: clahe.reason,
+                contrast_threshold: retry_contrast_threshold,
+                clahe: true,
+            });
+            if clahe.reason == 0 {
+                edge.from_features = clahe.from_features;
+                edge.to_features = clahe.to_features;
+                edge.matches = clahe.matches;
+                edge.inliers = clahe.inliers;
+                edge.inlier_ratio = clahe.inlier_ratio;
+                edge.homography_residual = clahe.homography_residual;
+                edge.reason = clahe.reason;
+                edge.points = clahe.points;
+                edge.used_clahe_retry = true;
+                edge.used_retry = false;
+            }
+            let use_index = clahe_completed + batch_offset;
+            for index in [from_index, to_index] {
+                if last_clahe_use[index] == Some(use_index) {
+                    if let Some(frame) = clahe_frames[index].take() {
+                        active_clahe_features -= feature_count(&frame);
+                        active_clahe_frames -= 1;
+                    }
                 }
             }
         }
+        clahe_completed += batch.len();
+        checkpoint(&format!(
+            "clahe-retry-progress:{clahe_completed}/{clahe_total}"
+        ))
+        .map_err(|_| Error::Cancelled)?;
     }
     let clahe_retry_ms = clahe_started.elapsed().as_millis() as u64;
     Ok((
@@ -676,6 +732,8 @@ pub(crate) fn spherical_match_edges(
         initial_matching_ms,
         low_contrast_retry_ms,
         clahe_retry_ms,
+        low_contrast_timings,
+        clahe_timings,
     ))
 }
 
@@ -844,6 +902,48 @@ impl NativeFeatures {
         }
     }
 
+    fn from_path_retry_batch(
+        path: &Path,
+        maximum_pixels: usize,
+        contrast_threshold: f64,
+        clahe: bool,
+        guard: &FeatureBatchGuard,
+        use_orb: bool,
+    ) -> Self {
+        let Ok(path) = CString::new(path.to_string_lossy().as_bytes()) else {
+            return Self {
+                ptr: std::ptr::null_mut(),
+                count: 0,
+            };
+        };
+        let mut count = 0;
+        let ptr = unsafe {
+            if clahe {
+                lg_sift_features_create_clahe_batch(
+                    path.as_ptr(),
+                    &mut count,
+                    maximum_pixels,
+                    contrast_threshold,
+                    guard.0,
+                    i32::from(use_orb),
+                )
+            } else {
+                lg_sift_features_create_contrast_batch(
+                    path.as_ptr(),
+                    &mut count,
+                    maximum_pixels,
+                    contrast_threshold,
+                    guard.0,
+                    i32::from(use_orb),
+                )
+            }
+        };
+        Self {
+            ptr,
+            count: count.max(0) as usize,
+        }
+    }
+
     pub(crate) fn from_path_with_clahe(
         path: &Path,
         maximum_pixels: usize,
@@ -949,6 +1049,100 @@ unsafe impl Send for NativeFeatures {}
 // SAFETY: native frames are immutable after construction; the shared native
 // mutex prevents matching from overlapping extraction or global thread edits.
 unsafe impl Sync for NativeFeatures {}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RetryStageTimings {
+    pub extraction_ms: u64,
+    pub matching_ms: u64,
+    pub extracted_endpoint_count: usize,
+    pub extracted_feature_count: usize,
+}
+
+fn extract_retry_endpoints(
+    missing: &[usize],
+    tiles: &[CaptureTile],
+    maximum_pixels: usize,
+    thread_limit: i32,
+    contrast_threshold: f64,
+    clahe: bool,
+    use_orb: bool,
+    matching_workers: usize,
+    checkpoint_stage: &str,
+    frames: &mut [Option<NativeFeatures>],
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+) -> Result<RetryStageTimings> {
+    let started = std::time::Instant::now();
+    if missing.is_empty() {
+        return Ok(RetryStageTimings::default());
+    }
+    let mut stats = RetryStageTimings::default();
+    if matching_workers < 2 {
+        for &index in missing {
+            checkpoint(checkpoint_stage).map_err(|_| Error::Cancelled)?;
+            let frame = if clahe {
+                NativeFeatures::from_path_with_clahe(
+                    &tiles[index].path,
+                    maximum_pixels,
+                    thread_limit,
+                    contrast_threshold,
+                    use_orb,
+                )
+            } else {
+                NativeFeatures::from_path_with_contrast(
+                    &tiles[index].path,
+                    maximum_pixels,
+                    thread_limit,
+                    contrast_threshold,
+                    use_orb,
+                )
+            };
+            stats.extracted_feature_count += feature_count(&frame);
+            stats.extracted_endpoint_count += 1;
+            frames[index] = Some(frame);
+        }
+    } else {
+        let guard = FeatureBatchGuard::begin()?;
+        for batch in missing.chunks(matching_workers) {
+            for _ in batch {
+                checkpoint(checkpoint_stage).map_err(|_| Error::Cancelled)?;
+            }
+            let results = std::thread::scope(|scope| {
+                batch
+                    .iter()
+                    .map(|&index| {
+                        let guard = &guard;
+                        let path = &tiles[index].path;
+                        scope.spawn(move || {
+                            (
+                                index,
+                                NativeFeatures::from_path_retry_batch(
+                                    path,
+                                    maximum_pixels,
+                                    contrast_threshold,
+                                    clahe,
+                                    guard,
+                                    use_orb,
+                                ),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|handle| handle.join())
+                    .collect::<Vec<_>>()
+            });
+            for result in results {
+                let (index, frame) =
+                    result.map_err(|_| Error::Registration("feature worker panicked".into()))?;
+                stats.extracted_feature_count += feature_count(&frame);
+                stats.extracted_endpoint_count += 1;
+                frames[index] = Some(frame);
+            }
+        }
+    }
+    stats.extraction_ms = started.elapsed().as_millis() as u64;
+    Ok(stats)
+}
 
 #[derive(Clone, Debug)]
 struct Edge {
@@ -1671,11 +1865,250 @@ impl Registration {
 
 #[cfg(test)]
 mod tests {
-    use super::{place_edges, Edge, ProjectiveTransform, Registration};
-    use crate::metadata::StitchOptions;
+    use super::{
+        extract_retry_endpoints, feature_count, match_spherical_pair, missing_retry_endpoints,
+        place_edges, retry_endpoint_last_use, Edge, FeatureBatchGuard, ProjectiveTransform,
+        Registration, SphericalMatchAttempt, SphericalMatchEdge,
+    };
+    use crate::metadata::{CaptureTile, StitchOptions};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 1e-9, "{a} != {b}");
+    }
+
+    fn failed_match_edge(from: usize, to: usize) -> SphericalMatchEdge {
+        let attempt = SphericalMatchAttempt {
+            from_features: 0,
+            to_features: 0,
+            matches: 0,
+            inliers: 0,
+            inlier_ratio: 0.0,
+            reason: 1,
+            contrast_threshold: 0.04,
+            clahe: false,
+        };
+        SphericalMatchEdge {
+            from,
+            to,
+            from_features: 0,
+            to_features: 0,
+            matches: 0,
+            inliers: 0,
+            inlier_ratio: 0.0,
+            homography_residual: 0.0,
+            reason: 1,
+            points: Vec::new(),
+            initial: attempt,
+            retry: None,
+            clahe_retry: None,
+            used_retry: false,
+            used_clahe_retry: false,
+        }
+    }
+
+    #[test]
+    fn retry_batches_deduplicate_endpoints_and_release_at_global_last_use() {
+        let edges = [
+            failed_match_edge(0, 1),
+            failed_match_edge(1, 2),
+            failed_match_edge(2, 3),
+            failed_match_edge(3, 4),
+        ];
+        let all = [0, 1, 2, 3];
+        let last_use = retry_endpoint_last_use(&all, &edges, 5);
+        let mut cached = [false; 5];
+
+        // Two adjacent edges share tile 1, so the batch extracts it once. The
+        // retained set is at most 2 * workers missing endpoints.
+        let first = missing_retry_endpoints(&[0, 1], &edges, |tile| cached[tile]);
+        assert_eq!(first, [0, 1, 2]);
+        assert!(first.len() <= 2 * 2);
+        for tile in first {
+            cached[tile] = true;
+        }
+        for tile in [0, 1] {
+            if last_use[tile] == Some(0) {
+                cached[tile] = false;
+            }
+        }
+        for tile in [1, 2] {
+            if last_use[tile] == Some(1) {
+                cached[tile] = false;
+            }
+        }
+        assert_eq!(cached, [false, false, true, false, false]);
+
+        let second = missing_retry_endpoints(&[2, 3], &edges, |tile| cached[tile]);
+        assert_eq!(second, [3, 4]);
+        assert!(second.len() <= 2 * 2);
+    }
+
+    fn synthetic_retry_tiles() -> (std::path::PathBuf, Vec<CaptureTile>) {
+        static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "pocket-gigascan-retry-batch-{}-{}",
+            std::process::id(),
+            NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let global = ::image::GrayImage::from_fn(544, 416, |x, y| {
+            let mut value = (x as u64).wrapping_mul(0x9e37_79b1)
+                ^ (y as u64).wrapping_mul(0x85eb_ca77)
+                ^ (x as u64).wrapping_mul(y as u64).wrapping_mul(0xc2b2_ae3d);
+            value ^= value >> 29;
+            value = value.wrapping_mul(0x1656_67b1_9e37_79f9);
+            value ^= value >> 32;
+            ::image::Luma([(value & 0xff) as u8])
+        });
+        let mut tiles = Vec::new();
+        for (column, offset) in [(0usize, (0u32, 0u32)), (1, (24, 16))] {
+            let path = root.join(format!("tile-{column}.png"));
+            ::image::imageops::crop_imm(&global, offset.0, offset.1, 512, 384)
+                .to_image()
+                .save(&path)
+                .unwrap();
+            tiles.push(CaptureTile {
+                row: 0,
+                column,
+                path,
+                geometry: None,
+            });
+        }
+        (root, tiles)
+    }
+
+    #[test]
+    fn batched_retry_extraction_matches_serial_features_and_edges_and_releases_on_cancel() {
+        let (root, tiles) = synthetic_retry_tiles();
+        for clahe in [false, true] {
+            let mut serial = vec![None, None];
+            let mut parallel = vec![None, None];
+            let mut no_cancel = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+            let serial_stats = extract_retry_endpoints(
+                &[0, 1],
+                &tiles,
+                196_608,
+                2,
+                0.004,
+                clahe,
+                false,
+                1,
+                "retry-feature-extraction",
+                &mut serial,
+                &mut no_cancel,
+            )
+            .unwrap();
+            let parallel_stats = extract_retry_endpoints(
+                &[0, 1],
+                &tiles,
+                196_608,
+                2,
+                0.004,
+                clahe,
+                false,
+                2,
+                "retry-feature-extraction",
+                &mut parallel,
+                &mut no_cancel,
+            )
+            .unwrap();
+            assert_eq!(serial_stats.extracted_endpoint_count, 2);
+            assert_eq!(parallel_stats.extracted_endpoint_count, 2);
+            for index in 0..2 {
+                assert_eq!(
+                    feature_count(serial[index].as_ref().unwrap()),
+                    feature_count(parallel[index].as_ref().unwrap()),
+                    "CLAHE={clahe}, tile={index}"
+                );
+            }
+            assert_eq!(
+                serial_stats.extracted_feature_count, parallel_stats.extracted_feature_count,
+                "CLAHE={clahe}"
+            );
+            let serial_guard = FeatureBatchGuard::begin().unwrap();
+            let serial_edge = match_spherical_pair(
+                0,
+                1,
+                serial[0].as_ref().unwrap(),
+                serial[1].as_ref().unwrap(),
+                0.004,
+                clahe,
+                false,
+                serial_guard.token(),
+            );
+            drop(serial_guard);
+            let parallel_guard = FeatureBatchGuard::begin().unwrap();
+            let parallel_edge = match_spherical_pair(
+                0,
+                1,
+                parallel[0].as_ref().unwrap(),
+                parallel[1].as_ref().unwrap(),
+                0.004,
+                clahe,
+                false,
+                parallel_guard.token(),
+            );
+            drop(parallel_guard);
+            assert_eq!(
+                serial_edge.reason, 0,
+                "synthetic fixture must produce a visual match"
+            );
+            assert_eq!(serial_edge.reason, parallel_edge.reason, "CLAHE={clahe}");
+            assert_eq!(serial_edge.matches, parallel_edge.matches, "CLAHE={clahe}");
+            assert_eq!(serial_edge.inliers, parallel_edge.inliers, "CLAHE={clahe}");
+            assert_eq!(serial_edge.points.len(), parallel_edge.points.len());
+            for (serial_point, parallel_point) in
+                serial_edge.points.iter().zip(&parallel_edge.points)
+            {
+                for axis in 0..4 {
+                    assert!(
+                        (serial_point[axis] - parallel_point[axis]).abs() <= 0.01,
+                        "CLAHE={clahe}, point axis={axis}: {} != {}",
+                        serial_point[axis],
+                        parallel_point[axis]
+                    );
+                }
+            }
+        }
+
+        let mut cancelled_frames = vec![None, None];
+        let mut cancel = |_: &str| -> std::result::Result<(), String> { Err("cancel".into()) };
+        assert!(extract_retry_endpoints(
+            &[0, 1],
+            &tiles,
+            196_608,
+            2,
+            0.004,
+            true,
+            false,
+            2,
+            "clahe-retry",
+            &mut cancelled_frames,
+            &mut cancel,
+        )
+        .is_err());
+        let mut after_cancel = vec![None, None];
+        let mut no_cancel = |_: &str| -> std::result::Result<(), String> { Ok(()) };
+        let stats = extract_retry_endpoints(
+            &[0, 1],
+            &tiles,
+            196_608,
+            2,
+            0.004,
+            true,
+            false,
+            2,
+            "clahe-retry",
+            &mut after_cancel,
+            &mut no_cancel,
+        )
+        .unwrap();
+        assert_eq!(stats.extracted_endpoint_count, 2);
+        assert!(after_cancel.iter().all(Option::is_some));
+        drop(after_cancel);
+        drop(cancelled_frames);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

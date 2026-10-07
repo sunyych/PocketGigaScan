@@ -281,7 +281,7 @@ void main() {
           );
 
           final localizations = StitchLocalizations(locale);
-          final infoLabel = localizations.compositionInfoLogs;
+          final infoLabel = localizations.stitchDetails;
           await tester.tap(find.text(infoLabel));
           await tester.pumpAndSettle();
           expect(
@@ -289,6 +289,38 @@ void main() {
               locale.languageCode == 'zh' ? '核心计时' : 'Engine timing',
             ),
             findsOneWidget,
+          );
+          final diagnosticsFinder = find.ancestor(
+            of: find.text(infoLabel),
+            matching: find.byType(ExpansionTile),
+          );
+          final diagnostics = tester.widget<ExpansionTile>(diagnosticsFinder);
+          expect(diagnostics.initiallyExpanded, isFalse);
+          expect(diagnostics.expandedAlignment, Alignment.centerLeft);
+          expect(
+            diagnostics.expandedCrossAxisAlignment,
+            CrossAxisAlignment.start,
+          );
+          final logTile = tester.widget<ExpansionTile>(
+            find.ancestor(
+              of: find.text(localizations.stitchingLog),
+              matching: find.byType(ExpansionTile),
+            ),
+          );
+          expect(logTile.initiallyExpanded, isFalse);
+          final statusLine = find.text(localizations.text('原生合成核心已加载'));
+          final timingLine = find.text(localizations.text('核心计时 · 总耗时：1.2 秒'));
+          expect(statusLine, findsOneWidget);
+          expect(timingLine, findsOneWidget);
+          expect(
+            tester.getTopLeft(statusLine).dx,
+            closeTo(tester.getTopLeft(timingLine).dx, 0.01),
+          );
+          expect(
+            tester
+                .getTopLeft(find.text(localizations.text('水平参考：以网格中心照片为准')))
+                .dx,
+            closeTo(tester.getTopLeft(statusLine).dx, 0.01),
           );
 
           await tester.tap(find.byKey(const Key('new-run-copy-action')));

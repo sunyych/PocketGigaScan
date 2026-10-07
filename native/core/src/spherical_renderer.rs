@@ -8,13 +8,14 @@ use crate::texture_warp::{
 };
 use image::{GenericImageView, ImageBuffer, Rgba, RgbaImage};
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     time::Instant,
 };
@@ -34,6 +35,40 @@ const SOURCE_QUALITY_MIN_EDGE_CONTRAST: f64 = 24.0;
 const SOURCE_QUALITY_SUSPECT_CONFIDENCE: f64 = 0.65;
 const SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE: f64 = 8.0;
 const SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX: f64 = 32.0;
+const SOURCE_QUALITY_BLUR_PEER_TEXTURE: f64 = 12.0;
+const SOURCE_QUALITY_BLUR_RELATIVE_MAX: f64 = 0.70;
+const SOURCE_QUALITY_BLUR_PEER_SHARPNESS: f64 = 18.0;
+const SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS: i32 = 4;
+const GEOMETRY_CACHE_MAX_BYTES_PER_WORKER: u64 = 32 * 1024 * 1024;
+static RENDERER_IDENTITY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static SRGB_F32_THRESHOLDS: OnceLock<[u32; 256]> = OnceLock::new();
+static SRGB_F32_BUCKET_BASE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn bounded_geometry_cache_slots(
+    available_bytes: u64,
+    workers: usize,
+    slot_bytes: u64,
+    per_worker_limit: u64,
+    vector_header_bytes: u64,
+) -> Option<(usize, u64)> {
+    if workers == 0 || slot_bytes == 0 {
+        return Some((0, 0));
+    }
+    let workers_u64 = u64::try_from(workers).ok()?;
+    let available_per_worker = available_bytes / workers_u64;
+    let slots_by_budget = available_per_worker.saturating_sub(vector_header_bytes) / slot_bytes;
+    let slots_by_limit = per_worker_limit.saturating_sub(vector_header_bytes) / slot_bytes;
+    let slots = slots_by_budget.min(slots_by_limit) as usize;
+    let reserved_per_worker = if slots == 0 {
+        0
+    } else {
+        slot_bytes
+            .checked_mul(u64::try_from(slots).ok()?)?
+            .checked_add(vector_header_bytes)?
+    };
+    let reserved_total = reserved_per_worker.checked_mul(workers_u64)?;
+    (reserved_total <= available_bytes).then_some((slots, reserved_per_worker))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlendMode {
@@ -55,7 +90,7 @@ impl BlendMode {
     fn model_name(self) -> &'static str {
         match self {
             Self::Feather => "source-edge-smoothstep-feather",
-            Self::Deghost => "max-score-softmax-ownership",
+            Self::Deghost => "sharpness-aware-max-score-softmax-ownership",
         }
     }
 }
@@ -79,12 +114,13 @@ struct Source {
 #[derive(Clone, Debug)]
 struct SourceQualityMap {
     texture_energy: Vec<u8>,
+    normalized_sharpness: Vec<u8>,
     obstruction_confidence: Vec<u8>,
 }
 
 impl SourceQualityMap {
     fn byte_len() -> u64 {
-        (SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS) as u64 * SOURCE_QUALITY_BYTES_PER_CELL
+        (SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS) as u64 * (SOURCE_QUALITY_BYTES_PER_CELL + 1)
     }
 
     fn from_image(image: &RgbaImage) -> Self {
@@ -92,6 +128,7 @@ impl SourceQualityMap {
         let height = image.height();
         let mut luma = vec![0.0f64; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
         let mut texture_energy = vec![0u8; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
+        let mut normalized_sharpness = vec![0u8; SOURCE_QUALITY_COLUMNS * SOURCE_QUALITY_ROWS];
         for row in 0..SOURCE_QUALITY_ROWS {
             let y0 = (row as f64 * f64::from(height.saturating_sub(1))
                 / (SOURCE_QUALITY_ROWS - 1) as f64)
@@ -135,7 +172,68 @@ impl SourceQualityMap {
                     / samples.len() as f64;
                 let index = row * SOURCE_QUALITY_COLUMNS + column;
                 luma[index] = mean;
-                texture_energy[index] = variance.sqrt().round().clamp(0.0, 255.0) as u8;
+                let contrast = variance.sqrt();
+                texture_energy[index] = contrast.round().clamp(0.0, 255.0) as u8;
+                // Use a contiguous full-resolution patch for sharpness. The
+                // broad 5x5 samples above span a quality cell and provide a
+                // larger-scale contrast reference, so 1-3px blur remains
+                // visible even on multi-megapixel photos.
+                const PATCH_SIDE: usize = (SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS * 2 + 1) as usize;
+                let center_x = (i64::from(x0) + i64::from(x1)) / 2;
+                let center_y = (i64::from(y0) + i64::from(y1)) / 2;
+                let mut patch = [0.0f64; PATCH_SIDE * PATCH_SIDE];
+                for py in 0..PATCH_SIDE {
+                    for px in 0..PATCH_SIDE {
+                        let x = (center_x + px as i64
+                            - i64::from(SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS))
+                        .clamp(0, i64::from(width) - 1) as u32;
+                        let y = (center_y + py as i64
+                            - i64::from(SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS))
+                        .clamp(0, i64::from(height) - 1) as u32;
+                        let rgba = image.get_pixel(x, y).0;
+                        patch[py * PATCH_SIDE + px] = 0.299 * f64::from(rgba[0])
+                            + 0.587 * f64::from(rgba[1])
+                            + 0.114 * f64::from(rgba[2]);
+                    }
+                }
+                let mut gradient_sum = 0.0;
+                for py in 0..PATCH_SIDE {
+                    for px in 0..PATCH_SIDE {
+                        let value = patch[py * PATCH_SIDE + px];
+                        if px + 1 < PATCH_SIDE {
+                            gradient_sum += (value - patch[py * PATCH_SIDE + px + 1]).abs();
+                        }
+                        if py + 1 < PATCH_SIDE {
+                            gradient_sum += (value - patch[(py + 1) * PATCH_SIDE + px]).abs();
+                        }
+                    }
+                }
+                let gradient_count = (PATCH_SIDE * (PATCH_SIDE - 1) * 2) as f64;
+                let mut laplacian_sum = 0.0;
+                let mut laplacian_count = 0usize;
+                for sy in 1..PATCH_SIDE - 1 {
+                    for sx in 1..PATCH_SIDE - 1 {
+                        let center = patch[sy * PATCH_SIDE + sx];
+                        let laplacian = 4.0 * center
+                            - patch[sy * PATCH_SIDE + sx - 1]
+                            - patch[sy * PATCH_SIDE + sx + 1]
+                            - patch[(sy - 1) * PATCH_SIDE + sx]
+                            - patch[(sy + 1) * PATCH_SIDE + sx];
+                        laplacian_sum += laplacian.abs();
+                        laplacian_count += 1;
+                    }
+                }
+                // Combine normalized first differences and a Laplacian term;
+                // the broader-cell contrast denominator limits exposure bias
+                // without normalizing away blur at the patch scale.
+                let normalized_gradient = gradient_sum / gradient_count / (contrast + 1.0);
+                let normalized_laplacian =
+                    laplacian_sum / laplacian_count.max(1) as f64 / (contrast + 1.0);
+                let detail_ratio = normalized_gradient + normalized_laplacian * 0.25;
+                // Log compression preserves useful separation for sharp
+                // sources without clipping their score at 255.
+                normalized_sharpness[index] =
+                    (detail_ratio.ln_1p() * 64.0).round().clamp(0.0, 255.0) as u8;
             }
         }
 
@@ -249,6 +347,7 @@ impl SourceQualityMap {
         }
         Self {
             texture_energy,
+            normalized_sharpness,
             obstruction_confidence,
         }
     }
@@ -261,6 +360,13 @@ impl SourceQualityMap {
         let confidence =
             sample_quality_field(&self.obstruction_confidence, width, height, x, y) / 255.0;
         (texture, confidence)
+    }
+
+    fn sharpness(&self, width: u32, height: u32, x: f64, y: f64) -> f64 {
+        if width < 2 || height < 2 {
+            return 0.0;
+        }
+        sample_quality_field(&self.normalized_sharpness, width, height, x, y)
     }
 }
 
@@ -494,6 +600,78 @@ fn validate_cached_tile(path: &Path, expected: (u32, u32)) -> crate::Result<()> 
     }
     Ok(())
 }
+
+fn renderer_identity(blend_mode: BlendMode) -> Value {
+    serde_json::json!({
+        "schemaVersion": 1,
+        "blendModel": blend_mode.model_name(),
+        "algorithmVersion": 1
+    })
+}
+
+fn has_existing_render_tiles(output: &Path) -> crate::Result<bool> {
+    if !output.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(output)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir()
+            || !entry.file_name().to_string_lossy().starts_with("level-")
+        {
+            continue;
+        }
+        if fs::read_dir(entry.path())?.next().transpose()?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn validate_or_write_renderer_identity(output: &Path, blend_mode: BlendMode) -> crate::Result<()> {
+    let marker_path = output.join("renderer-identity.json");
+    let expected = renderer_identity(blend_mode);
+    if marker_path.is_file() {
+        let stored: Value = serde_json::from_slice(&fs::read(&marker_path).map_err(|error| {
+            crate::Error::Invalid(format!(
+                "cannot read renderer identity {}: {error}",
+                marker_path.display()
+            ))
+        })?)
+        .map_err(|error| {
+            crate::Error::Invalid(format!(
+                "renderer identity {} is invalid: {error}",
+                marker_path.display()
+            ))
+        })?;
+        if stored != expected {
+            return Err(crate::Error::Invalid(
+                "renderer algorithm changed; create a task copy and restitch to avoid mixing tiles"
+                    .into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    // Legacy feather rendering is byte-compatible, so it can adopt an
+    // identity marker in place. Deghost output predating this marker cannot be
+    // safely resumed because some cached tiles may use the old ownership model.
+    if blend_mode == BlendMode::Deghost && has_existing_render_tiles(output)? {
+        return Err(crate::Error::Invalid(
+            "renderer algorithm changed; create a task copy and restitch to avoid mixing tiles"
+                .into(),
+        ));
+    }
+
+    fs::create_dir_all(output)?;
+    let temporary = output.join(format!(
+        ".renderer-identity-{}-{}.tmp",
+        std::process::id(),
+        RENDERER_IDENTITY_TEMP_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&temporary, serde_json::to_vec(&expected).unwrap())?;
+    fs::rename(&temporary, marker_path)?;
+    Ok(())
+}
 fn srgb(c: f64) -> u8 {
     let v = if c <= 0.0031308 {
         c * 12.92
@@ -501,6 +679,55 @@ fn srgb(c: f64) -> u8 {
         1.055 * c.powf(1. / 2.4) - 0.055
     };
     (v.clamp(0., 1.) * 255. + 0.5) as u8
+}
+
+fn srgb_f32_thresholds() -> &'static [u32; 256] {
+    SRGB_F32_THRESHOLDS.get_or_init(|| {
+        let mut thresholds = [0u32; 256];
+        let one = 1.0f32.to_bits();
+        for byte in 1..=255u16 {
+            let mut low = 0u32;
+            let mut high = one;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if srgb(f64::from(f32::from_bits(middle))) >= byte as u8 {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            thresholds[byte as usize] = low;
+        }
+        thresholds
+    })
+}
+
+fn srgb_f32_bucket_base() -> &'static [u8] {
+    SRGB_F32_BUCKET_BASE.get_or_init(|| {
+        let max_bucket = 1.0f32.to_bits() >> 16;
+        (0..=max_bucket)
+            .map(|bucket| srgb(f64::from(f32::from_bits(bucket << 16))))
+            .collect()
+    })
+}
+
+/// Exact byte conversion for the f32 blend ratios used by level-zero output.
+/// A coarse exponent/mantissa bucket supplies the starting byte; f32-bit
+/// thresholds correct any sRGB rounding boundary crossed within that bucket.
+fn srgb_from_blend_f32(value: f32) -> u8 {
+    if value.is_nan() || value <= 0.0 {
+        return srgb(f64::from(value));
+    }
+    if value >= 1.0 {
+        return srgb(f64::from(value));
+    }
+    let bits = value.to_bits();
+    let mut byte = srgb_f32_bucket_base()[(bits >> 16) as usize];
+    let thresholds = srgb_f32_thresholds();
+    while byte < 255 && bits >= thresholds[usize::from(byte) + 1] {
+        byte += 1;
+    }
+    byte
 }
 
 fn sample_geometry(source: &Source, world: [f64; 3]) -> Option<(f64, f64, f64, f64)> {
@@ -546,12 +773,26 @@ fn sample_geometry(source: &Source, world: [f64; 3]) -> Option<(f64, f64, f64, f
     Some((x, y, weight, ownership))
 }
 
+#[cfg(test)]
 fn sample(
     source: &Source,
     image: &RgbaImage,
     world: [f64; 3],
 ) -> Option<([f64; 3], f64, f64, f64, f64)> {
     let (x, y, weight, ownership) = sample_geometry(source, world)?;
+    Some(sample_with_geometry(
+        source,
+        image,
+        (x, y, weight, ownership),
+    ))
+}
+
+fn sample_with_geometry(
+    source: &Source,
+    image: &RgbaImage,
+    geometry: (f64, f64, f64, f64),
+) -> ([f64; 3], f64, f64, f64, f64) {
+    let (x, y, weight, ownership) = geometry;
     // Texture coordinates use pixel centers, matching OpenGL's linear sampler.
     // The shader submits uv=(src+0.5)/size; GL's texel coordinate is src.
     let fx = x.clamp(0., f64::from(source.width - 1));
@@ -574,13 +815,86 @@ fn sample(
             rgb[c] += f64::from(p[c]) / 255. * w;
         }
     }
-    Some((
+    (
         [linear(rgb[0]), linear(rgb[1]), linear(rgb[2])],
         weight,
         ownership,
         x,
         y,
-    ))
+    )
+}
+
+fn geometry_from_source_xy(source: &Source, x: f64, y: f64) -> (f64, f64, f64, f64) {
+    let edge = x
+        .min(y)
+        .min(f64::from(source.width) - x)
+        .min(f64::from(source.height) - y);
+    let t = (edge / (f64::from(source.width.min(source.height)) * 0.08)).clamp(0., 1.);
+    let weight = t * t * (3. - 2. * t);
+    let ownership = (edge / f64::from(source.width.min(source.height))).clamp(0., 0.5);
+    (x, y, weight, ownership)
+}
+
+#[derive(Debug)]
+struct TileGeometryCache {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+}
+
+struct CandidateSourceIndices<'a> {
+    cached: Option<std::slice::Iter<'a, usize>>,
+    next_scan: usize,
+    source_count: usize,
+}
+
+impl<'a> CandidateSourceIndices<'a> {
+    fn new(cached: Option<&'a [usize]>, source_count: usize) -> Self {
+        Self {
+            cached: cached.map(|indices| indices.iter()),
+            next_scan: 0,
+            source_count,
+        }
+    }
+}
+
+impl Iterator for CandidateSourceIndices<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(cached) = self.cached.as_mut() {
+            cached.next().copied()
+        } else if self.next_scan < self.source_count {
+            let index = self.next_scan;
+            self.next_scan += 1;
+            Some(index)
+        } else {
+            None
+        }
+    }
+}
+
+impl TileGeometryCache {
+    fn new(count: usize) -> Self {
+        Self {
+            xs: vec![f64::NAN; count],
+            ys: vec![f64::NAN; count],
+        }
+    }
+
+    fn store(&mut self, index: usize, x: f64, y: f64) {
+        self.xs[index] = x;
+        self.ys[index] = y;
+    }
+
+    fn get(&self, source: &Source, index: usize) -> Option<(f64, f64, f64, f64)> {
+        let x = self.xs[index];
+        let y = self.ys[index];
+        if x.is_nan() {
+            None
+        } else {
+            Some(geometry_from_source_xy(source, x, y))
+        }
+    }
 }
 
 fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32) -> f64 {
@@ -588,7 +902,7 @@ fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32)
     ((ownership - max_ownership) / temperature).exp()
 }
 
-fn deghost_source_weight(
+fn deghost_source_weight_with_sharpness(
     ownership: f64,
     max_ownership: f64,
     max_uncapped_ownership: f64,
@@ -596,18 +910,25 @@ fn deghost_source_weight(
     max_structured_peer_texture: f64,
     obstruction_confidence: f64,
     texture_energy: f64,
+    normalized_sharpness: f64,
+    max_peer_sharpness: f64,
     source_min_dimension: u32,
 ) -> f64 {
-    let current_is_cap_eligible = obstruction_confidence >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
-        && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX;
+    let local_blur = max_structured_peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
+        && max_peer_sharpness >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
+        && normalized_sharpness <= max_peer_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+    let current_is_cap_eligible = local_blur
+        || (obstruction_confidence >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
+            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX);
     let structured_overlap = max_structured_peer_texture >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE
         && max_uncapped_ownership.is_finite()
         && max_cap_eligible_ownership > max_uncapped_ownership;
     if structured_overlap {
         // Every source that cannot be capped participates in the same
-        // reference. Only a high-confidence, low-texture obstruction is
-        // eligible for the cap; interpolation across a texture boundary must
-        // not switch the reference without also making the source cap-eligible.
+        // reference. A cap candidate must be either a high-confidence,
+        // low-texture obstruction or locally softer than a textured peer;
+        // interpolation across a quality boundary cannot switch the reference
+        // unless the source also satisfies the corresponding eligibility test.
         let margin = SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX / f64::from(source_min_dimension);
         let effective_ownership = if current_is_cap_eligible {
             ownership.min(max_uncapped_ownership - margin)
@@ -624,6 +945,31 @@ fn deghost_source_weight(
         // single-source or all-smooth regions never become holes.
         deghost_weight(ownership, max_ownership, source_min_dimension)
     }
+}
+
+#[cfg(test)]
+fn deghost_source_weight(
+    ownership: f64,
+    max_ownership: f64,
+    max_uncapped_ownership: f64,
+    max_cap_eligible_ownership: f64,
+    max_structured_peer_texture: f64,
+    obstruction_confidence: f64,
+    texture_energy: f64,
+    source_min_dimension: u32,
+) -> f64 {
+    deghost_source_weight_with_sharpness(
+        ownership,
+        max_ownership,
+        max_uncapped_ownership,
+        max_cap_eligible_ownership,
+        max_structured_peer_texture,
+        obstruction_confidence,
+        texture_energy,
+        0.0,
+        0.0,
+        source_min_dimension,
+    )
 }
 
 fn accumulate_weighted(cell: &mut [f32; 4], rgb: [f64; 3], weight: f64) {
@@ -660,17 +1006,39 @@ pub fn render_layout_tiles_with_options(
     memory_budget_mib: usize,
     workers_requested: usize,
     use_source_cache: bool,
-    mut checkpoint: impl FnMut(u64, u64) -> bool,
+    checkpoint: impl FnMut(u64, u64) -> bool,
 ) -> crate::Result<Value> {
-    if !(32..=4096).contains(&memory_budget_mib) {
-        return Err(crate::Error::Invalid(
-            "memoryBudgetMiB must be 32..=4096".into(),
-        ));
+    render_layout_tiles_with_options_internal(
+        layout,
+        output,
+        memory_budget_mib,
+        workers_requested,
+        use_source_cache,
+        checkpoint,
+        true,
+    )
+}
+
+fn render_layout_tiles_with_options_internal(
+    layout: &Value,
+    output: &Path,
+    memory_budget_mib: usize,
+    workers_requested: usize,
+    use_source_cache: bool,
+    mut checkpoint: impl FnMut(u64, u64) -> bool,
+    sharpness_aware: bool,
+) -> crate::Result<Value> {
+    if !(32..=crate::job_resources::MAX_JOB_MEMORY_MIB).contains(&memory_budget_mib) {
+        return Err(crate::Error::Invalid(format!(
+            "memoryBudgetMiB must be 32..={}",
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     if !(1..=32).contains(&workers_requested) {
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
     }
     let (width, height, bounds, sources, blend_mode) = dimensions(layout)?;
+    validate_or_write_renderer_identity(output, blend_mode)?;
     let dir = output.join("level-0");
     fs::create_dir_all(&dir)?;
     let cols = width.div_ceil(TILE);
@@ -678,7 +1046,8 @@ pub fn render_layout_tiles_with_options(
     let total = u64::from(cols) * u64::from(rows);
     let mut completed = 0u64;
     let started = Instant::now();
-    let budget_bytes = (memory_budget_mib as u64) * 1024 * 1024;
+    let budget_bytes = crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+        .ok_or_else(|| crate::Error::Invalid("memoryBudgetMiB overflows byte accounting".into()))?;
     let mut source_bytes = Vec::with_capacity(sources.len());
     let mut max_decode = 0u64;
     for s in &sources {
@@ -692,23 +1061,40 @@ pub fn render_layout_tiles_with_options(
                 s.height
             )));
         }
-        let bytes = u64::from(iw) * u64::from(ih) * 4;
+        let bytes = u64::from(iw)
+            .checked_mul(u64::from(ih))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                crate::Error::Invalid(format!(
+                    "source byte size overflows memory accounting for {}",
+                    s.path.display()
+                ))
+            })?;
         source_bytes.push(bytes);
         max_decode = max_decode.max(bytes.saturating_mul(2));
     }
     let tile_bytes_per_pixel = if blend_mode == BlendMode::Deghost {
         // accum[4] (16 bytes) + global, uncapped, and cap-eligible ownership
-        // (12 bytes) + peer texture (1 byte), plus 4 bytes of Vec overhead.
-        33
+        // (12 bytes) + local peer texture and sharpness (2 bytes), plus Vec overhead.
+        34
     } else {
         24
     };
     let tile_reserve = u64::from(TILE) * u64::from(TILE) * tile_bytes_per_pixel;
     let source_quality_map_reserve = if blend_mode == BlendMode::Deghost {
-        sources.len() as u64
-            * (SourceQualityMap::byte_len()
-                + std::mem::size_of::<SourceQualityMap>() as u64
-                + std::mem::size_of::<Arc<SourceQualityMap>>() as u64)
+        let per_source = SourceQualityMap::byte_len()
+            .checked_add(std::mem::size_of::<SourceQualityMap>() as u64)
+            .and_then(|bytes| {
+                bytes.checked_add(std::mem::size_of::<Arc<SourceQualityMap>>() as u64)
+            })
+            .ok_or_else(|| {
+                crate::Error::Invalid("source quality map accounting overflowed".into())
+            })?;
+        per_source
+            .checked_mul(sources.len() as u64)
+            .ok_or_else(|| {
+                crate::Error::Invalid("source quality map accounting overflowed".into())
+            })?
     } else {
         0
     };
@@ -717,30 +1103,131 @@ pub fn render_layout_tiles_with_options(
     } else {
         0
     };
-    let one_worker = tile_reserve + max_decode / 2 + source_quality_refs_per_worker;
-    if one_worker + max_decode / 2 + source_quality_map_reserve > budget_bytes {
+    let worker_base = tile_reserve
+        .checked_add(max_decode / 2)
+        .and_then(|bytes| bytes.checked_add(source_quality_refs_per_worker))
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer worker memory accounting overflowed".into())
+        })?;
+    let decode_slot_bytes = max_decode / 2;
+    let one_worker = worker_base.checked_add(decode_slot_bytes).ok_or_else(|| {
+        crate::Error::Invalid("renderer decode memory accounting overflowed".into())
+    })?;
+    let fixed_reserve = source_quality_map_reserve;
+    if one_worker
+        .checked_add(fixed_reserve)
+        .map_or(true, |bytes| bytes > budget_bytes)
+    {
         return Err(crate::Error::Invalid(format!(
             "one tile worker and source decode exceed memoryBudgetMiB={memory_budget_mib}"
         )));
     }
-    let affordable =
-        ((budget_bytes - max_decode / 2 - source_quality_map_reserve) / one_worker).max(1) as usize;
-    let effective_workers = workers_requested.min(affordable).min(total as usize).max(1);
-    let active_reserve =
-        one_worker * effective_workers as u64 + max_decode / 2 + source_quality_map_reserve;
-    let cache_limit = if use_source_cache {
-        budget_bytes.saturating_sub(active_reserve)
+    let requested_cache_min = if use_source_cache {
+        source_bytes.iter().copied().min().unwrap_or(0)
     } else {
         0
     };
-    let cache = Arc::new(Mutex::new(DecodeCache::new(cache_limit)));
+    let requested_total = one_worker
+        .checked_add(fixed_reserve)
+        .and_then(|bytes| bytes.checked_add(requested_cache_min));
+    let cache_min_reserve = if requested_total.map_or(false, |bytes| bytes <= budget_bytes) {
+        requested_cache_min
+    } else {
+        0
+    };
+    let affordable =
+        ((budget_bytes - fixed_reserve - cache_min_reserve) / one_worker).max(1) as usize;
+    let effective_workers = workers_requested.min(affordable).min(total as usize).max(1);
+    let decode_slot_reserve = decode_slot_bytes
+        .checked_mul(effective_workers as u64)
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer decode slot reservation overflowed".into())
+        })?;
+    let active_reserve = worker_base
+        .checked_mul(effective_workers as u64)
+        .and_then(|bytes| bytes.checked_add(decode_slot_reserve))
+        .and_then(|bytes| bytes.checked_add(source_quality_map_reserve))
+        .ok_or_else(|| {
+            crate::Error::Invalid("renderer active memory reservation overflowed".into())
+        })?;
+    let geometry_slot_bytes = u64::from(TILE)
+        .checked_mul(u64::from(TILE))
+        .and_then(|pixels| pixels.checked_mul(2 * std::mem::size_of::<f64>() as u64))
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<(usize, TileGeometryCache)>() as u64)
+        })
+        .ok_or_else(|| crate::Error::Invalid("geometry cache slot accounting overflowed".into()))?;
+    let geometry_headroom = budget_bytes
+        .saturating_sub(active_reserve)
+        .saturating_sub(cache_min_reserve);
+    let source_count = u64::try_from(sources.len()).map_err(|_| {
+        crate::Error::Invalid("renderer source count exceeds memory accounting".into())
+    })?;
+    let candidate_index_bytes_per_worker = source_count
+        .checked_mul(std::mem::size_of::<usize>() as u64)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<usize>>() as u64))
+        .ok_or_else(|| {
+            crate::Error::Invalid("candidate list memory accounting overflowed".into())
+        })?;
+    let candidate_index_bytes_reserved = if blend_mode == BlendMode::Deghost {
+        candidate_index_bytes_per_worker
+            .checked_mul(effective_workers as u64)
+            .ok_or_else(|| crate::Error::Invalid("candidate list reserve overflowed".into()))?
+    } else {
+        0
+    };
+    let candidate_list_enabled =
+        blend_mode == BlendMode::Deghost && candidate_index_bytes_reserved <= geometry_headroom;
+    let candidate_list_reserve = if candidate_list_enabled {
+        candidate_index_bytes_reserved
+    } else {
+        0
+    };
+    let geometry_array_headroom = geometry_headroom.saturating_sub(candidate_list_reserve);
+    let geometry_vector_header_bytes =
+        std::mem::size_of::<Vec<(usize, TileGeometryCache)>>() as u64;
+    let (geometry_cache_source_slots, geometry_cache_per_worker_cap) =
+        if blend_mode == BlendMode::Deghost && candidate_list_enabled {
+            bounded_geometry_cache_slots(
+                geometry_array_headroom,
+                effective_workers,
+                geometry_slot_bytes,
+                GEOMETRY_CACHE_MAX_BYTES_PER_WORKER,
+                geometry_vector_header_bytes,
+            )
+            .ok_or_else(|| crate::Error::Invalid("geometry cache reserve overflowed".into()))?
+        } else {
+            (0, 0)
+        };
+    let geometry_cache_reserve = geometry_cache_per_worker_cap
+        .checked_mul(effective_workers as u64)
+        .ok_or_else(|| crate::Error::Invalid("geometry cache reserve overflowed".into()))?;
+    let render_feature_reserve = geometry_cache_reserve
+        .checked_add(candidate_list_reserve)
+        .ok_or_else(|| crate::Error::Invalid("render feature reserve overflowed".into()))?;
+    let cache_limit = if use_source_cache {
+        budget_bytes
+            .saturating_sub(active_reserve)
+            .saturating_sub(render_feature_reserve)
+            .max(cache_min_reserve)
+    } else {
+        0
+    };
+    let cache = Arc::new(DecodeCache::new(cache_limit, effective_workers.max(1)));
     let hits = AtomicU64::new(0);
     let misses = AtomicU64::new(0);
+    let decodes = AtomicU64::new(0);
     let visits = AtomicU64::new(0);
     let active_workers = AtomicU64::new(0);
     let peak_workers = AtomicU64::new(0);
     let decode_micros = AtomicU64::new(0);
     let encode_micros = AtomicU64::new(0);
+    let geometry_cached_sources = AtomicU64::new(0);
+    let geometry_projection_reuses = AtomicU64::new(0);
+    let ownership_micros = AtomicU64::new(0);
+    let classification_micros = AtomicU64::new(0);
+    let blend_micros = AtomicU64::new(0);
+    let output_micros = AtomicU64::new(0);
     let mut tasks = Vec::new();
     for i in 0..total {
         if !checkpoint(completed, total) {
@@ -765,6 +1252,7 @@ pub fn render_layout_tiles_with_options(
             tasks.push((row as u32, col as u32));
         }
     }
+    tasks = spatial_block_order(tasks, cols as u32, rows as u32, 4);
     for batch in tasks.chunks(effective_workers) {
         if !checkpoint(completed, total) {
             return Err(crate::Error::Cancelled);
@@ -775,11 +1263,18 @@ pub fn render_layout_tiles_with_options(
                 let cache = cache.clone();
                 let hits = &hits;
                 let misses = &misses;
+                let decodes = &decodes;
                 let visits = &visits;
                 let active_workers = &active_workers;
                 let peak_workers = &peak_workers;
                 let decode_micros = &decode_micros;
                 let encode_micros = &encode_micros;
+                let geometry_cached_sources = &geometry_cached_sources;
+                let geometry_projection_reuses = &geometry_projection_reuses;
+                let ownership_micros = &ownership_micros;
+                let classification_micros = &classification_micros;
+                let blend_micros = &blend_micros;
+                let output_micros = &output_micros;
                 let sources_ref = sources.as_slice();
                 let source_bytes_ref = source_bytes.as_slice();
                 let dir_ref = dir.as_path();
@@ -796,13 +1291,23 @@ pub fn render_layout_tiles_with_options(
                         &cache,
                         &hits,
                         &misses,
+                        &decodes,
                         &visits,
                         &active_workers,
                         &peak_workers,
                         &decode_micros,
                         &encode_micros,
+                        candidate_list_enabled,
+                        geometry_cache_source_slots,
+                        &geometry_cached_sources,
+                        &geometry_projection_reuses,
+                        &ownership_micros,
+                        &classification_micros,
+                        &blend_micros,
+                        &output_micros,
                         use_source_cache,
                         blend_mode,
+                        sharpness_aware,
                     )
                 }));
             }
@@ -823,30 +1328,119 @@ pub fn render_layout_tiles_with_options(
             }
         }
     }
-    let cache_guard = cache.lock().expect("decode cache lock");
+    let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"estimatedActiveMemoryBytes":active_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":misses.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"renderMs":render_ms}),
     )
 }
 
 struct DecodeCache {
+    state: Mutex<DecodeCacheState>,
+    flights: Mutex<HashMap<usize, Arc<DecodeFlight>>>,
+    decode_slots: Mutex<usize>,
+    decode_ready: Condvar,
+    decode_limit: usize,
+    active_decode_slots: AtomicU64,
+    peak_decode_slots: AtomicU64,
+    decode_waits: AtomicU64,
+    decode_errors: AtomicU64,
+}
+struct DecodeCacheState {
     map: HashMap<usize, Arc<RgbaImage>>,
     lru: VecDeque<usize>,
     bytes: u64,
     limit: u64,
     peak_bytes: u64,
 }
-impl DecodeCache {
-    fn new(limit: u64) -> Self {
-        Self {
-            map: HashMap::new(),
-            lru: VecDeque::new(),
-            bytes: 0,
-            limit,
-            peak_bytes: 0,
+struct DecodeFlight {
+    result: Mutex<Option<std::result::Result<Arc<RgbaImage>, String>>>,
+    ready: Condvar,
+}
+struct DecodeSlotGuard<'a> {
+    cache: &'a DecodeCache,
+}
+impl Drop for DecodeSlotGuard<'_> {
+    fn drop(&mut self) {
+        self.cache
+            .active_decode_slots
+            .fetch_sub(1, Ordering::Relaxed);
+        let mut slots = self.cache.decode_slots.lock().expect("decode gate lock");
+        *slots = slots.saturating_sub(1);
+        self.cache.decode_ready.notify_one();
+    }
+}
+struct DecodeFlightGuard<'a> {
+    cache: &'a DecodeCache,
+    source_index: usize,
+    flight: Arc<DecodeFlight>,
+    completed: bool,
+}
+impl DecodeFlightGuard<'_> {
+    fn complete(&mut self, result: std::result::Result<Arc<RgbaImage>, String>) {
+        *self
+            .flight
+            .result
+            .lock()
+            .expect("decode flight result lock") = Some(result);
+        self.completed = true;
+        self.flight.ready.notify_all();
+        self.cache
+            .flights
+            .lock()
+            .expect("decode flights lock")
+            .remove(&self.source_index);
+    }
+}
+impl Drop for DecodeFlightGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.cache.decode_errors.fetch_add(1, Ordering::Relaxed);
+            *self
+                .flight
+                .result
+                .lock()
+                .expect("decode flight result lock") =
+                Some(Err("source decode worker terminated unexpectedly".into()));
+            self.flight.ready.notify_all();
+            self.cache
+                .flights
+                .lock()
+                .expect("decode flights lock")
+                .remove(&self.source_index);
         }
     }
+}
+impl DecodeCache {
+    fn new(limit: u64, decode_limit: usize) -> Self {
+        Self {
+            state: Mutex::new(DecodeCacheState {
+                map: HashMap::new(),
+                lru: VecDeque::new(),
+                bytes: 0,
+                limit,
+                peak_bytes: 0,
+            }),
+            flights: Mutex::new(HashMap::new()),
+            decode_slots: Mutex::new(0),
+            decode_ready: Condvar::new(),
+            decode_limit: decode_limit.max(1),
+            active_decode_slots: AtomicU64::new(0),
+            peak_decode_slots: AtomicU64::new(0),
+            decode_waits: AtomicU64::new(0),
+            decode_errors: AtomicU64::new(0),
+        }
+    }
+}
+
+fn spatial_block_order(
+    mut tasks: Vec<(u32, u32)>,
+    _cols: u32,
+    _rows: u32,
+    block: u32,
+) -> Vec<(u32, u32)> {
+    tasks.sort_by_key(|(row, col)| ((row / block, col / block), *row, *col));
+    tasks
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -854,13 +1448,45 @@ fn source_image(
     source_index: usize,
     source: &Source,
     source_bytes: &[u64],
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     decode_micros: &AtomicU64,
     use_cache: bool,
 ) -> crate::Result<Arc<RgbaImage>> {
-    let mut state = cache.lock().expect("decode cache lock");
+    source_image_with(
+        source_index,
+        source,
+        source_bytes,
+        cache,
+        hits,
+        misses,
+        decodes,
+        decode_micros,
+        use_cache,
+        |source| {
+            image::open(&source.path)
+                .map(|image| Arc::new(image.into_rgba8()))
+                .map_err(|e| format!("failed to decode source {}: {e}", source.path.display()))
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_image_with(
+    source_index: usize,
+    source: &Source,
+    source_bytes: &[u64],
+    cache: &DecodeCache,
+    hits: &AtomicU64,
+    misses: &AtomicU64,
+    decodes: &AtomicU64,
+    decode_micros: &AtomicU64,
+    use_cache: bool,
+    decode_source: impl FnOnce(&Source) -> std::result::Result<Arc<RgbaImage>, String>,
+) -> crate::Result<Arc<RgbaImage>> {
+    let mut state = cache.state.lock().expect("decode cache lock");
     if let Some(image) = state.map.get(&source_index).cloned() {
         hits.fetch_add(1, Ordering::Relaxed);
         if let Some(pos) = state.lru.iter().position(|index| *index == source_index) {
@@ -869,21 +1495,96 @@ fn source_image(
         state.lru.push_back(source_index);
         return Ok(image);
     }
-    misses.fetch_add(1, Ordering::Relaxed);
+    drop(state);
+    let (flight, leader) = {
+        let mut flights = cache.flights.lock().expect("decode flights lock");
+        if let Some(flight) = flights.get(&source_index) {
+            misses.fetch_add(1, Ordering::Relaxed);
+            cache.decode_waits.fetch_add(1, Ordering::Relaxed);
+            (flight.clone(), false)
+        } else {
+            // A caller may have missed the resident map just before another
+            // decode completed. Recheck under the flight lock before creating
+            // another load; completion never holds the state and flight locks
+            // together, so this lock order cannot deadlock.
+            if use_cache {
+                let mut state = cache.state.lock().expect("decode cache lock");
+                if let Some(image) = state.map.get(&source_index).cloned() {
+                    hits.fetch_add(1, Ordering::Relaxed);
+                    if let Some(pos) = state.lru.iter().position(|index| *index == source_index) {
+                        state.lru.remove(pos);
+                    }
+                    state.lru.push_back(source_index);
+                    return Ok(image);
+                }
+            }
+            misses.fetch_add(1, Ordering::Relaxed);
+            let flight = Arc::new(DecodeFlight {
+                result: Mutex::new(None),
+                ready: Condvar::new(),
+            });
+            flights.insert(source_index, flight.clone());
+            (flight, true)
+        }
+    };
+    if !leader {
+        let mut result = flight.result.lock().expect("decode flight result lock");
+        while result.is_none() {
+            result = flight.ready.wait(result).expect("decode flight wait");
+        }
+        return result
+            .as_ref()
+            .unwrap()
+            .clone()
+            .map_err(crate::Error::Invalid);
+    }
+    let mut flight_guard = DecodeFlightGuard {
+        cache,
+        source_index,
+        flight: flight.clone(),
+        completed: false,
+    };
+    decodes.fetch_add(1, Ordering::Relaxed);
+    let mut slots = cache.decode_slots.lock().expect("decode gate lock");
+    while *slots >= cache.decode_limit {
+        cache.decode_waits.fetch_add(1, Ordering::Relaxed);
+        slots = cache.decode_ready.wait(slots).expect("decode gate wait");
+    }
+    *slots += 1;
+    let active = cache.active_decode_slots.fetch_add(1, Ordering::Relaxed) + 1;
+    cache.peak_decode_slots.fetch_max(active, Ordering::Relaxed);
+    drop(slots);
+    let slot_guard = DecodeSlotGuard { cache };
     let decode_started = Instant::now();
-    let image = Arc::new(image::open(&source.path)?.into_rgba8());
+    let decoded = decode_source(source);
     decode_micros.fetch_add(
         decode_started.elapsed().as_micros() as u64,
         Ordering::Relaxed,
     );
-    if image.width() != source.width || image.height() != source.height {
-        return Err(crate::Error::Invalid(format!(
-            "source dimensions changed for {}",
-            source.path.display()
-        )));
+    let decoded = decoded.and_then(|image| {
+        if image.width() != source.width || image.height() != source.height {
+            Err(format!(
+                "source dimensions changed for {}",
+                source.path.display()
+            ))
+        } else {
+            Ok(image)
+        }
+    });
+    drop(slot_guard);
+    if decoded.is_err() {
+        cache.decode_errors.fetch_add(1, Ordering::Relaxed);
     }
+    let image = match decoded {
+        Ok(image) => image,
+        Err(message) => {
+            flight_guard.complete(Err(message.clone()));
+            return Err(crate::Error::Invalid(message));
+        }
+    };
+    let mut state = cache.state.lock().expect("decode cache lock");
     if use_cache && state.limit > 0 && source_bytes[source_index] <= state.limit {
-        while state.bytes + source_bytes[source_index] > state.limit {
+        while state.bytes.saturating_add(source_bytes[source_index]) > state.limit {
             if let Some(old) = state.lru.pop_front() {
                 if let Some(old_image) = state.map.remove(&old) {
                     state.bytes -= u64::from(old_image.width()) * u64::from(old_image.height()) * 4;
@@ -892,11 +1593,15 @@ fn source_image(
                 break;
             }
         }
-        state.bytes += u64::from(image.width()) * u64::from(image.height()) * 4;
+        state.bytes = state
+            .bytes
+            .saturating_add(u64::from(image.width()) * u64::from(image.height()) * 4);
         state.peak_bytes = state.peak_bytes.max(state.bytes);
         state.map.insert(source_index, image.clone());
         state.lru.push_back(source_index);
     }
+    drop(state);
+    flight_guard.complete(Ok(image.clone()));
     Ok(image)
 }
 
@@ -905,9 +1610,10 @@ fn source_quality_map(
     source_index: usize,
     source: &Source,
     source_bytes: &[u64],
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     decode_micros: &AtomicU64,
     use_cache: bool,
 ) -> crate::Result<Arc<SourceQualityMap>> {
@@ -922,6 +1628,7 @@ fn source_quality_map(
         cache,
         hits,
         misses,
+        decodes,
         decode_micros,
         use_cache,
     )?;
@@ -946,16 +1653,26 @@ fn render_one_tile(
     sources: &[Source],
     source_bytes: &[u64],
     dir: &Path,
-    cache: &Mutex<DecodeCache>,
+    cache: &DecodeCache,
     hits: &AtomicU64,
     misses: &AtomicU64,
+    decodes: &AtomicU64,
     visits: &AtomicU64,
     active_workers: &AtomicU64,
     peak_workers: &AtomicU64,
     decode_micros: &AtomicU64,
     encode_micros: &AtomicU64,
+    candidate_list_enabled: bool,
+    geometry_cache_source_slots: usize,
+    geometry_cached_sources: &AtomicU64,
+    geometry_projection_reuses: &AtomicU64,
+    ownership_micros: &AtomicU64,
+    classification_micros: &AtomicU64,
+    blend_micros: &AtomicU64,
+    output_micros: &AtomicU64,
     use_cache: bool,
     blend_mode: BlendMode,
+    sharpness_aware: bool,
 ) -> crate::Result<()> {
     let active = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
     peak_workers.fetch_max(active, Ordering::Relaxed);
@@ -988,12 +1705,71 @@ fn render_one_tile(
         (blend_mode == BlendMode::Deghost).then(|| vec![f32::NEG_INFINITY; count]);
     let mut max_structured_peer_texture =
         (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
+    let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
     let mut source_quality_maps = vec![None; sources.len()];
+    let candidate_sources = if candidate_list_enabled {
+        let mut indices = Vec::new();
+        indices.try_reserve_exact(sources.len()).map_err(|error| {
+            crate::Error::Invalid(format!(
+                "cannot reserve renderer candidate indices: {error}"
+            ))
+        })?;
+        for (index, source) in sources.iter().enumerate() {
+            if candidate(source, bounds, left, top, tw, th, width, height) {
+                indices.push(index);
+            }
+        }
+        Some(indices)
+    } else {
+        None
+    };
+    let mut tile_geometry = Vec::<(usize, TileGeometryCache)>::new();
+    if geometry_cache_source_slots > 0 {
+        tile_geometry
+            .try_reserve_exact(geometry_cache_source_slots)
+            .map_err(|error| {
+                crate::Error::Invalid(format!("cannot reserve renderer geometry slots: {error}"))
+            })?;
+        let candidates = candidate_sources
+            .as_deref()
+            .expect("geometry cache reserves the candidate list");
+        // Warp candidates are selected first; each class retains source order.
+        for active_warp in [true, false] {
+            for &index in candidates {
+                if tile_geometry.len() == geometry_cache_source_slots {
+                    break;
+                }
+                let has_active_warp = sources[index]
+                    .source_plane_warp
+                    .as_ref()
+                    .is_some_and(|warp| !warp.is_zero());
+                if has_active_warp == active_warp {
+                    tile_geometry.push((index, TileGeometryCache::new(count)));
+                }
+            }
+        }
+    }
+    let mut tile_cached_source_count = 0u64;
+    let mut tile_projection_reuses = 0u64;
     if let Some(scores) = max_ownership.as_mut() {
-        for (source_index, source) in sources.iter().enumerate() {
-            if !candidate(source, bounds, left, top, tw, th, width, height) {
+        let ownership_started = Instant::now();
+        for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
+        {
+            if candidate_sources.is_none()
+                && !candidate(
+                    &sources[source_index],
+                    bounds,
+                    left,
+                    top,
+                    tw,
+                    th,
+                    width,
+                    height,
+                )
+            {
                 continue;
             }
+            let source = &sources[source_index];
             let quality = source_quality_map(
                 source_index,
                 source,
@@ -1001,46 +1777,152 @@ fn render_one_tile(
                 cache,
                 hits,
                 misses,
+                decodes,
                 decode_micros,
                 use_cache,
             )?;
             source_quality_maps[source_index] = Some(quality.clone());
+            let mut cached_geometry = tile_geometry
+                .iter_mut()
+                .find(|(index, _)| *index == source_index)
+                .map(|(_, geometry)| geometry);
             for py in 0..th {
                 for px in 0..tw {
                     let (sy, cy) = x_rays[px as usize];
                     let (sp, cp) = y_rays[py as usize];
                     let world = [sy * cp, sp, cy * cp];
+                    let index = (py * tw + px) as usize;
                     if let Some((source_x, source_y, _, ownership)) = sample_geometry(source, world)
                     {
-                        let index = (py * tw + px) as usize;
+                        if let Some(geometry) = cached_geometry.as_mut() {
+                            geometry.store(index, source_x, source_y);
+                        }
                         scores[index] = scores[index].max(ownership as f32);
-                        let (texture_energy, obstruction_confidence) =
+                        let (texture_energy, _) =
                             quality.sample(source.width, source.height, source_x, source_y);
-                        if obstruction_confidence < SOURCE_QUALITY_SUSPECT_CONFIDENCE
-                            || texture_energy > SOURCE_QUALITY_LOW_TEXTURE_MAX
-                        {
-                            let clean_scores = max_unflagged_ownership.as_mut().unwrap();
-                            clean_scores[index] = clean_scores[index].max(ownership as f32);
-                            if texture_energy >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE {
-                                let peer_texture =
-                                    &mut max_structured_peer_texture.as_mut().unwrap()[index];
-                                *peer_texture = (*peer_texture)
-                                    .max(texture_energy.round().clamp(0.0, 255.0) as u8);
-                            }
-                        } else {
-                            let eligible_scores = max_cap_eligible_ownership.as_mut().unwrap();
-                            eligible_scores[index] = eligible_scores[index].max(ownership as f32);
+                        let sharpness =
+                            quality.sharpness(source.width, source.height, source_x, source_y);
+                        if texture_energy >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE {
+                            let peer_texture =
+                                &mut max_structured_peer_texture.as_mut().unwrap()[index];
+                            *peer_texture =
+                                (*peer_texture).max(texture_energy.round().clamp(0.0, 255.0) as u8);
+                            let peer_sharpness = &mut max_peer_sharpness.as_mut().unwrap()[index];
+                            *peer_sharpness =
+                                (*peer_sharpness).max(sharpness.round().clamp(0.0, 255.0) as u8);
                         }
                     }
                 }
             }
         }
+        ownership_micros.fetch_add(
+            ownership_started.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
+        // Classify sources only after the per-pixel peer sharpness is known.
+        // This makes the decision independent of source order and compares
+        // local texture at the same projected scene point, rather than a
+        // whole-image sharpness score.
+        let classification_started = Instant::now();
+        for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
+        {
+            if candidate_sources.is_none()
+                && !candidate(
+                    &sources[source_index],
+                    bounds,
+                    left,
+                    top,
+                    tw,
+                    th,
+                    width,
+                    height,
+                )
+            {
+                continue;
+            }
+            let source = &sources[source_index];
+            let quality = source_quality_maps[source_index]
+                .as_ref()
+                .expect("quality map prepared in geometry pass");
+            let cached_geometry = tile_geometry
+                .iter()
+                .find(|(index, _)| *index == source_index)
+                .map(|(_, geometry)| geometry);
+            for py in 0..th {
+                for px in 0..tw {
+                    let (sy, cy) = x_rays[px as usize];
+                    let (sp, cp) = y_rays[py as usize];
+                    let world = [sy * cp, sp, cy * cp];
+                    let index = (py * tw + px) as usize;
+                    let geometry = if let Some(cached) = cached_geometry {
+                        cached.get(source, index)
+                    } else {
+                        sample_geometry(source, world)
+                    };
+                    if let Some((source_x, source_y, _, ownership)) = geometry {
+                        let (texture_energy, obstruction_confidence) =
+                            quality.sample(source.width, source.height, source_x, source_y);
+                        let sharpness =
+                            quality.sharpness(source.width, source.height, source_x, source_y);
+                        let peer_texture =
+                            f64::from(max_structured_peer_texture.as_ref().unwrap()[index]);
+                        let peer_sharp = f64::from(max_peer_sharpness.as_ref().unwrap()[index]);
+                        let blurred_against_peer = sharpness_aware
+                            && peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
+                            && peer_sharp >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
+                            && sharpness <= peer_sharp * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+                        let obstructed = obstruction_confidence
+                            >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
+                            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX;
+                        if blurred_against_peer || obstructed {
+                            let eligible_scores = max_cap_eligible_ownership.as_mut().unwrap();
+                            eligible_scores[index] = eligible_scores[index].max(ownership as f32);
+                        } else {
+                            let clean_scores = max_unflagged_ownership.as_mut().unwrap();
+                            clean_scores[index] = clean_scores[index].max(ownership as f32);
+                        }
+                    }
+                }
+            }
+            if tile_geometry
+                .iter()
+                .any(|(index, _)| *index == source_index)
+            {
+                tile_projection_reuses += count as u64;
+            }
+        }
+        classification_micros.fetch_add(
+            classification_started.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
+        geometry_projection_reuses.fetch_add(tile_projection_reuses, Ordering::Relaxed);
+        tile_projection_reuses = 0;
     }
-    for (source_index, source) in sources.iter().enumerate() {
-        if !candidate(source, bounds, left, top, tw, th, width, height) {
+    let blend_started = Instant::now();
+    for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len()) {
+        if candidate_sources.is_none()
+            && !candidate(
+                &sources[source_index],
+                bounds,
+                left,
+                top,
+                tw,
+                th,
+                width,
+                height,
+            )
+        {
             continue;
         }
+        let source = &sources[source_index];
         visits.fetch_add(1, Ordering::Relaxed);
+        let cached = tile_geometry
+            .iter()
+            .find(|(index, _)| *index == source_index)
+            .map(|(_, geometry)| geometry);
+        if cached.is_some() {
+            tile_cached_source_count += 1;
+        }
         let image = source_image(
             source_index,
             source,
@@ -1048,6 +1930,7 @@ fn render_one_tile(
             cache,
             hits,
             misses,
+            decodes,
             decode_micros,
             use_cache,
         )?;
@@ -1056,18 +1939,27 @@ fn render_one_tile(
                 let (sy, cy) = x_rays[px as usize];
                 let (sp, cp) = y_rays[py as usize];
                 let world = [sy * cp, sp, cy * cp];
-                if let Some((rgb, weight, ownership, x, y)) = sample(source, &image, world) {
-                    let cell = &mut accum[(py * tw + px) as usize];
+                let index = (py * tw + px) as usize;
+                let geometry = if let Some(cached) = cached {
+                    cached.get(source, index)
+                } else {
+                    sample_geometry(source, world)
+                };
+                if let Some(geometry) = geometry {
+                    let (rgb, weight, ownership, x, y) =
+                        sample_with_geometry(source, &image, geometry);
+                    let cell = &mut accum[index];
                     let blend_weight = match blend_mode {
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
                             let index = (py * tw + px) as usize;
-                            let (texture_energy, obstruction_confidence) = source_quality_maps
-                                [source_index]
+                            let quality = source_quality_maps[source_index]
                                 .as_ref()
-                                .expect("deghost quality map prepared in geometry pass")
-                                .sample(source.width, source.height, x, y);
-                            deghost_source_weight(
+                                .expect("deghost quality map prepared in geometry pass");
+                            let (texture_energy, obstruction_confidence) =
+                                quality.sample(source.width, source.height, x, y);
+                            let sharpness = quality.sharpness(source.width, source.height, x, y);
+                            deghost_source_weight_with_sharpness(
                                 ownership,
                                 f64::from(max_ownership.as_ref().unwrap()[index]),
                                 f64::from(max_unflagged_ownership.as_ref().unwrap()[index]),
@@ -1075,6 +1967,12 @@ fn render_one_tile(
                                 f64::from(max_structured_peer_texture.as_ref().unwrap()[index]),
                                 obstruction_confidence,
                                 texture_energy,
+                                sharpness,
+                                if sharpness_aware {
+                                    f64::from(max_peer_sharpness.as_ref().unwrap()[index])
+                                } else {
+                                    0.0
+                                },
                                 source.width.min(source.height),
                             )
                         }
@@ -1083,8 +1981,18 @@ fn render_one_tile(
                 }
             }
         }
+        if cached.is_some() {
+            tile_projection_reuses += count as u64;
+        }
     }
+    geometry_cached_sources.fetch_add(tile_cached_source_count, Ordering::Relaxed);
+    geometry_projection_reuses.fetch_add(tile_projection_reuses, Ordering::Relaxed);
+    blend_micros.fetch_add(
+        blend_started.elapsed().as_micros() as u64,
+        Ordering::Relaxed,
+    );
     let mut tile: RgbaImage = ImageBuffer::from_pixel(tw, th, Rgba([0, 0, 0, 0]));
+    let output_started = Instant::now();
     for py in 0..th {
         for px in 0..tw {
             let cell = accum[(py * tw + px) as usize];
@@ -1093,15 +2001,19 @@ fn render_one_tile(
                     px,
                     py,
                     Rgba([
-                        srgb(f64::from(cell[0] / cell[3])),
-                        srgb(f64::from(cell[1] / cell[3])),
-                        srgb(f64::from(cell[2] / cell[3])),
+                        srgb_from_blend_f32(cell[0] / cell[3]),
+                        srgb_from_blend_f32(cell[1] / cell[3]),
+                        srgb_from_blend_f32(cell[2] / cell[3]),
                         255,
                     ]),
                 );
             }
         }
     }
+    output_micros.fetch_add(
+        output_started.elapsed().as_micros() as u64,
+        Ordering::Relaxed,
+    );
     let out = dir.join(format!("{row}-{col}.png"));
     let temp = dir.join(format!(
         "{row}-{col}.tmp-{}-{:?}.png",
@@ -1145,17 +2057,20 @@ pub fn build_pyramid_levels_with_options(
     workers_requested: usize,
     mut checkpoint: impl FnMut(u64, u64) -> bool,
 ) -> crate::Result<(Vec<Value>, Value)> {
-    if !(32..=4096).contains(&memory_budget_mib) {
-        return Err(crate::Error::Invalid(
-            "memoryBudgetMiB must be 32..=4096".into(),
-        ));
+    if !(32..=crate::job_resources::MAX_JOB_MEMORY_MIB).contains(&memory_budget_mib) {
+        return Err(crate::Error::Invalid(format!(
+            "memoryBudgetMiB must be 32..={}",
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     if !(1..=32).contains(&workers_requested) {
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
     }
-    const WORKER_RESERVE_BYTES: u64 = 16 * 1024 * 1024;
-    let memory_workers =
-        ((memory_budget_mib as u64 * 1024 * 1024) / WORKER_RESERVE_BYTES).max(1) as usize;
+    const WORKER_RESERVE_BYTES: u64 = crate::job_resources::PYRAMID_WORKER_RESERVE_BYTES;
+    let memory_workers = (crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+        .ok_or_else(|| crate::Error::Invalid("memoryBudgetMiB overflows byte accounting".into()))?
+        / WORKER_RESERVE_BYTES)
+        .max(1) as usize;
     let started = Instant::now();
     let mut levels = Vec::new();
     let mut peak_workers = 0usize;
@@ -1347,7 +2262,354 @@ fn render_pyramid_tile(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn geometry_cache_reservation_includes_vector_header_at_exact_budget_edges() {
+        let slot_bytes = 4 * 1024 * 1024 + 64;
+        let header_bytes = std::mem::size_of::<Vec<(usize, TileGeometryCache)>>() as u64;
+        let per_worker_limit = GEOMETRY_CACHE_MAX_BYTES_PER_WORKER;
+
+        for workers in 1usize..=8 {
+            let workers_bytes = workers as u64;
+            for slots_requested in 0u64..=4 {
+                let exact_per_worker = if slots_requested == 0 {
+                    0
+                } else {
+                    header_bytes + slots_requested * slot_bytes
+                };
+                let exact_budget = exact_per_worker * workers_bytes;
+                for available in [
+                    exact_budget.saturating_sub(1),
+                    exact_budget,
+                    exact_budget.saturating_add(workers_bytes - 1),
+                ] {
+                    let (slots, reserved_per_worker) = bounded_geometry_cache_slots(
+                        available,
+                        workers,
+                        slot_bytes,
+                        per_worker_limit,
+                        header_bytes,
+                    )
+                    .unwrap();
+                    let reserved_total = reserved_per_worker * workers_bytes;
+                    assert!(reserved_total <= available);
+                    assert!(reserved_per_worker <= per_worker_limit);
+                    if slots > 0 {
+                        assert_eq!(
+                            reserved_per_worker,
+                            header_bytes + slots as u64 * slot_bytes
+                        );
+                    } else {
+                        assert_eq!(reserved_per_worker, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_blend_f32_lut_matches_reference_around_every_byte_boundary() {
+        let thresholds = srgb_f32_thresholds();
+        for byte in 1..=255usize {
+            let boundary = thresholds[byte];
+            let start = boundary.saturating_sub(256);
+            let end = boundary.saturating_add(256).min(1.0f32.to_bits());
+            for bits in start..=end {
+                let value = f32::from_bits(bits);
+                assert_eq!(
+                    srgb_from_blend_f32(value),
+                    srgb(f64::from(value)),
+                    "f32 sRGB lookup mismatch near byte {byte} at bits {bits:#010x}"
+                );
+            }
+        }
+
+        // Exercise actual blend-ratio-shaped values plus the complete coarse
+        // bucket boundaries without relying on host random-number libraries.
+        let bucket_base = srgb_f32_bucket_base();
+        for bucket in 0..bucket_base.len() as u32 {
+            let bits = bucket << 16;
+            let value = f32::from_bits(bits);
+            assert_eq!(srgb_from_blend_f32(value), srgb(f64::from(value)));
+        }
+        let mut state = 0x8d12_7a49u32;
+        for _ in 0..100_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let bits = state & 1.0f32.to_bits();
+            let value = f32::from_bits(bits);
+            assert_eq!(srgb_from_blend_f32(value), srgb(f64::from(value)));
+        }
+    }
+
+    fn wait_for_decode_waiters(cache: &DecodeCache, expected: u64) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while cache.decode_waits.load(Ordering::Relaxed) < expected {
+            assert!(
+                Instant::now() < deadline,
+                "decode waiters did not register before deadline"
+            );
+            std::thread::yield_now();
+        }
+    }
+
+    fn cache_test_source(path: PathBuf) -> Source {
+        Source {
+            path,
+            width: 4,
+            height: 4,
+            fx: 1.0,
+            fy: 1.0,
+            cx: 1.5,
+            cy: 1.5,
+            camera_to_world: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            source_plane_warp: None,
+            quality_map: Arc::new(Mutex::new(None)),
+            center: [0.0, 0.0, 1.0],
+            cone_radius: 1.0,
+        }
+    }
+
+    #[test]
+    fn decode_single_flight_shares_success_and_failure_with_concurrent_waiters() {
+        for should_fail in [false, true] {
+            let cache = Arc::new(DecodeCache::new(1024, 4));
+            let source = cache_test_source(PathBuf::from("injected"));
+            let source_bytes = [64];
+            let hits = AtomicU64::new(0);
+            let misses = AtomicU64::new(0);
+            let decodes = AtomicU64::new(0);
+            let decode_micros = AtomicU64::new(0);
+            let decode_calls = AtomicU64::new(0);
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            std::thread::scope(|scope| {
+                let mut joins = Vec::new();
+                for _ in 0..8 {
+                    let cache = cache.clone();
+                    let barrier = barrier.clone();
+                    let source = &source;
+                    let source_bytes_ref = &source_bytes;
+                    let hits_ref = &hits;
+                    let misses_ref = &misses;
+                    let decodes_ref = &decodes;
+                    let decode_micros_ref = &decode_micros;
+                    let decode_calls_ref = &decode_calls;
+                    let cache_wait = cache.clone();
+                    joins.push(scope.spawn(move || {
+                        barrier.wait();
+                        source_image_with(
+                            0,
+                            source,
+                            source_bytes_ref,
+                            &cache,
+                            hits_ref,
+                            misses_ref,
+                            decodes_ref,
+                            decode_micros_ref,
+                            true,
+                            |_| {
+                                decode_calls_ref.fetch_add(1, Ordering::Relaxed);
+                                wait_for_decode_waiters(&cache_wait, 7);
+                                if should_fail {
+                                    Err("injected decode failure".into())
+                                } else {
+                                    Ok(Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255]))))
+                                }
+                            },
+                        )
+                    }));
+                }
+                let results = joins
+                    .into_iter()
+                    .map(|join| join.join().unwrap())
+                    .collect::<Vec<_>>();
+                if should_fail {
+                    assert!(results.iter().all(|result| result.is_err()));
+                    assert!(results.iter().all(|result| result
+                        .as_ref()
+                        .unwrap_err()
+                        .to_string()
+                        .contains("injected decode failure")));
+                    assert_eq!(cache.decode_errors.load(Ordering::Relaxed), 1);
+                } else {
+                    assert!(results.iter().all(|result| result.is_ok()));
+                    assert!(results
+                        .windows(2)
+                        .all(|pair| pair[0].as_ref().unwrap().as_raw()
+                            == pair[1].as_ref().unwrap().as_raw()));
+                }
+            });
+            assert_eq!(decode_calls.load(Ordering::Relaxed), 1);
+            assert_eq!(decodes.load(Ordering::Relaxed), 1);
+            if should_fail {
+                assert!(cache.flights.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_panic_releases_slot_and_wakes_all_flight_waiters() {
+        let cache = Arc::new(DecodeCache::new(1024, 4));
+        let source = cache_test_source(PathBuf::from("panic-injected"));
+        let source_bytes = [64];
+        let hits = AtomicU64::new(0);
+        let misses = AtomicU64::new(0);
+        let decodes = AtomicU64::new(0);
+        let decode_micros = AtomicU64::new(0);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let results = std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for _ in 0..8 {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                let source = &source;
+                let source_bytes_ref = &source_bytes;
+                let hits_ref = &hits;
+                let misses_ref = &misses;
+                let decodes_ref = &decodes;
+                let decode_micros_ref = &decode_micros;
+                let cache_wait = cache.clone();
+                joins.push(scope.spawn(move || {
+                    barrier.wait();
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        source_image_with(
+                            0,
+                            source,
+                            source_bytes_ref,
+                            &cache,
+                            hits_ref,
+                            misses_ref,
+                            decodes_ref,
+                            decode_micros_ref,
+                            true,
+                            |_| -> std::result::Result<Arc<RgbaImage>, String> {
+                                wait_for_decode_waiters(&cache_wait, 7);
+                                panic!("injected decoder panic");
+                            },
+                        )
+                    }))
+                }));
+            }
+            joins
+                .into_iter()
+                .map(|join| join.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.as_ref().map_or(false, |value| value.is_err()))
+                .count(),
+            7
+        );
+        assert!(results
+            .iter()
+            .filter_map(|result| result.as_ref().ok())
+            .all(|result| {
+                result
+                    .as_ref()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("terminated unexpectedly")
+            }));
+        assert_eq!(decodes.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.decode_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(cache.active_decode_slots.load(Ordering::Relaxed), 0);
+        assert_eq!(*cache.decode_slots.lock().unwrap(), 0);
+        assert!(cache.flights.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn decode_gate_bounds_distinct_source_loads() {
+        let cache = Arc::new(DecodeCache::new(0, 2));
+        let sources = (0..6)
+            .map(|index| cache_test_source(PathBuf::from(format!("{index}"))))
+            .collect::<Vec<_>>();
+        let source_bytes = vec![64; sources.len()];
+        let hits = AtomicU64::new(0);
+        let misses = AtomicU64::new(0);
+        let decodes = AtomicU64::new(0);
+        let decode_micros = AtomicU64::new(0);
+        let active = AtomicU64::new(0);
+        let peak = AtomicU64::new(0);
+        let barrier = Arc::new(std::sync::Barrier::new(sources.len()));
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for (index, source) in sources.iter().enumerate() {
+                let cache = cache.clone();
+                let barrier = barrier.clone();
+                let source_bytes_ref = source_bytes.as_slice();
+                let hits_ref = &hits;
+                let misses_ref = &misses;
+                let decodes_ref = &decodes;
+                let decode_micros_ref = &decode_micros;
+                let active_ref = &active;
+                let peak_ref = &peak;
+                joins.push(scope.spawn(move || {
+                    barrier.wait();
+                    source_image_with(
+                        index,
+                        source,
+                        source_bytes_ref,
+                        &cache,
+                        hits_ref,
+                        misses_ref,
+                        decodes_ref,
+                        decode_micros_ref,
+                        false,
+                        |_| {
+                            let current = active_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                            peak_ref.fetch_max(current, Ordering::Relaxed);
+                            std::thread::sleep(Duration::from_millis(30));
+                            active_ref.fetch_sub(1, Ordering::Relaxed);
+                            Ok(Arc::new(RgbaImage::from_pixel(4, 4, Rgba([1, 2, 3, 255]))))
+                        },
+                    )
+                    .unwrap()
+                }));
+            }
+            for join in joins {
+                join.join().unwrap();
+            }
+        });
+        assert_eq!(decodes.load(Ordering::Relaxed), 6);
+        let decode_peak = cache.peak_decode_slots.load(Ordering::Relaxed);
+        assert!((1..=2).contains(&decode_peak));
+        assert!(peak.load(Ordering::Relaxed) <= 2);
+    }
+
+    #[test]
+    fn spatial_schedule_visits_each_tile_once_inside_bounded_two_dimensional_blocks() {
+        let tasks = (0..9)
+            .flat_map(|row| (0..11).map(move |col| (row, col)))
+            .collect();
+        let ordered = spatial_block_order(tasks, 11, 9, 4);
+        assert_eq!(ordered.len(), 99);
+        let unique = ordered
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), 99);
+        for block_row in 0..3 {
+            for block_col in 0..3 {
+                let group = ordered
+                    .iter()
+                    .copied()
+                    .filter(|(row, col)| row / 4 == block_row && col / 4 == block_col)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    group.len(),
+                    (9 - block_row * 4).min(4) as usize * (11 - block_col * 4).min(4) as usize
+                );
+                assert!(group
+                    .iter()
+                    .all(|(row, col)| *row / 4 == block_row && *col / 4 == block_col));
+            }
+        }
+    }
 
     #[test]
     fn sampler_uses_shader_pixel_center_and_srgb_interpolation_order() {
@@ -1371,6 +2633,12 @@ mod tests {
         img.put_pixel(0, 1, Rgba([200, 200, 200, 255]));
         img.put_pixel(1, 1, Rgba([255, 255, 255, 255]));
         let (rgb, weight, ownership, _, _) = sample(&source, &img, [0., 0., 1.]).unwrap();
+        let geometry = sample_geometry(&source, [0., 0., 1.]).unwrap();
+        assert_eq!(
+            sample_with_geometry(&source, &img, geometry),
+            (rgb, weight, ownership, geometry.0, geometry.1),
+            "prepared exact geometry must preserve the reference feather sample"
+        );
         let expected = linear((0. + 100. + 200. + 255.) / 4. / 255.);
         assert!((rgb[0] - expected).abs() < 1e-12);
         assert_eq!(weight, 1.);
@@ -1640,6 +2908,61 @@ mod tests {
         image
     }
 
+    fn synthetic_scene_value(yaw: f64, pitch: f64) -> u8 {
+        let x = ((yaw + std::f64::consts::PI) / 0.003).floor() as i64;
+        let y = ((std::f64::consts::FRAC_PI_2 - pitch) / 0.003).floor() as i64;
+        let mut hash = (x as u64).wrapping_mul(0x9e3779b97f4a7c15)
+            ^ (y as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 30;
+        hash = hash.wrapping_mul(0xbf58476d1ce4e5b9);
+        hash ^= hash >> 27;
+        hash = hash.wrapping_mul(0x94d049bb133111eb);
+        hash ^= hash >> 31;
+        (40 + hash % 200) as u8
+    }
+
+    fn synthetic_scene_source(path: &Path, yaw_offset: f64) {
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1152;
+        const FX: f64 = 1216.0;
+        const FY: f64 = 900.0;
+        const CX: f64 = (WIDTH as f64 - 1.0) * 0.5;
+        const CY: f64 = (HEIGHT as f64 - 1.0) * 0.5;
+        let (sin_yaw, cos_yaw) = yaw_offset.sin_cos();
+        let mut image = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let camera_x = (f64::from(x) - CX) / FX;
+                let camera_y = -(f64::from(y) - CY) / FY;
+                let world_x = cos_yaw * camera_x + sin_yaw;
+                let world_y = camera_y;
+                let world_z = -sin_yaw * camera_x + cos_yaw;
+                let yaw = world_x.atan2(world_z);
+                let pitch = world_y.atan2((world_x * world_x + world_z * world_z).sqrt());
+                let value = synthetic_scene_value(yaw, pitch);
+                image.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        image.save(path).unwrap();
+    }
+
+    fn collect_level_zero(output: &Path, width: u32, height: u32) -> RgbaImage {
+        let mut image = RgbaImage::new(width, height);
+        for row in 0..height.div_ceil(TILE) {
+            for col in 0..width.div_ceil(TILE) {
+                let tile = image::open(output.join("level-0").join(format!("{row}-{col}.png")))
+                    .unwrap()
+                    .into_rgba8();
+                for y in 0..tile.height() {
+                    for x in 0..tile.width() {
+                        image.put_pixel(col * TILE + x, row * TILE + y, *tile.get_pixel(x, y));
+                    }
+                }
+            }
+        }
+        image
+    }
+
     #[test]
     fn source_quality_map_flags_only_broad_dark_smooth_border_occlusion() {
         // Preserve the original moderate-contrast fixture as a conservative
@@ -1729,6 +3052,257 @@ mod tests {
         let flat_map = SourceQualityMap::from_image(&flat_dark);
         let (_, flat_confidence) = flat_map.sample(640, 360, 320., 180.);
         assert!(flat_confidence < SOURCE_QUALITY_SUSPECT_CONFIDENCE);
+    }
+
+    #[test]
+    fn normalized_local_sharpness_detects_blur_and_resists_exposure_shift() {
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 1152;
+        let mut crisp = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let broad = if (x / 64 + y / 64) % 2 == 0 {
+                    105i16
+                } else {
+                    155i16
+                };
+                let detail = if (x / 4 + y / 4) % 2 == 0 {
+                    -30i16
+                } else {
+                    30i16
+                };
+                let value = (broad + detail) as u8;
+                crisp.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        let mildly_blurred = image::imageops::blur(&crisp, 1.0);
+        let blurred = image::imageops::blur(&crisp, 1.5);
+        let exposure_shifted = RgbaImage::from_fn(WIDTH, HEIGHT, |x, y| {
+            let pixel = crisp.get_pixel(x, y).0[0];
+            let shifted = (f64::from(pixel) * 0.72 + 35.0).round() as u8;
+            Rgba([shifted, shifted, shifted, 255])
+        });
+        let crisp_map = SourceQualityMap::from_image(&crisp);
+        let mild_map = SourceQualityMap::from_image(&mildly_blurred);
+        let blurred_map = SourceQualityMap::from_image(&blurred);
+        let shifted_map = SourceQualityMap::from_image(&exposure_shifted);
+        let (crisp_texture, _) = crisp_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let (mild_texture, _) = mild_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let (blurred_texture, _) = blurred_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let crisp_sharpness = crisp_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let mild_sharpness = mild_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let blurred_sharpness = blurred_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let shifted_sharpness = shifted_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(crisp_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(mild_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(blurred_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        assert!(crisp_sharpness >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS);
+        assert!(
+            crisp_sharpness > mild_sharpness && mild_sharpness > blurred_sharpness,
+            "sharpness should decrease monotonically with blur: crisp={crisp_sharpness}, sigma1={mild_sharpness}, sigma1.5={blurred_sharpness}"
+        );
+        assert!(
+            blurred_sharpness < crisp_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX,
+            "mild blur did not reduce normalized local sharpness enough: crisp={crisp_sharpness}, blurred={blurred_sharpness}"
+        );
+        assert!(
+            (shifted_sharpness / crisp_sharpness).clamp(0.0, 1.0) > 0.75,
+            "exposure shift changed normalized sharpness too much: crisp={crisp_sharpness}, shifted={shifted_sharpness}"
+        );
+
+        // A single-scale checker can lose broad contrast at the same time as
+        // fine detail. Keep it as a conservative limitation check: sharpness
+        // must still move monotonically, while the peer rule may decline to
+        // suppress when the relative evidence does not clear its threshold.
+        let mut single_scale = RgbaImage::new(WIDTH, HEIGHT);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let value = if (x / 4 + y / 4) % 2 == 0 { 35 } else { 220 };
+                single_scale.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        let single_blur = image::imageops::blur(&single_scale, 1.0);
+        let single_crisp_map = SourceQualityMap::from_image(&single_scale);
+        let single_blur_map = SourceQualityMap::from_image(&single_blur);
+        let single_crisp_texture = single_crisp_map.sample(WIDTH, HEIGHT, 1024.0, 576.0).0;
+        let single_blur_texture = single_blur_map.sample(WIDTH, HEIGHT, 1024.0, 576.0).0;
+        let single_crisp_sharpness = single_crisp_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        let single_blur_sharpness = single_blur_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(
+            single_blur_sharpness < single_crisp_sharpness,
+            "single-scale blur should lower sharpness even when it may not meet suppression cutoff: crisp={single_crisp_sharpness}, blurred={single_blur_sharpness}"
+        );
+        let single_blur_is_cap_eligible =
+            single_blur_sharpness <= single_crisp_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
+        let single_blur_weight = deghost_source_weight_with_sharpness(
+            0.35,
+            0.35,
+            if single_blur_is_cap_eligible {
+                0.25
+            } else {
+                0.35
+            },
+            if single_blur_is_cap_eligible {
+                0.35
+            } else {
+                f64::NEG_INFINITY
+            },
+            single_crisp_texture,
+            0.0,
+            single_blur_texture,
+            single_blur_sharpness,
+            single_crisp_sharpness,
+            2160,
+        );
+        if !single_blur_is_cap_eligible {
+            assert_eq!(single_blur_weight, 1.0);
+        } else {
+            assert!(single_blur_weight < 1.0);
+        }
+
+        let flat = RgbaImage::from_pixel(WIDTH, HEIGHT, Rgba([128, 128, 128, 255]));
+        let flat_map = SourceQualityMap::from_image(&flat);
+        let (flat_texture, _) = flat_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
+        let flat_sharpness = flat_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
+        assert!(flat_texture < SOURCE_QUALITY_BLUR_PEER_TEXTURE);
+        let flat_weight = deghost_source_weight_with_sharpness(
+            0.3,
+            0.35,
+            0.25,
+            0.3,
+            flat_texture,
+            0.0,
+            flat_texture,
+            flat_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        assert_eq!(flat_weight, deghost_weight(0.3, 0.35, 2160));
+
+        let blurred_weight = deghost_source_weight_with_sharpness(
+            0.35,
+            0.35,
+            0.25,
+            0.35,
+            crisp_texture,
+            0.0,
+            blurred_texture,
+            blurred_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        let crisp_weight = deghost_source_weight_with_sharpness(
+            0.25,
+            0.35,
+            0.25,
+            0.35,
+            crisp_texture,
+            0.0,
+            crisp_texture,
+            crisp_sharpness,
+            crisp_sharpness,
+            2160,
+        );
+        assert!(blurred_weight < 0.001);
+        assert_eq!(crisp_weight, 1.0);
+    }
+
+    #[test]
+    fn sharpness_aware_render_improves_over_legacy_deghost_on_same_blurred_overlap() {
+        const WIDTH: u32 = 1025;
+        const HEIGHT: u32 = 512;
+        const SOURCE_WIDTH: u32 = 2048;
+        const SOURCE_HEIGHT: u32 = 1152;
+        const FX: f64 = 1216.0;
+        const FY: f64 = 900.0;
+        const CX: f64 = (SOURCE_WIDTH as f64 - 1.0) * 0.5;
+        const CY: f64 = (SOURCE_HEIGHT as f64 - 1.0) * 0.5;
+        let root = std::env::temp_dir().join(format!(
+            "lumia-blur-render-compare-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let center_path = root.join("blur-center.png");
+        let peer_path = root.join("sharp-peer.png");
+        synthetic_scene_source(&center_path, 0.0);
+        synthetic_scene_source(&peer_path, -0.6);
+        let center = image::open(&center_path).unwrap().into_rgba8();
+        image::imageops::blur(&center, 1.5)
+            .save(&center_path)
+            .unwrap();
+        let (sin_yaw, cos_yaw) = (-0.6f64).sin_cos();
+        let layout = serde_json::json!({
+            "schemaVersion":1,"projection":"spherical",
+            "width":WIDTH,"height":HEIGHT,
+            "yawMinRad":-0.8,"yawMaxRad":0.2,
+            "pitchMinRad":-0.2,"pitchMaxRad":0.2,
+            "renderBlendMode":"deghost",
+            "tiles":[
+                {"path":center_path,"width":SOURCE_WIDTH,"height":SOURCE_HEIGHT,
+                 "fx":FX,"fy":FY,"cx":CX,"cy":CY,
+                 "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]},
+                {"path":peer_path,"width":SOURCE_WIDTH,"height":SOURCE_HEIGHT,
+                 "fx":FX,"fy":FY,"cx":CX,"cy":CY,
+                 "cameraToWorld":[cos_yaw,0.0,sin_yaw,0.0,1.0,0.0,-sin_yaw,0.0,cos_yaw]}
+            ]
+        });
+        let legacy_dir = root.join("legacy");
+        let sharp_dir = root.join("sharpness-aware");
+        let checkpoint = |_, _| true;
+        render_layout_tiles_with_options_internal(
+            &layout,
+            &legacy_dir,
+            32,
+            1,
+            true,
+            checkpoint,
+            false,
+        )
+        .unwrap();
+        render_layout_tiles_with_options_internal(
+            &layout, &sharp_dir, 32, 1, true, checkpoint, true,
+        )
+        .unwrap();
+        let legacy = collect_level_zero(&legacy_dir, WIDTH, HEIGHT);
+        let sharp = collect_level_zero(&sharp_dir, WIDTH, HEIGHT);
+        let mut legacy_error = 0.0;
+        let mut sharp_error = 0.0;
+        let mut samples = 0usize;
+        for y in 0..HEIGHT {
+            let pitch = 0.2 - (f64::from(y) + 0.5) / f64::from(HEIGHT) * 0.4;
+            if pitch.abs() > 0.09 {
+                continue;
+            }
+            for x in 0..WIDTH {
+                let yaw = -0.8 + (f64::from(x) + 0.5) / f64::from(WIDTH);
+                if (yaw + 0.3).abs() > 0.08 {
+                    continue;
+                }
+                let expected = f64::from(synthetic_scene_value(yaw, pitch));
+                let old = legacy.get_pixel(x, y).0;
+                let new = sharp.get_pixel(x, y).0;
+                assert_eq!(old[3], 255, "legacy overlap unexpectedly uncovered");
+                assert_eq!(new[3], old[3], "blur repair changed overlap coverage");
+                legacy_error += (f64::from(old[0]) - expected).abs();
+                sharp_error += (f64::from(new[0]) - expected).abs();
+                samples += 1;
+            }
+        }
+        assert!(samples > 1000);
+        legacy_error /= samples as f64;
+        sharp_error /= samples as f64;
+        assert!(
+            sharp_error + 1.0 < legacy_error,
+            "sharpness-aware render should beat legacy deghost on the identical blur fixture: legacy MAE={legacy_error:.2}, sharpness-aware MAE={sharp_error:.2}, samples={samples}"
+        );
+        println!(
+            "blur-aware render ROI MAE: legacy={legacy_error:.2}, sharpness-aware={sharp_error:.2}, samples={samples}"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2077,6 +3651,36 @@ mod tests {
     }
 
     #[test]
+    fn renderer_identity_prevents_mixed_algorithm_cache_without_deleting_tiles() {
+        let root = std::env::temp_dir().join(format!(
+            "lumia-render-identity-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let level = root.join("level-0");
+        fs::create_dir_all(&level).unwrap();
+        let cached = level.join("0-0.png");
+        fs::write(&cached, b"preserve cached tile").unwrap();
+        let error = validate_or_write_renderer_identity(&root, BlendMode::Deghost).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("create a task copy and restitch"));
+        assert_eq!(fs::read(&cached).unwrap(), b"preserve cached tile");
+        assert!(!root.join("renderer-identity.json").exists());
+
+        // Feather is byte-compatible with legacy caches and may adopt a marker;
+        // switching that output to deghost is then rejected by identity.
+        validate_or_write_renderer_identity(&root, BlendMode::Feather).unwrap();
+        assert!(validate_or_write_renderer_identity(&root, BlendMode::Feather).is_ok());
+        assert!(validate_or_write_renderer_identity(&root, BlendMode::Deghost).is_err());
+        assert_eq!(fs::read(&cached).unwrap(), b"preserve cached tile");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parallel_tiles_match_serial_and_memory_budget_clamps_workers() {
         let root = std::env::temp_dir().join(format!(
             "lumia-render-parallel-{}-{}",
@@ -2111,6 +3715,17 @@ mod tests {
                 .unwrap();
         assert_eq!(low["workersEffective"].as_u64(), Some(1));
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
+        assert_eq!(parallel["sourceDecodes"].as_u64(), Some(1));
+        assert_eq!(parallel["sourceDecodeErrors"].as_u64(), Some(0));
+        assert!(
+            parallel["sourceDecodePeakInFlight"].as_u64().unwrap()
+                <= parallel["reservedDecodeSlots"].as_u64().unwrap()
+        );
+        assert!(parallel["decodeSlotReserveBytes"].as_u64().unwrap() > 0);
+        assert!(
+            parallel["peakSourceCacheBytes"].as_u64().unwrap()
+                <= parallel["sourceCacheLimitBytes"].as_u64().unwrap()
+        );
         for row in 0..1 {
             for col in 0..3 {
                 let name = format!("level-0/{row}-{col}.png");
@@ -2190,10 +3805,65 @@ mod tests {
             );
         }
 
+        let mut shifted_deghost_layout = shifted_layout.clone();
+        shifted_deghost_layout["renderBlendMode"] = serde_json::json!("deghost");
+        let shifted_deghost_cached_dir = root.join("shifted-deghost-cached");
+        let shifted_deghost_fallback_dir = root.join("shifted-deghost-fallback");
+        let shifted_deghost_cached = render_layout_tiles_with_options(
+            &shifted_deghost_layout,
+            &shifted_deghost_cached_dir,
+            128,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        let shifted_deghost_fallback = render_layout_tiles_with_options(
+            &shifted_deghost_layout,
+            &shifted_deghost_fallback_dir,
+            92,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(shifted_deghost_cached["geometryCacheEnabled"], true);
+        assert_eq!(shifted_deghost_fallback["geometryCacheEnabled"], false);
+        assert_eq!(shifted_deghost_cached["workersEffective"].as_u64(), Some(1));
+        assert_eq!(
+            shifted_deghost_fallback["workersEffective"].as_u64(),
+            Some(1)
+        );
+        assert!(
+            shifted_deghost_cached["geometryProjectionEvaluationsAvoided"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            shifted_deghost_fallback["geometryProjectionEvaluationsAvoided"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            shifted_deghost_cached["geometryCacheBytesPerWorkerReserved"]
+                .as_u64()
+                .unwrap()
+                <= GEOMETRY_CACHE_MAX_BYTES_PER_WORKER
+        );
+        for col in 0..3 {
+            let name = format!("level-0/0-{col}.png");
+            assert_eq!(
+                fs::read(shifted_deghost_cached_dir.join(&name)).unwrap(),
+                fs::read(shifted_deghost_fallback_dir.join(&name)).unwrap(),
+                "warped deghost output changed when bounded geometry reuse was disabled"
+            );
+        }
+
         let mut deghost_layout = layout.clone();
         deghost_layout["renderBlendMode"] = serde_json::json!("deghost");
         let deghost_serial_dir = root.join("deghost-serial");
         let deghost_parallel_dir = root.join("deghost-parallel");
+        let deghost_fallback_dir = root.join("deghost-fallback");
         let deghost_serial = render_layout_tiles_with_options(
             &deghost_layout,
             &deghost_serial_dir,
@@ -2212,8 +3882,24 @@ mod tests {
             |_, _| true,
         )
         .unwrap();
+        let deghost_fallback = render_layout_tiles_with_options(
+            &deghost_layout,
+            &deghost_fallback_dir,
+            92,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(deghost_serial["geometryCacheEnabled"], true);
+        assert_eq!(deghost_fallback["geometryCacheEnabled"], false);
+        assert_eq!(deghost_serial["workersEffective"].as_u64(), Some(1));
+        assert_eq!(deghost_fallback["workersEffective"].as_u64(), Some(1));
         assert_eq!(serial["blendModel"], "source-edge-smoothstep-feather");
-        assert_eq!(deghost_serial["blendModel"], "max-score-softmax-ownership");
+        assert_eq!(
+            deghost_serial["blendModel"],
+            "sharpness-aware-max-score-softmax-ownership"
+        );
         assert_eq!(
             deghost_serial["completedTiles"],
             deghost_parallel["completedTiles"]
@@ -2230,6 +3916,11 @@ mod tests {
                 deghost_bytes,
                 fs::read(deghost_parallel_dir.join(&name)).unwrap(),
                 "deghost output must be deterministic across worker counts"
+            );
+            assert_eq!(
+                deghost_bytes,
+                fs::read(deghost_fallback_dir.join(&name)).unwrap(),
+                "unwarped deghost output changed when bounded geometry reuse was disabled"
             );
         }
         fs::remove_dir_all(root).unwrap();
@@ -2289,7 +3980,18 @@ mod tests {
         let parallel =
             render_layout_tiles_with_options(&layout, &parallel_dir, 512, 8, true, |_, _| true)
                 .unwrap();
-        assert_eq!(original["blendModel"], "max-score-softmax-ownership");
+        assert_eq!(
+            original["blendModel"],
+            "sharpness-aware-max-score-softmax-ownership"
+        );
+        assert_eq!(original["geometryCacheEnabled"], true);
+        assert!(original["geometryCachedSourceTileCount"].as_u64().unwrap() > 0);
+        assert!(
+            original["geometryProjectionEvaluationsAvoided"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
         assert_eq!(original["completedTiles"], reversed["completedTiles"]);
         assert_eq!(original["completedTiles"], parallel["completedTiles"]);

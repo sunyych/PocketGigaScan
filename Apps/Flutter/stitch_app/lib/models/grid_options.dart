@@ -6,6 +6,30 @@ enum TraversalAxis { row, column }
 
 enum StartCorner { topLeft, topRight, bottomLeft, bottomRight }
 
+enum GridConstraintOrigin { operatorAction, systemFallback, legacyUnknown }
+
+GridConstraintOrigin gridConstraintOriginFromJson(Object? value) =>
+    switch (value) {
+      'operator' => GridConstraintOrigin.operatorAction,
+      'systemFallback' => GridConstraintOrigin.systemFallback,
+      _ => GridConstraintOrigin.legacyUnknown,
+    };
+
+class GridPlacementConstraint {
+  const GridPlacementConstraint({required this.kind, required this.origin});
+
+  final String kind;
+  final GridConstraintOrigin origin;
+
+  String get originName => switch (origin) {
+    GridConstraintOrigin.operatorAction => 'operator',
+    GridConstraintOrigin.systemFallback => 'systemFallback',
+    GridConstraintOrigin.legacyUnknown => 'legacyUnknown',
+  };
+
+  Map<String, Object?> toJson() => {'kind': kind, 'origin': originName};
+}
+
 class GridCell {
   const GridCell(this.row, this.column);
   final int row;
@@ -39,6 +63,93 @@ Set<GridCell> remapForcedCellsByPhoto({
   };
 }
 
+GridOptions remapGridLocksByPhoto({
+  required List<ImportedPhoto> photos,
+  required List<GridCell> oldMapping,
+  required GridOptions oldOptions,
+  required GridOptions nextOptions,
+  required List<GridCell> newMapping,
+  required bool oldMappingValid,
+  required bool newMappingValid,
+}) {
+  final originsByPhoto = Map<String, GridConstraintOrigin>.of(
+    oldOptions.lockedPhotoOrigins,
+  );
+  if (oldMappingValid && oldMapping.length == photos.length) {
+    for (var index = 0; index < photos.length; index++) {
+      final oldCell = oldMapping[index];
+      if (oldOptions.activeForcedGridCells.contains(oldCell)) {
+        originsByPhoto.putIfAbsent(
+          photos[index].storedPath,
+          () =>
+              oldOptions.forceGridCellOrigins[oldCell] ??
+              GridConstraintOrigin.legacyUnknown,
+        );
+      }
+    }
+  }
+
+  final pending = <GridCell>{...oldOptions.pendingForceGridCells};
+  if (oldMappingValid) {
+    final mappedCells = oldMapping.toSet();
+    for (final cell in oldOptions.activeForcedGridCells) {
+      if (!mappedCells.contains(cell)) pending.add(cell);
+    }
+  } else {
+    final unassociatedCount =
+        (oldOptions.forceGridCells.length -
+                originsByPhoto.length -
+                pending.length)
+            .clamp(0, oldOptions.forceGridCells.length);
+    final unresolvedCandidates = oldOptions.activeForcedGridCells.toList()
+      ..sort(
+        (a, b) => a.row != b.row
+            ? a.row.compareTo(b.row)
+            : a.column.compareTo(b.column),
+      );
+    pending.addAll(unresolvedCandidates.take(unassociatedCount));
+  }
+  if (!newMappingValid || newMapping.length != photos.length) {
+    final pendingOrigins = Map<GridCell, GridConstraintOrigin>.of(
+      oldOptions.forceGridCellOrigins,
+    );
+    for (final cell in oldOptions.forceGridCells) {
+      pendingOrigins.putIfAbsent(
+        cell,
+        () => GridConstraintOrigin.legacyUnknown,
+      );
+    }
+    return nextOptions.copyWith(
+      forceGridCells: oldOptions.forceGridCells,
+      forceGridCellOrigins: pendingOrigins,
+      lockedPhotoOrigins: originsByPhoto,
+      pendingForceGridCells: pending,
+    );
+  }
+
+  final forced = <GridCell>{};
+  final cellOrigins = <GridCell, GridConstraintOrigin>{};
+  for (var index = 0; index < photos.length; index++) {
+    final origin = originsByPhoto[photos[index].storedPath];
+    if (origin != null) {
+      final cell = newMapping[index];
+      forced.add(cell);
+      cellOrigins[cell] = origin;
+    }
+  }
+
+  forced.addAll(pending);
+  for (final cell in pending) {
+    cellOrigins.putIfAbsent(cell, () => GridConstraintOrigin.legacyUnknown);
+  }
+  return nextOptions.copyWith(
+    forceGridCells: forced,
+    forceGridCellOrigins: cellOrigins,
+    lockedPhotoOrigins: originsByPhoto,
+    pendingForceGridCells: pending,
+  );
+}
+
 class GridOptions {
   const GridOptions({
     this.mode = GridMode.filename,
@@ -48,6 +159,9 @@ class GridOptions {
     this.startCorner = StartCorner.topLeft,
     this.serpentine = false,
     this.forceGridCells = const {},
+    this.forceGridCellOrigins = const {},
+    this.lockedPhotoOrigins = const {},
+    this.pendingForceGridCells = const {},
   });
 
   static const _maxInt = 0x7fffffffffffffff;
@@ -62,6 +176,11 @@ class GridOptions {
   final StartCorner startCorner;
   final bool serpentine;
   final Set<GridCell> forceGridCells;
+  final Map<GridCell, GridConstraintOrigin> forceGridCellOrigins;
+  final Map<String, GridConstraintOrigin> lockedPhotoOrigins;
+  final Set<GridCell> pendingForceGridCells;
+  Set<GridCell> get activeForcedGridCells =>
+      forceGridCells.difference(pendingForceGridCells);
 
   GridOptions copyWith({
     GridMode? mode,
@@ -71,6 +190,9 @@ class GridOptions {
     StartCorner? startCorner,
     bool? serpentine,
     Set<GridCell>? forceGridCells,
+    Map<GridCell, GridConstraintOrigin>? forceGridCellOrigins,
+    Map<String, GridConstraintOrigin>? lockedPhotoOrigins,
+    Set<GridCell>? pendingForceGridCells,
   }) => GridOptions(
     mode: mode ?? this.mode,
     rows: rows ?? this.rows,
@@ -79,12 +201,62 @@ class GridOptions {
     startCorner: startCorner ?? this.startCorner,
     serpentine: serpentine ?? this.serpentine,
     forceGridCells: forceGridCells ?? this.forceGridCells,
+    forceGridCellOrigins: forceGridCellOrigins ?? this.forceGridCellOrigins,
+    lockedPhotoOrigins: lockedPhotoOrigins ?? this.lockedPhotoOrigins,
+    pendingForceGridCells: pendingForceGridCells ?? this.pendingForceGridCells,
   );
 
-  GridOptions toggleForced(GridCell cell) {
+  GridOptions toggleForced(GridCell cell, {String? photoPath}) {
+    final isLocked = photoPath == null
+        ? activeForcedGridCells.contains(cell)
+        : lockedPhotoOrigins.containsKey(photoPath) ||
+              activeForcedGridCells.contains(cell);
+    return setPhotoLock(cell, photoPath, locked: !isLocked);
+  }
+
+  GridOptions setPhotoLock(
+    GridCell cell,
+    String? photoPath, {
+    required bool locked,
+  }) {
     final updated = {...forceGridCells};
-    if (!updated.add(cell)) updated.remove(cell);
-    return copyWith(forceGridCells: updated);
+    final cellOrigins = Map<GridCell, GridConstraintOrigin>.of(
+      forceGridCellOrigins,
+    );
+    final photoOrigins = Map<String, GridConstraintOrigin>.of(
+      lockedPhotoOrigins,
+    );
+    if (!locked) {
+      if (!pendingForceGridCells.contains(cell)) updated.remove(cell);
+      cellOrigins.remove(cell);
+      if (photoPath != null) photoOrigins.remove(photoPath);
+    } else {
+      updated.add(cell);
+      cellOrigins[cell] = GridConstraintOrigin.operatorAction;
+      if (photoPath != null) {
+        photoOrigins[photoPath] = GridConstraintOrigin.operatorAction;
+      }
+    }
+    return copyWith(
+      forceGridCells: updated,
+      forceGridCellOrigins: cellOrigins,
+      lockedPhotoOrigins: photoOrigins,
+    );
+  }
+
+  GridPlacementConstraint placementFor(ImportedPhoto photo, GridCell cell) {
+    final hardLock =
+        activeForcedGridCells.contains(cell) ||
+        lockedPhotoOrigins.containsKey(photo.storedPath);
+    final origin =
+        lockedPhotoOrigins[photo.storedPath] ??
+        (hardLock
+            ? (forceGridCellOrigins[cell] ?? GridConstraintOrigin.legacyUnknown)
+            : GridConstraintOrigin.systemFallback);
+    return GridPlacementConstraint(
+      kind: hardLock ? 'hardGridLock' : 'gridPrior',
+      origin: origin,
+    );
   }
 
   String? get validationError {
@@ -155,7 +327,136 @@ class GridOptions {
     'forceGridCells': forceGridCells
         .map((cell) => {'row': cell.row, 'column': cell.column})
         .toList(),
+    'forceGridCellOrigins': forceGridCellOrigins.entries
+        .map(
+          (entry) => {
+            'row': entry.key.row,
+            'column': entry.key.column,
+            'origin': GridPlacementConstraint(
+              kind: 'hardGridLock',
+              origin: entry.value,
+            ).originName,
+          },
+        )
+        .toList(),
+    'lockedPhotoOrigins': lockedPhotoOrigins.entries
+        .map(
+          (entry) => {
+            'storedPath': entry.key,
+            'origin': GridPlacementConstraint(
+              kind: 'hardGridLock',
+              origin: entry.value,
+            ).originName,
+          },
+        )
+        .toList(),
+    'pendingForceGridCells': pendingForceGridCells
+        .map((cell) => {'row': cell.row, 'column': cell.column})
+        .toList(),
   };
+
+  static GridOptions fromJson(
+    Map<String, Object?> json, {
+    required List<ImportedPhoto> photos,
+  }) {
+    final forced = (json['forceGridCells'] as List<Object?>? ?? const [])
+        .map((value) => value as Map<String, Object?>)
+        .map((value) => GridCell(value['row']! as int, value['column']! as int))
+        .toSet();
+    final cellOrigins = <GridCell, GridConstraintOrigin>{
+      for (final value
+          in (json['forceGridCellOrigins'] as List<Object?>? ?? const []))
+        if (value is Map<String, Object?>)
+          GridCell(value['row']! as int, value['column']! as int):
+              gridConstraintOriginFromJson(value['origin']),
+    };
+    final photoOrigins = <String, GridConstraintOrigin>{
+      for (final value
+          in (json['lockedPhotoOrigins'] as List<Object?>? ?? const []))
+        if (value is Map<String, Object?>)
+          value['storedPath']! as String: gridConstraintOriginFromJson(
+            value['origin'],
+          ),
+    };
+    final pending =
+        (json['pendingForceGridCells'] as List<Object?>? ?? const [])
+            .map((value) => value as Map<String, Object?>)
+            .map(
+              (value) =>
+                  GridCell(value['row']! as int, value['column']! as int),
+            )
+            .toSet();
+    final corner = switch (json['startCorner']) {
+      'top-right' => StartCorner.topRight,
+      'bottom-left' => StartCorner.bottomLeft,
+      'bottom-right' => StartCorner.bottomRight,
+      _ => StartCorner.topLeft,
+    };
+    final mode = json['mode'] == 'sequence'
+        ? GridMode.sequence
+        : GridMode.filename;
+    final options = GridOptions(
+      mode: mode,
+      rows: json['rows'] as int? ?? 1,
+      columns: json['columns'] as int? ?? 1,
+      axis: json['axis'] == 'column' ? TraversalAxis.column : TraversalAxis.row,
+      startCorner: corner,
+      serpentine: json['serpentine'] as bool? ?? false,
+      forceGridCells: forced,
+      forceGridCellOrigins: cellOrigins,
+      lockedPhotoOrigins: photoOrigins,
+      pendingForceGridCells: pending,
+    );
+    if (forced.isNotEmpty) {
+      final mapping = mode == GridMode.filename
+          ? GridMapping.fromFilenames(photos)
+          : GridMapping.sequence(photos, options);
+      if (mapping.isValid && mapping.cells.length == photos.length) {
+        final hadStablePhotoOrigins =
+            (json['lockedPhotoOrigins'] as List<Object?>? ?? const [])
+                .isNotEmpty;
+        final mappedCells = mapping.cells.toSet();
+        for (var index = 0; index < photos.length; index++) {
+          final cell = mapping.cells[index];
+          if (forced.contains(cell) && !pending.contains(cell)) {
+            final path = photos[index].storedPath;
+            if (!photoOrigins.containsKey(path)) {
+              final recordedCellOrigin = cellOrigins[cell];
+              if (!hadStablePhotoOrigins || recordedCellOrigin != null) {
+                photoOrigins[path] =
+                    recordedCellOrigin ?? GridConstraintOrigin.legacyUnknown;
+              } else {
+                pending.add(cell);
+                cellOrigins[cell] = GridConstraintOrigin.legacyUnknown;
+              }
+            }
+          }
+        }
+        for (final cell in forced) {
+          if (!mappedCells.contains(cell)) {
+            pending.add(cell);
+            cellOrigins.putIfAbsent(
+              cell,
+              () => GridConstraintOrigin.legacyUnknown,
+            );
+          }
+        }
+      } else {
+        for (final cell in forced) {
+          pending.add(cell);
+          cellOrigins.putIfAbsent(
+            cell,
+            () => GridConstraintOrigin.legacyUnknown,
+          );
+        }
+      }
+    }
+    return options.copyWith(
+      forceGridCellOrigins: cellOrigins,
+      lockedPhotoOrigins: photoOrigins,
+      pendingForceGridCells: pending,
+    );
+  }
 }
 
 class GridMapping {
@@ -288,16 +589,33 @@ class GridMapping {
   List<Map<String, Object?>> tiles(
     List<ImportedPhoto> photos, {
     Set<GridCell> forced = const {},
+    Map<GridCell, GridConstraintOrigin> forceGridCellOrigins = const {},
+    Map<String, GridConstraintOrigin> lockedPhotoOrigins = const {},
+    Set<GridCell> pendingForceGridCells = const {},
   }) {
     if (!isValid || photos.length != cells.length) return const [];
     return List.generate(photos.length, (index) {
       final photo = photos[index];
       final cell = cells[index];
+      final hardLock =
+          (forced.contains(cell) && !pendingForceGridCells.contains(cell)) ||
+          lockedPhotoOrigins.containsKey(photo.storedPath);
+      final origin =
+          lockedPhotoOrigins[photo.storedPath] ??
+          (hardLock
+              ? (forceGridCellOrigins[cell] ??
+                    GridConstraintOrigin.legacyUnknown)
+              : GridConstraintOrigin.systemFallback);
+      final placement = GridPlacementConstraint(
+        kind: hardLock ? 'hardGridLock' : 'gridPrior',
+        origin: origin,
+      );
       return {
         'row': cell.row,
         'column': cell.column,
         'path': photo.storedPath,
-        'forceGrid': forced.contains(cell),
+        'forceGrid': hardLock,
+        'placementConstraint': placement.toJson(),
       };
     });
   }

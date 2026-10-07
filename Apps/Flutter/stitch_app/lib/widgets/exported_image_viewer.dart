@@ -4,12 +4,16 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:crypto/crypto.dart';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:path/path.dart' as p;
 
 import '../models/export_fingerprint.dart';
 import '../services/mobile_storage_service.dart';
+import '../services/output_source_locator.dart';
+import '../services/task_record_service.dart';
 import '../l10n/localized_text.dart';
 import '../l10n/stitch_localizations.dart';
 
@@ -29,6 +33,7 @@ class ExportedImageViewer extends StatefulWidget {
     required this.legacyTaskBindingVerified,
     this.mobileStorageService,
     this.exportMimeType,
+    this.traceRecord,
   });
 
   final String exportFilePath;
@@ -38,6 +43,7 @@ class ExportedImageViewer extends StatefulWidget {
   final bool legacyTaskBindingVerified;
   final MobileStorageService? mobileStorageService;
   final String? exportMimeType;
+  final TaskRecordSnapshot? traceRecord;
 
   Future<void> _saveExport(BuildContext context) async {
     final service = mobileStorageService;
@@ -90,6 +96,10 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
   String? _staleReason;
   bool _loading = true;
   bool _showSourceInformation = false;
+  bool _inspectMode = false;
+  Map<String, Object?>? _traceLayout;
+  String? _traceUnavailableReason;
+  OutputPixelTrace? _pixelTrace;
   bool _initialTransformSet = false;
   int _sourceGeneration = 0;
   Size? _viewportSize;
@@ -116,7 +126,9 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         oldWidget.legacyTaskAssociationPresent !=
             widget.legacyTaskAssociationPresent ||
         oldWidget.legacyTaskBindingVerified !=
-            widget.legacyTaskBindingVerified) {
+            widget.legacyTaskBindingVerified ||
+        oldWidget.traceRecord?.task.id != widget.traceRecord?.task.id ||
+        !identical(oldWidget.traceRecord, widget.traceRecord)) {
       _showSourceInformation = false;
       unawaited(_fileWatch?.cancel());
       _pyramid = null;
@@ -164,6 +176,10 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         _loading = true;
         _error = null;
         _staleReason = null;
+        _traceLayout = null;
+        _traceUnavailableReason = null;
+        _inspectMode = false;
+        _pixelTrace = null;
       });
     }
     try {
@@ -207,6 +223,17 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
       if (!_isCurrentSource(generation, exportPath, pyramidDirectory)) return;
       final decoded = jsonDecode(manifestText);
       final pyramid = _Pyramid.parse(decoded);
+      Map<String, Object?>? traceLayout;
+      try {
+        traceLayout = await _loadTraceLayout(
+          decodedManifest: decoded,
+          pyramid: pyramid,
+          generation: generation,
+          exportPath: exportPath,
+        );
+      } on Object {
+        _traceUnavailableReason = 'traceLoadFailed';
+      }
       if (!await _validateExport(
         generation: generation,
         exportPath: exportPath,
@@ -223,6 +250,9 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         _loading = false;
         _error = null;
         _level = null;
+        _traceLayout = traceLayout;
+        _inspectMode = false;
+        _pixelTrace = null;
       });
       _applyFitWhenLaidOut();
     } on Object catch (error) {
@@ -231,6 +261,370 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         _loading = false;
         _error = error is FormatException ? error.message : '无法安全读取任务预览：$error';
       });
+    }
+  }
+
+  Future<Map<String, Object?>?> _loadTraceLayout({
+    required Object? decodedManifest,
+    required _Pyramid pyramid,
+    required int generation,
+    required String exportPath,
+  }) async {
+    final snapshot = widget.traceRecord;
+    _traceUnavailableReason = null;
+    if (snapshot == null) return null;
+    final outputs = snapshot.record['outputs'];
+    final diagnostics = snapshot.record['diagnostics'];
+    if (outputs is! Map ||
+        diagnostics is! Map ||
+        outputs['sourceManifestAssociation'] != 'verified' ||
+        outputs['exportPath'] is! String ||
+        snapshot.task.exportPath == null ||
+        !OutputSourceLocator.sameFilesystemPath(
+          snapshot.task.exportPath!,
+          exportPath,
+        ) ||
+        !OutputSourceLocator.sameFilesystemPath(
+          snapshot.task.outputDirectory,
+          widget.pyramidDirectory,
+        ) ||
+        !OutputSourceLocator.sameFilesystemPath(
+          outputs['exportPath']! as String,
+          exportPath,
+        )) {
+      _traceUnavailableReason = 'associationMismatch';
+      return null;
+    }
+    var actual = await readExportDimensions(exportPath);
+    if (!_isCurrentSource(generation, exportPath, widget.pyramidDirectory)) {
+      return null;
+    }
+    if (actual == null) {
+      if (p.extension(exportPath).toLowerCase() == '.jxl') {
+        actual = await _verifiedJxlReceiptDimensions(
+          snapshot,
+          outputs,
+          decodedManifest,
+        );
+      }
+      if (actual == null) {
+        _traceUnavailableReason = 'noVerifiedReceipt';
+        return null;
+      }
+    }
+    if (actual.$1 != pyramid.width || actual.$2 != pyramid.height) {
+      _traceUnavailableReason = 'outputPreviewDimensionMismatch';
+      return null;
+    }
+    final recordedDimensions = outputs['dimensions'];
+    if (recordedDimensions is! Map ||
+        recordedDimensions['width'] != actual.$1 ||
+        recordedDimensions['height'] != actual.$2) {
+      _traceUnavailableReason = 'outputRecordDimensionMismatch';
+      return null;
+    }
+    if (decodedManifest is! Map ||
+        decodedManifest['width'] != actual.$1 ||
+        decodedManifest['height'] != actual.$2) {
+      _traceUnavailableReason = 'outputManifestDimensionMismatch';
+      return null;
+    }
+    final manifestRef = diagnostics['manifestRef'];
+    final layoutRef = diagnostics['layoutRef'];
+    final stateRef = diagnostics['jobStateRef'];
+    if (!await _verifyRecordArtifact(snapshot, 'manifest', manifestRef) ||
+        !await _verifyRecordArtifact(snapshot, 'layout', layoutRef) ||
+        !await _verifyRecordArtifact(snapshot, 'job-state', stateRef)) {
+      _traceUnavailableReason = 'layoutManifestIntegrityFailed';
+      return null;
+    }
+    final layoutHash = layoutRef is Map ? layoutRef['sha256'] : null;
+    final statePath = _recordArtifactPath(snapshot, 'job-state', stateRef);
+    if (outputs['layoutStateAssociation'] != 'verified' ||
+        outputs['layoutSha256'] is! String ||
+        layoutHash is! String ||
+        outputs['layoutSha256'] != layoutHash ||
+        statePath == null) {
+      _traceUnavailableReason = 'layoutStateAssociationMismatch';
+      return null;
+    }
+    final stateValue = jsonDecode(await File(statePath).readAsString());
+    final persistedLayoutHash = stateValue is Map
+        ? (stateValue['layout_hash'] ?? stateValue['layoutHash'])
+        : null;
+    if (persistedLayoutHash != layoutHash) {
+      _traceUnavailableReason = 'layoutStateAssociationMismatch';
+      return null;
+    }
+    final manifestPath = _recordArtifactPath(snapshot, 'manifest', manifestRef);
+    if (manifestPath == null) {
+      _traceUnavailableReason = 'manifestPathMismatch';
+      return null;
+    }
+    final canonicalRecordManifest = await File(
+      manifestPath,
+    ).resolveSymbolicLinks();
+    final canonicalPyramidManifest = await File(
+      p.join(widget.pyramidDirectory, 'manifest.json'),
+    ).resolveSymbolicLinks();
+    if (!OutputSourceLocator.sameFilesystemPath(
+      canonicalRecordManifest,
+      canonicalPyramidManifest,
+    )) {
+      _traceUnavailableReason = 'manifestPathMismatch';
+      return null;
+    }
+    final layoutPath = _recordArtifactPath(snapshot, 'layout', layoutRef);
+    if (layoutPath == null) return null;
+    final canonicalOutputRoot = await Directory(
+      snapshot.task.outputDirectory,
+    ).resolveSymbolicLinks();
+    final canonicalLayout = await File(layoutPath).resolveSymbolicLinks();
+    if (!_isWithin(canonicalOutputRoot, canonicalLayout)) {
+      _traceUnavailableReason = 'layoutOutsideTask';
+      return null;
+    }
+    final layoutFile = File(canonicalLayout);
+    if (await layoutFile.length() > _maxManifestBytes) {
+      _traceUnavailableReason = 'layoutTooLarge';
+      return null;
+    }
+    final value = jsonDecode(await layoutFile.readAsString());
+    if (value is! Map<String, Object?> ||
+        value['projection'] != 'spherical' ||
+        value['width'] != actual.$1 ||
+        value['height'] != actual.$2) {
+      _traceUnavailableReason = 'layoutDimensionMismatch';
+      return null;
+    }
+    return value;
+  }
+
+  String? _recordArtifactPath(
+    TaskRecordSnapshot snapshot,
+    String kind,
+    Object? ref,
+  ) {
+    if (ref is! Map ||
+        ref['integrityStatus'] != 'verified' ||
+        ref['ownedByTask'] != true ||
+        ref['relativePath'] is! String) {
+      return null;
+    }
+    final relative = ref['relativePath']! as String;
+    if (p.isAbsolute(relative) ||
+        relative.replaceAll('\\', '/').split('/').contains('..')) {
+      return null;
+    }
+    final path = p.normalize(p.join(snapshot.task.outputDirectory, relative));
+    final filename = kind == 'job-state' ? 'job-state.json' : '$kind.json';
+    final expected = p.normalize(
+      p.join(snapshot.task.outputDirectory, filename),
+    );
+    return OutputSourceLocator.sameFilesystemPath(path, expected) ? path : null;
+  }
+
+  Future<(int, int)?> _verifiedJxlReceiptDimensions(
+    TaskRecordSnapshot snapshot,
+    Map outputs,
+    Object? manifest,
+  ) async {
+    final receipt = outputs['producerReceipt'];
+    final diagnostics = snapshot.record['diagnostics'];
+    if (receipt is! Map ||
+        diagnostics is! Map ||
+        receipt['status'] != 'verified' ||
+        receipt['sourceManifestMatch'] != true ||
+        outputs['exportDigestStatus'] != 'verifiedProducerReceipt' ||
+        receipt['format'] != 'jxl' ||
+        receipt['destination'] is! String ||
+        !OutputSourceLocator.sameFilesystemPath(
+          receipt['destination']! as String,
+          widget.exportFilePath,
+        ) ||
+        outputs['exportSha256'] is! String ||
+        outputs['exportSha256'] != receipt['exportSha256'] ||
+        outputs['sourceManifestAssociation'] != 'verified' ||
+        outputs['layoutStateAssociation'] != 'verified' ||
+        manifest is! Map ||
+        receipt['requestHash'] != manifest['requestHash']) {
+      return null;
+    }
+    final dimensions = receipt['dimensions'];
+    if (dimensions is! Map ||
+        dimensions['width'] is! int ||
+        dimensions['height'] is! int ||
+        dimensions['width'] != manifest['width'] ||
+        dimensions['height'] != manifest['height']) {
+      return null;
+    }
+    final stateRef = diagnostics['jobStateRef'];
+    final statePath = _recordArtifactPath(snapshot, 'job-state', stateRef);
+    if (statePath == null ||
+        stateRef is! Map ||
+        stateRef['sha256'] != receipt['jobStateSha256'] ||
+        !await _verifyRecordArtifact(snapshot, 'job-state', stateRef)) {
+      return null;
+    }
+    final state = jsonDecode(await File(statePath).readAsString());
+    final layoutRef = diagnostics['layoutRef'];
+    final layoutHash = layoutRef is Map ? layoutRef['sha256'] : null;
+    final stateLayoutHash = state is Map
+        ? (state['layout_hash'] ?? state['layoutHash'])
+        : null;
+    final stateDimensions = state is Map ? state['dimensions'] : null;
+    final stateWidth = state is Map
+        ? (state['width'] ??
+              (stateDimensions is List && stateDimensions.length == 2
+                  ? stateDimensions[0]
+                  : null))
+        : null;
+    final stateHeight = state is Map
+        ? (state['height'] ??
+              (stateDimensions is List && stateDimensions.length == 2
+                  ? stateDimensions[1]
+                  : null))
+        : null;
+    final exportPath = receipt['destination']! as String;
+    final stateExportPath = state is Map
+        ? (state['export_destination'] ?? state['exportDestination'])
+        : null;
+    final stateRequestHash = state is Map
+        ? (state['request_hash'] ?? state['requestHash'])
+        : null;
+    final stateSourceHashes = state is Map
+        ? (state['source_hashes'] ?? state['sourceHashes'])
+        : null;
+    final stateFormat = state is Map
+        ? (state['export_format'] ?? state['exportFormat'])
+        : null;
+    final expectedFormat = switch (p.extension(exportPath).toLowerCase()) {
+      '.jxl' => 'jxl',
+      '.tif' || '.tiff' => 'tiff',
+      '.png' => 'png',
+      _ => null,
+    };
+    final normalizedStateFormat = stateFormat == 'tif' ? 'tiff' : stateFormat;
+    if (state is! Map ||
+        state['state'] != 'completed' ||
+        state['operation'] != 'export' ||
+        expectedFormat != 'jxl' ||
+        (normalizedStateFormat != null &&
+            normalizedStateFormat != expectedFormat) ||
+        stateExportPath is! String ||
+        !OutputSourceLocator.sameFilesystemPath(stateExportPath, exportPath) ||
+        stateRequestHash != receipt['requestHash'] ||
+        stateRequestHash != manifest['requestHash'] ||
+        stateWidth != dimensions['width'] ||
+        stateHeight != dimensions['height'] ||
+        layoutHash is! String ||
+        receipt['layoutSha256'] != layoutHash ||
+        outputs['layoutSha256'] != layoutHash ||
+        stateLayoutHash != layoutHash ||
+        !_sourceHashMapsMatch(stateSourceHashes, manifest['sourceHashes'])) {
+      return null;
+    }
+    final taskFingerprint = widget.expectedExportFingerprint;
+    final receiptFingerprint = receipt['exportFingerprint'];
+    final savedFingerprint = snapshot.task.exportFingerprint;
+    if (taskFingerprint == null ||
+        receiptFingerprint is! Map ||
+        savedFingerprint == null ||
+        savedFingerprint.sizeBytes != taskFingerprint.sizeBytes ||
+        savedFingerprint.modifiedAtMicros != taskFingerprint.modifiedAtMicros ||
+        receiptFingerprint['sizeBytes'] != taskFingerprint.sizeBytes ||
+        receiptFingerprint['modifiedAtMicros'] !=
+            taskFingerprint.modifiedAtMicros) {
+      return null;
+    }
+    final file = File(exportPath);
+    if (!await file.exists()) return null;
+    final stat = await file.stat();
+    if (stat.size != taskFingerprint.sizeBytes ||
+        stat.modified.microsecondsSinceEpoch !=
+            taskFingerprint.modifiedAtMicros) {
+      return null;
+    }
+    final digest = await sha256.bind(file.openRead()).first;
+    if (digest.toString() != receipt['exportSha256']) return null;
+    return (dimensions['width']! as int, dimensions['height']! as int);
+  }
+
+  Future<bool> _verifyRecordArtifact(
+    TaskRecordSnapshot snapshot,
+    String kind,
+    Object? ref,
+  ) async {
+    final path = _recordArtifactPath(snapshot, kind, ref);
+    if (path == null || ref is! Map) return false;
+    final file = File(path);
+    if (!await file.exists()) return false;
+    final stat = await file.stat();
+    if (stat.size != ref['sizeBytes'] ||
+        stat.modified.microsecondsSinceEpoch != ref['modifiedAtMicros']) {
+      return false;
+    }
+    final digest = await sha256.bind(file.openRead()).first;
+    return digest.toString() == ref['sha256'];
+  }
+
+  bool _sourceHashMapsMatch(Object? left, Object? right) {
+    if (left is! Map || right is! Map || left.length != right.length) {
+      return false;
+    }
+    final unmatched = right.entries.toList();
+    for (final entry in left.entries) {
+      if (entry.key is! String || entry.value is! String) return false;
+      final index = unmatched.indexWhere(
+        (candidate) =>
+            candidate.key is String &&
+            candidate.value is String &&
+            OutputSourceLocator.sameFilesystemPath(
+              entry.key as String,
+              candidate.key as String,
+            ),
+      );
+      if (index < 0 ||
+          (entry.value as String).toLowerCase() !=
+              (unmatched[index].value as String).toLowerCase()) {
+        return false;
+      }
+      unmatched.removeAt(index);
+    }
+    return unmatched.isEmpty;
+  }
+
+  void _inspectAt(Offset point) {
+    final layout = _traceLayout;
+    final pyramid = _pyramid;
+    final snapshot = widget.traceRecord;
+    if (!_inspectMode ||
+        layout == null ||
+        pyramid == null ||
+        snapshot == null) {
+      return;
+    }
+    try {
+      final trace = OutputSourceLocator.locate(
+        layout: layout,
+        task: snapshot.task,
+        outputWidth: pyramid.width,
+        outputHeight: pyramid.height,
+        outputX: point.dx.floorToDouble(),
+        outputY: point.dy.floorToDouble(),
+      );
+      setState(() => _pixelTrace = trace);
+    } on FormatException catch (error) {
+      setState(
+        () => _traceUnavailableReason = switch (error.message) {
+          'Output coordinate or layout is invalid.' =>
+            'invalidOutputCoordinate',
+          'Layout tiles are missing.' => 'layoutTilesMissing',
+          'Layout projection bounds are invalid.' => 'layoutBoundsInvalid',
+          'Task grid mapping is invalid.' => 'taskGridInvalid',
+          _ => 'traceGeometryInvalid',
+        },
+      );
     }
   }
 
@@ -627,11 +1021,30 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
               _showSourceInformation ? Icons.info : Icons.info_outline,
             ),
           ),
+          if (widget.traceRecord != null)
+            IconButton(
+              key: const ValueKey('output-source-inspect-toggle'),
+              tooltip: StitchLocalizations.of(context).isChinese
+                  ? (_inspectMode ? '关闭来源检查' : '检查像素来源')
+                  : (_inspectMode
+                        ? 'Stop source inspection'
+                        : 'Inspect pixel source'),
+              onPressed: _pyramid == null
+                  ? null
+                  : () => setState(() {
+                      _inspectMode = !_inspectMode;
+                      _pixelTrace = null;
+                    }),
+              icon: Icon(
+                _inspectMode ? Icons.location_searching : Icons.travel_explore,
+              ),
+            ),
         ],
       ),
       body: Column(
         children: [
           if (_showSourceInformation) _sourceInformation(),
+          if (_inspectMode) _traceInformation(),
           Expanded(child: _viewerBody()),
           if (_pyramid != null)
             Padding(
@@ -671,6 +1084,168 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
       ),
     );
   }
+
+  Widget _traceInformation() {
+    final isChinese = StitchLocalizations.of(context).isChinese;
+    final trace = _pixelTrace;
+    final lines = <String>[];
+    if (_traceUnavailableReason != null) {
+      lines.add(_traceReasonText(_traceUnavailableReason!, isChinese));
+    } else if (trace == null) {
+      lines.add(
+        isChinese
+            ? '点击输出像素查看几何覆盖。'
+            : 'Tap an output pixel to inspect geometric coverage.',
+      );
+    } else if (trace.cameras.isEmpty) {
+      lines.add(
+        isChinese ? '此射线没有覆盖相机。' : 'No camera geometrically covers this ray.',
+      );
+    } else {
+      lines.add(
+        isChinese
+            ? '输出 (${trace.outputX.toStringAsFixed(1)}, ${trace.outputY.toStringAsFixed(1)}) · 覆盖 ${trace.cameras.length} 张原片（几何覆盖，不代表最终混合权重）'
+            : 'Output (${trace.outputX.toStringAsFixed(1)}, ${trace.outputY.toStringAsFixed(1)}) · ${trace.cameras.length} geometric source coverage(s); final blend weights are not reported.',
+      );
+      for (final camera in trace.cameras) {
+        lines.add(
+          isChinese
+              ? '${camera.originalName} · ${camera.sourcePath} · 网格 ${camera.row + 1},${camera.column + 1} · 原片 (${camera.sourceX.toStringAsFixed(1)}, ${camera.sourceY.toStringAsFixed(1)}) · ${_tracePosition(camera.positionSource, true)} · ${_tracePlacement(camera.placementKind, true)} / ${_traceOrigin(camera.placementOrigin, true)} · 直接视觉证据 ${camera.directVisualEvidence ? '有' : '无'}'
+              : '${camera.originalName} · ${camera.sourcePath} · grid ${camera.row + 1},${camera.column + 1} · source (${camera.sourceX.toStringAsFixed(1)}, ${camera.sourceY.toStringAsFixed(1)}) · ${_tracePosition(camera.positionSource, false)} · ${_tracePlacement(camera.placementKind, false)} / ${_traceOrigin(camera.placementOrigin, false)} · direct visual evidence ${camera.directVisualEvidence ? 'yes' : 'no'}',
+        );
+        for (final edge in camera.neighborEdges) {
+          lines.add(
+            isChinese
+                ? '  邻居 ${edge.row + 1},${edge.column + 1} · ${_traceDisposition(edge.disposition, true)} · 中位残差 ${edge.medianResidualPx?.toStringAsFixed(2) ?? '未知'} px · RMS ${edge.rmsResidualPx?.toStringAsFixed(2) ?? '未知'} px'
+                : '  Neighbor ${edge.row + 1},${edge.column + 1} · ${_traceDisposition(edge.disposition, false)} · median ${edge.medianResidualPx?.toStringAsFixed(2) ?? 'unknown'} px · RMS ${edge.rmsResidualPx?.toStringAsFixed(2) ?? 'unknown'} px',
+          );
+        }
+      }
+      lines.add(
+        isChinese
+            ? '渲染器最终选择与曝光/颜色增益未提供。'
+            : 'Renderer ownership and exposure/color gains are not available.',
+      );
+    }
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxHeight: 220),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: SelectableText(
+            lines.join('\n'),
+            textAlign: TextAlign.start,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _traceReasonText(String key, bool isChinese) => switch (key) {
+    'traceLoadFailed' =>
+      isChinese
+          ? '无法安全验证布局来源，像素追踪已停用。'
+          : 'Could not verify the layout source; pixel tracing is disabled.',
+    'associationMismatch' =>
+      isChinese
+          ? '任务记录未验证当前输出与布局清单的关联。'
+          : 'The task record does not verify the output-to-layout association.',
+    'noVerifiedReceipt' =>
+      isChinese
+          ? '此格式没有可验证的导出回执，来源追踪已停用。'
+          : 'No verified export receipt is available for this format; source tracing is disabled.',
+    'outputPreviewDimensionMismatch' =>
+      isChinese
+          ? '实际输出尺寸与分块预览清单不一致，来源追踪已停用。'
+          : 'The output dimensions do not match the preview manifest; source tracing is disabled.',
+    'outputRecordDimensionMismatch' =>
+      isChinese
+          ? '实际输出尺寸与任务记录不一致，来源追踪已停用。'
+          : 'The output dimensions do not match the task record; source tracing is disabled.',
+    'outputManifestDimensionMismatch' =>
+      isChinese
+          ? '输出尺寸与任务清单不一致，来源追踪已停用。'
+          : 'The output dimensions do not match the task manifest; source tracing is disabled.',
+    'layoutManifestIntegrityFailed' =>
+      isChinese
+          ? '任务布局或清单校验失败，来源追踪已停用。'
+          : 'Task layout or manifest integrity verification failed; source tracing is disabled.',
+    'manifestPathMismatch' =>
+      isChinese
+          ? '任务记录与当前预览清单不是同一文件。'
+          : 'The task record and current preview do not use the same manifest file.',
+    'layoutOutsideTask' =>
+      isChinese
+          ? '布局文件路径超出任务目录，已拒绝读取。'
+          : 'The layout path is outside the task directory and was rejected.',
+    'layoutTooLarge' =>
+      isChinese
+          ? '布局记录超过安全读取上限。'
+          : 'The layout record exceeds the safe read limit.',
+    'layoutDimensionMismatch' =>
+      isChinese
+          ? '布局投影或输出尺寸与实际文件不一致。'
+          : 'The layout projection or dimensions do not match the output file.',
+    'invalidOutputCoordinate' =>
+      isChinese ? '输出坐标或布局无效。' : 'The output coordinate or layout is invalid.',
+    'layoutTilesMissing' =>
+      isChinese ? '布局缺少相机信息。' : 'The layout has no camera tiles.',
+    'layoutBoundsInvalid' =>
+      isChinese ? '布局投影范围无效。' : 'The layout projection bounds are invalid.',
+    'taskGridInvalid' =>
+      isChinese ? '任务网格映射无效。' : 'The task grid mapping is invalid.',
+    _ =>
+      isChinese
+          ? '几何追踪数据无效，已停止检查。'
+          : 'The geometry trace is invalid and inspection stopped.',
+  };
+
+  String _tracePosition(String value, bool isChinese) => switch (value) {
+    'visual' => isChinese ? '视觉测量' : 'visually measured',
+    'gridEstimated' => isChinese ? '网格估算' : 'grid estimated',
+    _ => isChinese ? '位置来源未知' : 'position source unknown',
+  };
+
+  String _tracePlacement(String value, bool isChinese) => switch (value) {
+    'hardGridLock' => isChinese ? '网格硬锁' : 'hard grid lock',
+    'gridPrior' => isChinese ? '网格先验' : 'grid prior',
+    'none' => isChinese ? '无放置约束' : 'no placement constraint',
+    _ => isChinese ? '约束未知' : 'constraint unknown',
+  };
+
+  String _traceOrigin(String value, bool isChinese) => switch (value) {
+    'operator' => isChinese ? '操作员' : 'operator',
+    'systemFallback' => isChinese ? '系统回退' : 'system fallback',
+    'legacyUnknown' => isChinese ? '旧记录来源未知' : 'legacy origin unknown',
+    _ => isChinese ? '来源未知' : 'origin unknown',
+  };
+
+  String _traceDisposition(String value, bool isChinese) => switch (value) {
+    'accepted' => isChinese ? '已接受' : 'accepted',
+    'forced_grid_cell' =>
+      isChinese
+          ? '网格硬锁边，未参与视觉匹配'
+          : 'hard-locked grid edge; visual matching skipped',
+    'descriptor_missing_or_invalid' =>
+      isChinese ? '描述子缺失或无效' : 'descriptor missing or invalid',
+    'too_few_ratio_test_matches' =>
+      isChinese ? '比率检验匹配不足' : 'too few ratio-test matches',
+    'ransac_failed' => isChinese ? 'RANSAC 失败' : 'RANSAC failed',
+    'too_few_inliers' => isChinese ? '内点不足' : 'too few inliers',
+    'low_inlier_ratio' => isChinese ? '内点比例过低' : 'low inlier ratio',
+    'ray_fit_pending' => isChinese ? '等待射线拟合' : 'ray fit pending',
+    'weak_support_loop_conflict' =>
+      isChinese ? '弱支持回环冲突' : 'weak-support loop conflict',
+    'ray_fit_degenerate' => isChinese ? '射线拟合退化' : 'degenerate ray fit',
+    'ray_residual_exceeds_12px' =>
+      isChinese ? '射线残差超过 12 px 门限' : 'ray residual exceeds 12 px gate',
+    'rejected_joint_pixel_leave_one_out_conflict' =>
+      isChinese ? '联合像素留一冲突' : 'joint pixel leave-one-out conflict',
+    'weak_support' => isChinese ? '支持不足' : 'weak support',
+    _ => isChinese ? '状态未知' : 'unknown status',
+  };
 
   Widget _sourceInformation() {
     final expected = widget.expectedExportFingerprint;
@@ -847,6 +1422,14 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
                                 ),
                               );
                             },
+                          ),
+                        ),
+                      if (_inspectMode)
+                        Positioned.fill(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.translucent,
+                            onTapDown: (details) =>
+                                _inspectAt(details.localPosition),
                           ),
                         ),
                     ],

@@ -65,6 +65,7 @@ void main() {
         'featureType',
         'matcherType',
         'registrationMegapixels',
+        'allowPrecisionRecovery',
         'allowNominalGridFallback',
         'autoGridOverlap',
         'refineGridNeighbors',
@@ -84,6 +85,7 @@ void main() {
       expect(request['featureType'], 'sift');
       expect(request['matcherType'], 'bf');
       expect(request['registrationMegapixels'], 2.0);
+      expect(request['allowPrecisionRecovery'], isFalse);
       expect(request['allowNominalGridFallback'], isFalse);
       expect(request['autoGridOverlap'], isTrue);
       expect(request['refineGridNeighbors'], isFalse);
@@ -102,6 +104,14 @@ void main() {
       expect(tiles, hasLength(2));
       expect(tiles.map((tile) => tile['path']), ['0000.jpg', '0001.jpg']);
       expect(tiles[1]['forceGrid'], true);
+      expect(tiles[0]['placementConstraint'], {
+        'kind': 'gridPrior',
+        'origin': 'systemFallback',
+      });
+      expect(tiles[1]['placementConstraint'], {
+        'kind': 'hardGridLock',
+        'origin': 'legacyUnknown',
+      });
     },
   );
 
@@ -136,6 +146,50 @@ void main() {
     expect(request['gridHorizontalOverlap'], 0.45);
     expect(request['gridVerticalOverlap'], 0.25);
   });
+
+  test(
+    'unresolved legacy coordinate does not lock a different mapped photo',
+    () {
+      const photo = ImportedPhoto(
+        originalName: 'one.jpg',
+        storedPath: 'new-photo.jpg',
+        sha256: 'new',
+        width: 100,
+        height: 80,
+        originalOrder: 0,
+      );
+      final task = StitchTask(
+        id: 'pending-legacy-lock',
+        createdAt: DateTime.utc(2026),
+        sourceDirectory: 'in',
+        outputDirectory: 'out',
+        photos: const [photo],
+        grid: GridOptions(
+          mode: GridMode.sequence,
+          rows: 1,
+          columns: 1,
+          forceGridCells: {const GridCell(0, 0)},
+          forceGridCellOrigins: {
+            const GridCell(0, 0): GridConstraintOrigin.legacyUnknown,
+          },
+          pendingForceGridCells: {const GridCell(0, 0)},
+        ),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.imported,
+      );
+
+      final tile =
+          (buildSphericalRequest(task)['tiles']! as List<Map<String, Object?>>)
+              .single;
+      expect(tile['forceGrid'], isFalse);
+      expect(tile['placementConstraint'], {
+        'kind': 'gridPrior',
+        'origin': 'systemFallback',
+      });
+    },
+  );
 
   test('auto overlap can be disabled and nominal DWARF fx scales by width', () {
     const photo = ImportedPhoto(
@@ -208,8 +262,9 @@ void main() {
         request['alignmentCacheDir'],
         p.normalize(p.absolute(p.join('tasks', 'job', '.alignment-cache'))),
       );
-      expect(request['neighborMode'], 'adaptive');
+      expect(request['neighborMode'], 'eight');
       expect(request['registrationMegapixels'], 0.6);
+      expect(request['allowPrecisionRecovery'], isTrue);
       expect(request['featureType'], 'orb');
       expect(request['matcherType'], 'bf');
     },

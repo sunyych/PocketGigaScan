@@ -16,12 +16,16 @@ Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the includ
 - Choose lossless PNG or TIFF/BigTIFF, or high-quality lossy JPEG XL, before stitching. New Windows tasks default to TIFF and export automatically after successful rendering.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
 - Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.
-- Follow the system language: Chinese locales use Chinese; other locales use English, including automatic export and task statuses.
+- Open Settings to choose system/English/Chinese language, system/light/dark appearance, accent color, output quality, performance defaults and output folder. Processing defaults apply to new tasks; saved tasks retain their options.
+- Expand Stitching log separately from Stitch details to see localized steps with timestamps and start/finish/total wall-clock time, including pauses and automatic export. Legacy tasks without timestamps show unknown times.
 
 Android adds folder access through the system document picker, streamed save/share,
 foreground processing and pinch/drag viewing. Android grids have no arbitrary
 photo-count or axis limit: more than 6 rows, 6 columns or 36 photos requires
 confirmation before processing. Concurrency remains bounded by actual resources.
+Choose a persistent output folder in Settings to copy completed Android exports
+automatically. The private result remains available for viewing; a failed copy
+can be retried without re-encoding. Windows encodes directly into its selected folder.
 Package/device qualification status is recorded in the
 [Android evidence](docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md).
 
@@ -32,6 +36,32 @@ current package checks are recorded in the
 [export and identity evidence](docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md).
 
 Old completed layouts must be copied into a new task and recomputed to receive geometry improvements. Changing their export format does not change alignment. Some original-photo obstructions have no clean neighbor coverage and remain in the result.
+
+New registrations compare the eight immediate neighbors once per pair. A grid
+prior allows texture matching; the explicit pin button applies a hard placement
+lock and skips that photograph's visual constraints. Legacy locks retain unknown
+origin until the operator changes them. Ordinary thumbnail clicks do not change
+locks.
+
+Settings includes an automatic/manual shared memory budget using current OS
+total/available memory. Larger desktop budgets increase source-cache capacity;
+they are allocated on demand. Existing reservations drain safely when lowering
+the budget. Android retains conservative mobile headroom and concurrency limits.
+
+Each task has one atomic, versioned `task.json` master record. It keeps source
+hashes, grid and lock provenance, reconciled native poses/intrinsics/local warps,
+neighbor diagnostics, output associations and timing. Old task files remain
+readable. Uncomputed geometry stays null; color/brightness adjustments are marked
+not applied because the renderer does not currently compute them. Removing a
+task removes its master record and retains imported photos and exported results.
+
+In the output viewer, click **Inspect pixel source**, then click a panorama
+location to see geometrically covering source photographs and
+their neighbor diagnostics. This does not infer the renderer's final blend owner.
+PNG/TIFF dimensions are checked directly; JPEG XL tracing requires a verified
+native producer receipt. Inspection and source status remain collapsed by default.
+See the [performance and geometry evidence](docs/gigascan/evidence/DWARF-PERFORMANCE-2026-10-06.md)
+for measured limits and the distinction between local crops and full-panorama acceptance.
 
 ## Source and build
 

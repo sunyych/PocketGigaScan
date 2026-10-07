@@ -128,7 +128,9 @@ fn native_encode(
             output.as_ptr(),
             width,
             height,
-            memory_budget_mib as u64,
+            crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
+                .ok_or_else(|| invalid("memoryBudgetMiB overflows byte accounting"))?
+                / (1024 * 1024),
             Some(rust_checkpoint),
             (&mut context as *mut CheckpointContext<'_>).cast::<c_void>(),
             error.as_mut_ptr(),
@@ -215,8 +217,14 @@ pub(crate) fn export_level0_jxl(
     encode_checkpoint: &mut dyn FnMut(u32, u32) -> Result<()>,
     begin_commit: &mut dyn FnMut() -> Result<()>,
 ) -> Result<Value> {
-    if !(16..=4096).contains(&memory_budget_mib) {
-        return Err(invalid("memoryBudgetMiB must be 16..=4096"));
+    if !(crate::job_resources::MIN_EXPORT_MEMORY_MIB..=crate::job_resources::MAX_JOB_MEMORY_MIB)
+        .contains(&memory_budget_mib)
+    {
+        return Err(invalid(format!(
+            "memoryBudgetMiB must be {}..={} MiB",
+            crate::job_resources::MIN_EXPORT_MEMORY_MIB,
+            crate::job_resources::MAX_JOB_MEMORY_MIB
+        )));
     }
     if !available() {
         return Err(invalid(
@@ -811,6 +819,38 @@ mod tests {
         );
         assert!(!destination.exists());
         assert!(fs::read_dir(&output_dir).unwrap().next().is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(lumia_jxl)]
+    #[test]
+    fn sixteen_gib_jxl_export_matches_128_mib_without_preallocation() {
+        if !available() {
+            return;
+        }
+        let (root, manifest) = fixture("high-budget", 48, 24);
+        let output = root.join("outputs");
+        fs::create_dir_all(&output).unwrap();
+        let low = output.join("low.jxl");
+        let high = output.join("high.jxl");
+        let encode = |destination: &Path, budget| {
+            export_level0_jxl(
+                &root,
+                &manifest,
+                destination,
+                budget,
+                1,
+                &mut |_, _| Ok(()),
+                &mut |_, _| Ok(()),
+                &mut || Ok(()),
+            )
+            .unwrap()
+        };
+        let low_stats = encode(&low, 128);
+        let high_stats = encode(&high, 16 * 1024);
+        assert_eq!(low_stats["memoryBudgetMiB"], 128);
+        assert_eq!(high_stats["memoryBudgetMiB"], 16 * 1024);
+        assert_eq!(fs::read(&low).unwrap(), fs::read(&high).unwrap());
         fs::remove_dir_all(root).unwrap();
     }
 }

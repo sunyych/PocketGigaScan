@@ -22,11 +22,150 @@ class StitchLocalizations {
   String get appName => 'PocketGigaScan';
 
   String get compositionInfoLogs => text('合成信息 / 日志');
+  String get stitchDetails => text('合成详情');
+  String get stitchingLog => text('合成日志');
+  String get timelineDurationUnknown => text('总用时未知（旧任务没有时间记录）');
+  String get timelineTimeUnknown => text('未知');
+  String get timelineInProgress => text('进行中');
+  String timelineBounds(String started, String finished, String total) =>
+      isChinese
+      ? '开始：$started\n结束：$finished\n$total'
+      : 'Started: $started\nFinished: $finished\n$total';
+  String timelineStage(String stage) {
+    if (stage.startsWith('retry-matching-progress:') ||
+        stage.startsWith('clahe-retry-progress:')) {
+      final match = RegExp(r'^[^:]+-progress:(\d+)/(\d+)$').firstMatch(stage);
+      final completed = int.tryParse(match?.group(1) ?? '');
+      final total = int.tryParse(match?.group(2) ?? '');
+      if (completed != null &&
+          total != null &&
+          total > 0 &&
+          completed <= total) {
+        final family = text('retry-neighbor-matching');
+        final count = '$completed/$total';
+        return isChinese ? '$family（$count）' : '$family ($count)';
+      }
+      return text('retry-neighbor-matching');
+    }
+    return text(switch (stage) {
+      'validate' => 'validate',
+      'source-validation' => 'source-validation',
+      'validation-complete' => 'validation-complete',
+      'register' => 'register',
+      'render-level-0' => 'render-level-0',
+      'pyramid' => 'pyramid',
+      'commit-render' => 'commit-render',
+      'commit-export' => 'commit-export',
+      'spool-jxl' => 'spool-jxl',
+      'encode-jxl' => 'encode-jxl',
+      'export' => 'export',
+      'optimize-grid-poses' => 'optimize-grid-poses',
+      'refine-pixel-texture' => 'refine-pixel-texture',
+      'fit-local-texture-warp' => 'fit-local-texture-warp',
+      'grid-overlap-feature-extraction' => 'grid-overlap-feature-extraction',
+      'grid-overlap-pair-matching' => 'grid-overlap-pair-matching',
+      'grid-overlap-complete' => 'grid-overlap-complete',
+      'initial-matching-complete' => 'initial-matching-complete',
+      'matching-edge-batch' => 'matching-edge-batch',
+      'adaptive-diagonal-matching' => 'adaptive-diagonal-matching',
+      'retry-matching' => 'retry-neighbor-matching',
+      'retry-feature-extraction' => 'retry-neighbor-matching',
+      'clahe-retry' => 'retry-neighbor-matching',
+      'retry-neighbor-matching' => 'retry-neighbor-matching',
+      'registration-complete' => 'registration-complete',
+      'precision-recovery-start' => 'precision-recovery-start',
+      'registration-failed' => 'registration-failed',
+      'feature-extraction-batch' => 'feature-extraction-batch',
+      'feature-extraction-complete' => 'feature-extraction-complete',
+      'publish-export' => 'publish-export',
+      'publishing' => 'publishing',
+      'published' => 'published',
+      'publish-failed' => 'publish-failed',
+      'prune-conflicting-neighbors' => 'prune-conflicting-neighbors',
+      'done' => 'done',
+      'paused' => 'paused',
+      'cancelled' => 'cancelled',
+      _ => stage,
+    });
+  }
+
+  String timelineTotal(String elapsed, {required bool pausedIncluded}) =>
+      isChinese
+      ? '总用时：$elapsed${pausedIncluded ? '（包含暂停时间）' : ''}'
+      : 'Wall-clock total: $elapsed${pausedIncluded ? ' (includes paused time)' : ''}';
+  String timelineTransition(String state, String subject) =>
+      '$subject · $state';
+  String get settingsTitle => text('设置');
+  String memoryBudgetAdmission(
+    String operation,
+    int requested,
+    int limit,
+    int held,
+  ) => isChinese
+      ? '$operation需要${requested.toString()}MiB；当前共享预算${limit.toString()}MiB中已有${held.toString()}MiB被占用。'
+      : '$operation needs $requested MiB; $held MiB of the $limit MiB shared budget is already reserved.';
+  String memoryConcurrencyAdmission(String operation, int active, int limit) =>
+      isChinese
+      ? '$operation暂缓：共享并发上限为 $limit 个任务，当前已有 $active 个原生任务占用名额。'
+      : '$operation is deferred: the shared concurrency limit is $limit jobs, with $active native job(s) currently using a slot.';
+  String resourceBudgetStatusFailed(String operation, String error) => isChinese
+      ? '${text('无法确认资源预算')}（$operation）：$error'
+      : '${text('无法确认资源预算')} for $operation: $error';
+  String pendingLegacyGridLocks(int count) => isChinese
+      ? '有 $count 个旧网格锁定位置无法关联到当前照片；它们不会固定其他照片。请检查照片映射，并使用锁定按钮明确固定正确原片。'
+      : '$count legacy grid lock position(s) cannot be matched to a photo. They will not lock another photo. Review the mapping and use the lock button on the intended source photo.';
+  String get language => text('语言');
+  String get appearance => text('外观');
+  String get accentColor => text('强调色');
+  String get outputQuality => text('输出画质');
+  String get outputFormat => text('输出格式');
+  String get refineNeighbors => text('精细校正相邻照片位置');
+  String get seamBlend => text('接缝融合');
+  String get localTextureWarp => text('局部纹理校正');
+  String get performanceDefaults => text('性能默认值');
+  String get parallelMatching => text('并行图像匹配');
+  String get parallelRendering => text('并行分块渲染');
+  String get sourceCache => text('启用原片纹理缓存');
+  String get alignmentCache => text('缓存图像配准结果');
+  String get fastRegistration => text('快速配准');
+  String get fourNeighborFirst => text('优先尝试四邻方向（自适应）');
+  String get orbFeatures => text('ORB 快速特征');
+  String get flannMatching => text('FLANN 近似匹配');
+  String get outputFolder => text('输出文件夹');
+  String get defaultOutputFolder => text('使用默认文件夹');
+  String get useDefaultFolder => text('使用默认文件夹');
+  String get chooseFolder => text('选择文件夹');
+  String get chooseBatchParentFolder => text('选择包含多个全景子目录的母目录');
+  String folderSelectionFailed(String error) => '${text('无法选择文件夹：')}$error';
+  String get retryOutputCopy => text('重试复制到输出文件夹');
+  String outputCopyFailed(String error) => '${text('复制到输出文件夹失败：')}$error';
+  String settingsOption(String value) => text(switch (value) {
+    'system' => '系统',
+    'en' => '英文',
+    'zh' => '中文',
+    'light' => '浅色',
+    'dark' => '深色',
+    'teal' => '青绿',
+    'blue' => '蓝色',
+    'purple' => '紫色',
+    'orange' => '橙色',
+    'feather' => '羽化',
+    'deghost' => '去重影',
+    _ => value,
+  });
+  String settingsSaveFailed(String error) => '${text('设置保存失败：')}$error';
 
   String get duplicateBeforeEditingSettings => text('先新建副本，再修改设置');
 
   String get fullResolutionOutputUsesTaskFormat =>
       text('整图输出独立于瓦片预览，使用任务选择的输出格式。');
+
+  String neighborReliabilitySummary({
+    required int adjustedEdges,
+    required int ambiguousEdges,
+  }) => isChinese
+      ? '相邻匹配权重调整：$adjustedEdges 条；存在闭环不一致的边：$ambiguousEdges 条。'
+      : 'Neighbor match weights adjusted: $adjustedEdges; edges in inconsistent loops: $ambiguousEdges.';
 
   String phaseLabel(String phase) {
     final normalized = phase.trim().toLowerCase();
@@ -61,12 +200,15 @@ class StitchLocalizations {
     required int photoCount,
     required String phase,
     required String format,
-  }) => '$photoCount ${isChinese ? '张' : 'photos'} · '
+  }) =>
+      '$photoCount ${isChinese ? '张' : 'photos'} · '
       '${phaseLabel(phase)} · ${formatLabel(format)}';
 
   String formatLabel(String format) {
     final normalized = format.trim().toLowerCase();
-    if (normalized.startsWith('jpeg xl') || normalized == 'jpegxl' || normalized == 'jxl') {
+    if (normalized.startsWith('jpeg xl') ||
+        normalized == 'jpegxl' ||
+        normalized == 'jxl') {
       return 'JPEG XL';
     }
     if (normalized.startsWith('tiff') || normalized == 'tif') return 'TIFF';
@@ -79,12 +221,15 @@ class StitchLocalizations {
     if (normalized == 'png' || normalized.startsWith('png（无损）')) {
       return 'PNG (lossless)';
     }
-    if (normalized == 'tiff' || normalized == 'tif' ||
+    if (normalized == 'tiff' ||
+        normalized == 'tif' ||
         normalized.startsWith('tiff（无损')) {
       return 'TIFF (lossless; BigTIFF for large images)';
     }
-    if (normalized == 'jpeg xl' || normalized == 'jpegxl' ||
-        normalized == 'jxl' || normalized.startsWith('jpeg xl（有损）')) {
+    if (normalized == 'jpeg xl' ||
+        normalized == 'jpegxl' ||
+        normalized == 'jxl' ||
+        normalized.startsWith('jpeg xl（有损）')) {
       return 'JPEG XL (lossy)';
     }
     return format;
@@ -105,6 +250,28 @@ class StitchLocalizations {
   }
 
   String text(String source) {
+    final publishError = RegExp(
+      r'^发布失败：(.*)。私有整图已保留，可重试发布。$',
+    ).firstMatch(source);
+    if (publishError != null) {
+      return isChinese
+          ? source
+          : 'Publishing failed: ${publishError[1]}. The private full image is preserved; retry publishing.';
+    }
+    final nativeRendererError = RegExp(
+      r'^(?:([A-Z0-9_]+): )?(invalid input: )?renderer algorithm changed; create a task copy and restitch(?: to avoid mixing tiles)?$',
+    ).firstMatch(source);
+    if (nativeRendererError != null) {
+      if (!isChinese) return source;
+      final prefix = [
+        if (nativeRendererError[1] != null) '${nativeRendererError[1]}: ',
+        if (nativeRendererError[2] != null) '输入无效：',
+      ].join();
+      final translated = source.endsWith('to avoid mixing tiles')
+          ? '渲染算法已更改；请新建任务副本并重新合成，以避免瓦片混用。'
+          : '渲染算法已更改；请新建任务副本并重新合成。';
+      return '$prefix$translated';
+    }
     final details = RegExp(r'^(\d+) 张 · (.+) · (.+)$').firstMatch(source);
     if (details != null) {
       return taskSummary(
@@ -144,8 +311,20 @@ class StitchLocalizations {
     }
     final estimatedGrid = RegExp(r'^网格为估算值，尚未校准；(.+)$').firstMatch(source);
     if (estimatedGrid != null) {
+      final translatedDetails = estimatedGrid[1]!
+          .split(' · ')
+          .map((detail) {
+            if (detail.startsWith('方法 ')) {
+              return 'Method ${detail.substring('方法 '.length)}';
+            }
+            if (detail.startsWith('置信度 ')) {
+              return 'Confidence ${detail.substring('置信度 '.length)}';
+            }
+            return detail;
+          })
+          .join(' · ');
       return 'Grid positions are estimated and are not calibrated; '
-          '${estimatedGrid[1]}';
+          '$translatedDetails';
     }
     final running = RegExp(
       r'^(\d+)/(\d+) 已导出 · (\d+) 项处理中$',
@@ -193,9 +372,16 @@ class StitchLocalizations {
       r'^已按照片 EXIF 识别 DWARFLAB / DWARF3 / TELE；使用名义 150 mm 配置 fx=(.+) px（随图像宽度缩放），未校准。实际 EXIF 焦距：(.*)$',
     ).firstMatch(source);
     if (cameraProfile != null) {
+      final rawFocalLength = cameraProfile[2]!;
+      final focalLength = rawFocalLength.startsWith('未记录')
+          ? 'not recorded${rawFocalLength.substring('未记录'.length)}'.replaceAll(
+              '。',
+              '.',
+            )
+          : rawFocalLength;
       return 'DWARFLAB / DWARF3 / TELE identified from photo EXIF. Using '
           'nominal 150 mm profile fx=${cameraProfile[1]} px (scaled to image '
-          'width), not calibrated. EXIF focal length: ${cameraProfile[2]}';
+          'width), not calibrated. EXIF focal length: $focalLength';
     }
     final panoramaLevel = RegExp(r'^分块全景 · (\d+)$').firstMatch(source);
     if (panoramaLevel != null) {
@@ -248,6 +434,89 @@ class StitchLocalizations {
   }
 
   static const _en = <String, String>{
+    '应用内存预算': 'App memory budget',
+    '无法确认资源预算': 'Could not verify the resource budget',
+    '恢复任务': 'Resume task',
+    '启动任务': 'Start task',
+    '整图导出': 'Full-image export',
+    '为整个应用设置共享预算；不会预先占用所选内存，也不代表操作系统硬内存限制。':
+        'Set the shared app-wide managed reservation and cache budget. It does not allocate memory up front or impose an operating-system RSS limit.',
+    '自动分配': 'Automatic',
+    '根据当前可用内存自动推荐。': 'Recommended from currently available memory.',
+    '手动设置': 'Manual',
+    '限制所有并行任务共享的总预算。':
+        'Sets the aggregate managed reservation and cache budget shared by concurrent tasks.',
+    '已选': 'Selected',
+    '总内存': 'Total memory',
+    '可用': 'Available',
+    '推荐': 'Recommended',
+    '本次上限': 'Current maximum',
+    '使用保守回退值': 'Using conservative fallback',
+    '设置': 'Settings',
+    '语言': 'Language',
+    '外观': 'Appearance',
+    '强调色': 'Accent color',
+    '合成详情': 'Stitch details',
+    '合成日志': 'Stitching log',
+    '总用时未知（旧任务没有时间记录）': 'Total time unknown (legacy task has no timing data)',
+    '总用时：': 'Total time: ',
+    '未知': 'Unknown',
+    '进行中': 'In progress',
+    'validate': 'Input validation',
+    'source-validation': 'Source validation',
+    'validation-complete': 'Validation complete',
+    'register': 'Photo registration',
+    'render-level-0': 'Full-resolution rendering',
+    'pyramid': 'Preview pyramid',
+    'commit-render': 'Save render checkpoint',
+    'commit-export': 'Save export checkpoint',
+    'spool-jxl': 'Prepare JPEG XL output',
+    'encode-jxl': 'Encode JPEG XL',
+    'export': 'Full image export',
+    'optimize-grid-poses': 'Optimize grid alignment',
+    'refine-pixel-texture': 'Refine pixel alignment',
+    'fit-local-texture-warp': 'Fit local texture correction',
+    'grid-overlap-feature-extraction': 'Find grid overlap features',
+    'grid-overlap-pair-matching': 'Match grid overlaps',
+    'grid-overlap-complete': 'Grid overlap analysis complete',
+    'initial-matching-complete': 'Initial matching complete',
+    'matching-edge-batch': 'Match neighboring photos',
+    'adaptive-diagonal-matching': 'Check diagonal neighbors',
+    'retry-neighbor-matching': 'Retry neighbor matching',
+    'precision-recovery-start': 'Retry registration at higher precision',
+    'registration-complete': 'Registration complete',
+    'registration-failed': 'Registration failed',
+    'feature-extraction-batch': 'Extract image features',
+    'feature-extraction-complete': 'Feature extraction complete',
+    'publish-export': 'Copy export to chosen folder',
+    'publishing': 'Publishing export',
+    'published': 'Export published',
+    'publish-failed': 'Export publishing failed',
+    'prune-conflicting-neighbors': 'Remove conflicting neighbor matches',
+    'done': 'Done',
+    'paused': 'Paused',
+    'cancelled': 'Cancelled',
+    '重试复制到输出文件夹': 'Retry copy to output folder',
+    '复制到输出文件夹失败：': 'Could not copy to output folder: ',
+    '重试发布整图': 'Retry publishing export',
+    '输出画质': 'Output quality',
+    '接缝融合': 'Seam blending',
+    '性能默认值': 'Performance defaults',
+    '输出文件夹': 'Output folder',
+    '使用默认文件夹': 'Use default folder',
+    '选择文件夹': 'Choose folder',
+    '系统': 'System',
+    '中文': 'Chinese',
+    '英文': 'English',
+    '浅色': 'Light',
+    '深色': 'Dark',
+    '青绿': 'Teal',
+    '蓝色': 'Blue',
+    '紫色': 'Purple',
+    '橙色': 'Orange',
+    '羽化': 'Feather',
+    '去重影': 'Deghost',
+    '设置保存失败：': 'Could not save settings: ',
     'Lumia Stitch': 'PocketGigaScan',
     'DWARF Stitch': 'PocketGigaScan',
     '本地任务': 'Local tasks',
@@ -304,8 +573,7 @@ class StitchLocalizations {
         'Android background execution timed out; checking the pause state.',
     '已安全暂停': 'Safely paused',
     '核心作业已结束': 'The native job has ended',
-    '正在安全暂停；等待核心确认':
-        'Safely pausing; waiting for the native job to confirm.',
+    '正在安全暂停；等待核心确认': 'Safely pausing; waiting for the native job to confirm.',
     '无法读取 Android 后台超时记录；批处理任务保持待核对：':
         'Unable to read the Android background-timeout record; batch jobs remain pending verification: ',
     '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
@@ -388,6 +656,11 @@ class StitchLocalizations {
         'Full PNG export is separate from the tile preview. Use “Export full PNG” above.',
     '金字塔中暂无瓦片': 'No tiles are available in this pyramid',
     '导出完整 PNG': 'Export full PNG',
+    '导出完整 TIFF': 'Export full TIFF',
+    '导出完整 JPEG XL': 'Export full JPEG XL',
+    '重试完整 PNG': 'Retry full PNG',
+    '重试完整 TIFF': 'Retry full TIFF',
+    '重试完整 JPEG XL': 'Retry full JPEG XL',
     '导出整图': 'Export full image',
     '分享 / 保存图像': 'Share / save image',
     '在文件夹中显示图像': 'Show image in folder',
@@ -416,14 +689,18 @@ class StitchLocalizations {
     'GPU 加速': 'GPU acceleration',
     '当前 CPU 原生包未提供 GPU 后端。':
         'The current CPU native package does not provide a GPU backend.',
-    '照片不可从网格移除；点按照片切换“强制按网格放置”。完整文件名可长按查看。':
-        'Photos cannot be removed from the grid. Tap a photo to toggle forced grid placement. Long press to see the full filename.',
+    '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。':
+        'Photos stay in the grid. Use the lock button on a photo to fix its grid position. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Tapping the photo itself does not change the lock; long-press to see the full filename.',
+    '锁定网格位置': 'Lock grid position',
+    '解除网格位置锁定': 'Unlock grid position',
+    '旧任务锁定位置来源未知；点按可解除锁定': 'Legacy grid lock; origin unknown. Tap to unlock.',
     '修正排列方式后查看网格预览。': 'Correct the grid order to preview the layout.',
     '金字塔清单无效：': 'Invalid pyramid manifest: ',
     '读取进度失败：': 'Could not read progress: ',
     '无法读取本地任务：': 'Could not load local tasks: ',
     '导入失败：': 'Import failed: ',
     '无法加入批处理：': 'Could not add batch: ',
+    '无法选择文件夹：': 'Could not choose a folder: ',
     '资源设置失败：': 'Could not save resource settings: ',
     '暂停请求失败：': 'Pause request failed: ',
     '取消请求失败：': 'Cancel request failed: ',
@@ -436,7 +713,6 @@ class StitchLocalizations {
         'The full-size viewer is available on Windows desktop.',
     '任务记录已删除；原片、瓦片和已导出照片已保留。':
         'Task record deleted. Source photos, tiles, and exported images were kept.',
-    '未知': 'Unknown',
     '已完成': 'Completed',
     '排队中': 'Queued',
     '处理中': 'Stitching',
@@ -502,6 +778,8 @@ class StitchLocalizations {
     '尚未校准。实际 EXIF 焦距：': 'Not calibrated. EXIF focal length: ',
     '结果是网格估算值，尚未校准，仍需目视检查接缝。':
         'Grid positions are estimates and are not calibrated. Visually inspect the seams.',
+    '最多检查 24 组中心相邻照片；结果是网格估算值，尚未校准，仍需目视检查接缝。':
+        'Checks up to 24 neighboring photo pairs around the center; grid positions are estimates and are not calibrated. Visually inspect the seams.',
     '最多检查 24 组中心相邻照片；':
         'Checks up to 24 neighboring photo pairs around the center; ',
     '重叠率由照片实测；未知镜头的视角仍需填写。当前视角用于球面投影，默认 45° 不是照片测量值。最多检查 24 组中心相邻照片，结果仍需目视检查接缝。':
@@ -514,22 +792,20 @@ class StitchLocalizations {
         'Limits local deformation in neighboring overlaps to reduce texture misalignment.',
     '选项会随任务保存；正在处理或等待恢复的任务使用已提交参数。最终整图仍使用全部原片和完整分辨率。':
         'Options are saved with each task. Running or resumable tasks use their submitted settings. Final output uses all source photos at full resolution.',
-    '中心照片提供水平/垂直估算；启用精细校正后，此项用于四邻照片配准。':
-        'Center photos provide horizontal and vertical estimates. With neighbor refinement enabled, this option applies to four-direction alignment.',
-    '自动网格只估算中心相邻照片；启用精细校正后可并行四邻照片配准。':
-        'Automatic grid mode estimates overlap from center neighbors only. Neighbor refinement can align four-direction pairs in parallel.',
+    '中心照片提供水平/垂直估算；启用精细校正后，此项用于八个方向相邻照片配准。':
+        'Center photos provide horizontal and vertical estimates. With neighbor refinement enabled, this option applies to the eight neighboring directions.',
+    '自动网格只估算中心相邻照片；启用精细校正后可并行配准八个方向的相邻照片。':
+        'Automatic grid mode estimates overlap from center neighbors only. Neighbor refinement can align pairs in all eight directions in parallel.',
     '自动网格使用固定的中心相邻照片估算；此项在自动模式下暂停使用。':
         'Automatic grid mode uses fixed center-neighbor estimates. This option is paused in automatic mode.',
     '精细校正会固定检查四个方向的相邻照片；关闭精细校正后可恢复此项设置。':
         'Neighbor refinement always checks all four directions. Turn it off to restore this setting.',
-    '中心重叠估算固定使用 SIFT/BF；此项用于启用中的四邻照片配准。':
-        'Center overlap estimation always uses SIFT/BF. This option applies to enabled four-direction alignment.',
-    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻照片配准。':
-        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with four-direction alignment.',
+    '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。':
+        'Center overlap estimation always uses SIFT/BF. This option applies to enabled eight-direction alignment.',
+    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。':
+        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with eight-direction alignment.',
     'ORB 使用 BF 匹配；FLANN 已关闭。': 'ORB uses BF matching; FLANN is disabled.',
     '默认使用 SIFT 特征。': 'SIFT features are used by default.',
-    '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试四邻配准。':
-        'Automatic grid estimation always uses SIFT/BF. Enable neighbor refinement to experiment with four-direction alignment.',
     'ORB 模式不可用；请先切回 SIFT。':
         'ORB mode is unavailable. Switch back to SIFT first.',
     '默认使用 BF 精确匹配。': 'BF exact matching is used by default.',
@@ -665,10 +941,10 @@ class StitchLocalizations {
         'When automatic overlap is off, unmatched directions use focal length or field of view and manual overlap to estimate grid positions.',
     '从中间照片估算水平/垂直重叠并按网格合成':
         'Estimate horizontal and vertical overlap from center photos, then stitch the grid',
-    '结合四个方向的相邻照片校正网格配准，可能需要更长时间。':
-        'Refine grid alignment using neighboring photos in four directions. This may take longer.',
-    '减少错位边缘的宽区域叠加；场景视差仍需检查。关闭可与传统羽化结果对照。':
-        'Reduces broad blending around misaligned edges. Check scene parallax. Turn off to compare traditional feather blending.',
+    '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。':
+        'Refines placement from reliable matches in all eight neighboring directions; unreliable matches have less influence. This may take longer.',
+    '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。':
+        'Prefers sharper photo sources in overlaps to reduce ghosting; original coverage is kept when no sharper neighbor exists. Turn off to compare feather blending.',
     '缓存保存在任务输入目录旁的应用任务目录中。':
         'The cache is stored in the app task folder beside the task input directory.',
     '使用 0.6 MP 配准图；关闭时使用 2.0 MP。最终渲染仍为全分辨率。':
@@ -686,7 +962,7 @@ class StitchLocalizations {
     '行列必须是有效整数。': 'Rows and columns must be valid integers.',
     '水平视角需介于 1° 与 179°。':
         'Horizontal field of view must be between 1° and 179°.',
-    '渲染内存预算需为 128–4096 MiB。': 'Render memory budget must be 128–4096 MiB.',
+    '渲染内存预算需为 128–131072 MiB。': 'Render memory budget must be 128–131072 MiB.',
     '配准并行数需为 1–32。': 'Alignment worker count must be 1–32.',
     '水平与垂直重叠率需分别为 15%–80%。':
         'Horizontal and vertical overlap must each be 15%–80%.',
@@ -699,14 +975,86 @@ class StitchLocalizations {
   };
 
   static const _zh = <String, String>{
+    '设置': '设置',
+    '语言': '语言',
+    '外观': '外观',
+    '强调色': '强调色',
+    '输出画质': '输出画质',
+    '合成详情': '合成详情',
+    '合成日志': '合成日志',
+    '总用时未知（旧任务没有时间记录）': '总用时未知（旧任务没有时间记录）',
+    '未知': '未知',
+    '进行中': '进行中',
+    'validate': '输入校验',
+    'source-validation': '原片校验',
+    'validation-complete': '校验完成',
+    'register': '照片配准',
+    'render-level-0': '全分辨率渲染',
+    'pyramid': '预览金字塔',
+    'commit-render': '保存渲染检查点',
+    'commit-export': '保存导出检查点',
+    'spool-jxl': '准备 JPEG XL 输出',
+    'encode-jxl': '编码 JPEG XL',
+    'export': '整图导出',
+    'optimize-grid-poses': '优化网格配准',
+    'refine-pixel-texture': '校正像素纹理',
+    'fit-local-texture-warp': '拟合局部纹理校正',
+    'grid-overlap-feature-extraction': '提取网格重叠特征',
+    'grid-overlap-pair-matching': '匹配网格重叠区域',
+    'grid-overlap-complete': '网格重叠分析完成',
+    'initial-matching-complete': '初始匹配完成',
+    'matching-edge-batch': '匹配相邻照片',
+    'adaptive-diagonal-matching': '检查对角相邻照片',
+    'retry-neighbor-matching': '重试相邻照片匹配',
+    'precision-recovery-start': '提高配准精度后重试',
+    'registration-complete': '配准完成',
+    'registration-failed': '配准失败',
+    'feature-extraction-batch': '提取图像特征',
+    'feature-extraction-complete': '特征提取完成',
+    'publish-export': '复制整图到选定文件夹',
+    'publishing': '正在发布整图',
+    'published': '整图已发布',
+    'publish-failed': '整图发布失败',
+    'prune-conflicting-neighbors': '移除冲突的相邻匹配',
+    'done': '完成',
+    'paused': '已暂停',
+    'cancelled': '已取消',
+    '重试复制到输出文件夹': '重试复制到输出文件夹',
+    '复制到输出文件夹失败：': '复制到输出文件夹失败：',
+    '重试发布整图': '重试发布整图',
+    '输出格式': '输出格式',
+    '接缝融合': '接缝融合',
+    '性能默认值': '性能默认值',
+    '并行图像匹配': '并行图像匹配',
+    '并行分块渲染': '并行分块渲染',
+    '启用原片纹理缓存': '启用原片纹理缓存',
+    '缓存图像配准结果': '缓存图像配准结果',
+    '快速配准': '快速配准',
+    '输出文件夹': '输出文件夹',
+    '使用默认文件夹': '使用默认文件夹',
+    '优先尝试四邻方向（自适应）': '优先尝试四邻方向（自适应）',
+    'ORB 快速特征': 'ORB 快速特征',
+    'FLANN 近似匹配': 'FLANN 近似匹配',
+    '选择文件夹': '选择文件夹',
+    '系统': '跟随系统',
+    '中文': '中文',
+    '英文': 'English',
+    '浅色': '浅色',
+    '深色': '深色',
+    '青绿': '青绿',
+    '蓝色': '蓝色',
+    '紫色': '紫色',
+    '橙色': '橙色',
+    '羽化': '羽化',
+    '去重影': '去重影',
+    '设置保存失败：': '设置保存失败：',
     'Lumia Stitch': 'DWARF Stitch',
     '本地任务': '本地任务',
     '任务记录': '任务记录',
     '导入原片': '导入照片',
     '合成信息 / 日志': '合成信息 / 日志',
     '先新建副本，再修改设置': '先新建副本，再修改设置',
-    '整图输出独立于瓦片预览，使用任务选择的输出格式。':
-        '整图输出独立于瓦片预览，使用任务选择的输出格式。',
+    '整图输出独立于瓦片预览，使用任务选择的输出格式。': '整图输出独立于瓦片预览，使用任务选择的输出格式。',
     '整图输出': '整图输出',
     '完成后自动导出格式': '完成后自动导出格式',
     'PNG（无损）': 'PNG（无损）',
@@ -736,12 +1084,9 @@ class StitchLocalizations {
     '已安全暂停': '已安全暂停',
     '核心作业已结束': '核心作业已结束',
     '正在安全暂停；等待核心确认': '正在安全暂停；等待核心确认',
-    '无法读取 Android 后台超时记录；批处理任务保持待核对：':
-        '无法读取 Android 后台超时记录；批处理任务保持待核对：',
-    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：':
-        '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：',
-    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。':
-        '无法保存 Android 后台暂停记录；请重试后再启动或恢复。',
+    '无法读取 Android 后台超时记录；批处理任务保持待核对：': '无法读取 Android 后台超时记录；批处理任务保持待核对：',
+    '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：': '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：',
+    '无法保存 Android 后台暂停记录；请重试后再启动或恢复。': '无法保存 Android 后台暂停记录；请重试后再启动或恢复。',
     'Android 后台超时任务仍待安全核对：': 'Android 后台超时任务仍待安全核对：',
     'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。':
         'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。',
