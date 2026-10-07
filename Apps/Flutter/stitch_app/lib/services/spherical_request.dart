@@ -59,6 +59,7 @@ Map<String, Object?> buildSphericalRequest(StitchTask task) {
     'featureType': options.featureType,
     'matcherType': options.matcherType,
     'registrationMegapixels': options.registrationMegapixels,
+    'allowPrecisionRecovery': options.fastRegistration,
     'allowNominalGridFallback': task.forceGridFallback,
     'autoGridOverlap': task.autoGridOverlap,
     'refineGridNeighbors': task.refineGridNeighbors,

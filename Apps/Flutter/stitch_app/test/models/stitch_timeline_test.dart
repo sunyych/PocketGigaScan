@@ -63,6 +63,25 @@ void main() {
     expect(identical(repeatedStatus, timeline), isTrue);
   });
 
+  test('precision recovery is a stable single timeline stage', () {
+    expect(
+      canonicalStitchTimelineStage('precision-recovery-start'),
+      'precision-recovery-start',
+    );
+    final timeline = const StitchTimeline().mergeNativeBatch([
+      {
+        'id': 1,
+        'timestampUtc': 1000,
+        'stage': 'precision-recovery-start',
+        'state': 'running',
+        'operation': 'render',
+      },
+    ], jobId: 'precision-job');
+
+    expect(timeline.events, hasLength(1));
+    expect(timeline.events.single.stage, 'precision-recovery-start');
+  });
+
   test('identical status history returns the same timeline instance', () {
     const empty = StitchTimeline();
     final batch = [

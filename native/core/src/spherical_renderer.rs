@@ -8,6 +8,7 @@ use crate::texture_warp::{
 };
 use image::{GenericImageView, ImageBuffer, Rgba, RgbaImage};
 use serde_json::Value;
+use std::sync::OnceLock;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -38,7 +39,36 @@ const SOURCE_QUALITY_BLUR_PEER_TEXTURE: f64 = 12.0;
 const SOURCE_QUALITY_BLUR_RELATIVE_MAX: f64 = 0.70;
 const SOURCE_QUALITY_BLUR_PEER_SHARPNESS: f64 = 18.0;
 const SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS: i32 = 4;
+const GEOMETRY_CACHE_MAX_BYTES_PER_WORKER: u64 = 32 * 1024 * 1024;
 static RENDERER_IDENTITY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+static SRGB_F32_THRESHOLDS: OnceLock<[u32; 256]> = OnceLock::new();
+static SRGB_F32_BUCKET_BASE: OnceLock<Vec<u8>> = OnceLock::new();
+
+fn bounded_geometry_cache_slots(
+    available_bytes: u64,
+    workers: usize,
+    slot_bytes: u64,
+    per_worker_limit: u64,
+    vector_header_bytes: u64,
+) -> Option<(usize, u64)> {
+    if workers == 0 || slot_bytes == 0 {
+        return Some((0, 0));
+    }
+    let workers_u64 = u64::try_from(workers).ok()?;
+    let available_per_worker = available_bytes / workers_u64;
+    let slots_by_budget = available_per_worker.saturating_sub(vector_header_bytes) / slot_bytes;
+    let slots_by_limit = per_worker_limit.saturating_sub(vector_header_bytes) / slot_bytes;
+    let slots = slots_by_budget.min(slots_by_limit) as usize;
+    let reserved_per_worker = if slots == 0 {
+        0
+    } else {
+        slot_bytes
+            .checked_mul(u64::try_from(slots).ok()?)?
+            .checked_add(vector_header_bytes)?
+    };
+    let reserved_total = reserved_per_worker.checked_mul(workers_u64)?;
+    (reserved_total <= available_bytes).then_some((slots, reserved_per_worker))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BlendMode {
@@ -651,6 +681,55 @@ fn srgb(c: f64) -> u8 {
     (v.clamp(0., 1.) * 255. + 0.5) as u8
 }
 
+fn srgb_f32_thresholds() -> &'static [u32; 256] {
+    SRGB_F32_THRESHOLDS.get_or_init(|| {
+        let mut thresholds = [0u32; 256];
+        let one = 1.0f32.to_bits();
+        for byte in 1..=255u16 {
+            let mut low = 0u32;
+            let mut high = one;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                if srgb(f64::from(f32::from_bits(middle))) >= byte as u8 {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            thresholds[byte as usize] = low;
+        }
+        thresholds
+    })
+}
+
+fn srgb_f32_bucket_base() -> &'static [u8] {
+    SRGB_F32_BUCKET_BASE.get_or_init(|| {
+        let max_bucket = 1.0f32.to_bits() >> 16;
+        (0..=max_bucket)
+            .map(|bucket| srgb(f64::from(f32::from_bits(bucket << 16))))
+            .collect()
+    })
+}
+
+/// Exact byte conversion for the f32 blend ratios used by level-zero output.
+/// A coarse exponent/mantissa bucket supplies the starting byte; f32-bit
+/// thresholds correct any sRGB rounding boundary crossed within that bucket.
+fn srgb_from_blend_f32(value: f32) -> u8 {
+    if value.is_nan() || value <= 0.0 {
+        return srgb(f64::from(value));
+    }
+    if value >= 1.0 {
+        return srgb(f64::from(value));
+    }
+    let bits = value.to_bits();
+    let mut byte = srgb_f32_bucket_base()[(bits >> 16) as usize];
+    let thresholds = srgb_f32_thresholds();
+    while byte < 255 && bits >= thresholds[usize::from(byte) + 1] {
+        byte += 1;
+    }
+    byte
+}
+
 fn sample_geometry(source: &Source, world: [f64; 3]) -> Option<(f64, f64, f64, f64)> {
     // Row-major cameraToWorld; its transpose maps world rays to camera rays.
     let m = source.camera_to_world;
@@ -694,12 +773,26 @@ fn sample_geometry(source: &Source, world: [f64; 3]) -> Option<(f64, f64, f64, f
     Some((x, y, weight, ownership))
 }
 
+#[cfg(test)]
 fn sample(
     source: &Source,
     image: &RgbaImage,
     world: [f64; 3],
 ) -> Option<([f64; 3], f64, f64, f64, f64)> {
     let (x, y, weight, ownership) = sample_geometry(source, world)?;
+    Some(sample_with_geometry(
+        source,
+        image,
+        (x, y, weight, ownership),
+    ))
+}
+
+fn sample_with_geometry(
+    source: &Source,
+    image: &RgbaImage,
+    geometry: (f64, f64, f64, f64),
+) -> ([f64; 3], f64, f64, f64, f64) {
+    let (x, y, weight, ownership) = geometry;
     // Texture coordinates use pixel centers, matching OpenGL's linear sampler.
     // The shader submits uv=(src+0.5)/size; GL's texel coordinate is src.
     let fx = x.clamp(0., f64::from(source.width - 1));
@@ -722,13 +815,86 @@ fn sample(
             rgb[c] += f64::from(p[c]) / 255. * w;
         }
     }
-    Some((
+    (
         [linear(rgb[0]), linear(rgb[1]), linear(rgb[2])],
         weight,
         ownership,
         x,
         y,
-    ))
+    )
+}
+
+fn geometry_from_source_xy(source: &Source, x: f64, y: f64) -> (f64, f64, f64, f64) {
+    let edge = x
+        .min(y)
+        .min(f64::from(source.width) - x)
+        .min(f64::from(source.height) - y);
+    let t = (edge / (f64::from(source.width.min(source.height)) * 0.08)).clamp(0., 1.);
+    let weight = t * t * (3. - 2. * t);
+    let ownership = (edge / f64::from(source.width.min(source.height))).clamp(0., 0.5);
+    (x, y, weight, ownership)
+}
+
+#[derive(Debug)]
+struct TileGeometryCache {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+}
+
+struct CandidateSourceIndices<'a> {
+    cached: Option<std::slice::Iter<'a, usize>>,
+    next_scan: usize,
+    source_count: usize,
+}
+
+impl<'a> CandidateSourceIndices<'a> {
+    fn new(cached: Option<&'a [usize]>, source_count: usize) -> Self {
+        Self {
+            cached: cached.map(|indices| indices.iter()),
+            next_scan: 0,
+            source_count,
+        }
+    }
+}
+
+impl Iterator for CandidateSourceIndices<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(cached) = self.cached.as_mut() {
+            cached.next().copied()
+        } else if self.next_scan < self.source_count {
+            let index = self.next_scan;
+            self.next_scan += 1;
+            Some(index)
+        } else {
+            None
+        }
+    }
+}
+
+impl TileGeometryCache {
+    fn new(count: usize) -> Self {
+        Self {
+            xs: vec![f64::NAN; count],
+            ys: vec![f64::NAN; count],
+        }
+    }
+
+    fn store(&mut self, index: usize, x: f64, y: f64) {
+        self.xs[index] = x;
+        self.ys[index] = y;
+    }
+
+    fn get(&self, source: &Source, index: usize) -> Option<(f64, f64, f64, f64)> {
+        let x = self.xs[index];
+        let y = self.ys[index];
+        if x.is_nan() {
+            None
+        } else {
+            Some(geometry_from_source_xy(source, x, y))
+        }
+    }
 }
 
 fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32) -> f64 {
@@ -984,9 +1150,65 @@ fn render_layout_tiles_with_options_internal(
         .ok_or_else(|| {
             crate::Error::Invalid("renderer active memory reservation overflowed".into())
         })?;
+    let geometry_slot_bytes = u64::from(TILE)
+        .checked_mul(u64::from(TILE))
+        .and_then(|pixels| pixels.checked_mul(2 * std::mem::size_of::<f64>() as u64))
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<(usize, TileGeometryCache)>() as u64)
+        })
+        .ok_or_else(|| crate::Error::Invalid("geometry cache slot accounting overflowed".into()))?;
+    let geometry_headroom = budget_bytes
+        .saturating_sub(active_reserve)
+        .saturating_sub(cache_min_reserve);
+    let source_count = u64::try_from(sources.len()).map_err(|_| {
+        crate::Error::Invalid("renderer source count exceeds memory accounting".into())
+    })?;
+    let candidate_index_bytes_per_worker = source_count
+        .checked_mul(std::mem::size_of::<usize>() as u64)
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<usize>>() as u64))
+        .ok_or_else(|| {
+            crate::Error::Invalid("candidate list memory accounting overflowed".into())
+        })?;
+    let candidate_index_bytes_reserved = if blend_mode == BlendMode::Deghost {
+        candidate_index_bytes_per_worker
+            .checked_mul(effective_workers as u64)
+            .ok_or_else(|| crate::Error::Invalid("candidate list reserve overflowed".into()))?
+    } else {
+        0
+    };
+    let candidate_list_enabled =
+        blend_mode == BlendMode::Deghost && candidate_index_bytes_reserved <= geometry_headroom;
+    let candidate_list_reserve = if candidate_list_enabled {
+        candidate_index_bytes_reserved
+    } else {
+        0
+    };
+    let geometry_array_headroom = geometry_headroom.saturating_sub(candidate_list_reserve);
+    let geometry_vector_header_bytes =
+        std::mem::size_of::<Vec<(usize, TileGeometryCache)>>() as u64;
+    let (geometry_cache_source_slots, geometry_cache_per_worker_cap) =
+        if blend_mode == BlendMode::Deghost && candidate_list_enabled {
+            bounded_geometry_cache_slots(
+                geometry_array_headroom,
+                effective_workers,
+                geometry_slot_bytes,
+                GEOMETRY_CACHE_MAX_BYTES_PER_WORKER,
+                geometry_vector_header_bytes,
+            )
+            .ok_or_else(|| crate::Error::Invalid("geometry cache reserve overflowed".into()))?
+        } else {
+            (0, 0)
+        };
+    let geometry_cache_reserve = geometry_cache_per_worker_cap
+        .checked_mul(effective_workers as u64)
+        .ok_or_else(|| crate::Error::Invalid("geometry cache reserve overflowed".into()))?;
+    let render_feature_reserve = geometry_cache_reserve
+        .checked_add(candidate_list_reserve)
+        .ok_or_else(|| crate::Error::Invalid("render feature reserve overflowed".into()))?;
     let cache_limit = if use_source_cache {
         budget_bytes
             .saturating_sub(active_reserve)
+            .saturating_sub(render_feature_reserve)
             .max(cache_min_reserve)
     } else {
         0
@@ -1000,6 +1222,12 @@ fn render_layout_tiles_with_options_internal(
     let peak_workers = AtomicU64::new(0);
     let decode_micros = AtomicU64::new(0);
     let encode_micros = AtomicU64::new(0);
+    let geometry_cached_sources = AtomicU64::new(0);
+    let geometry_projection_reuses = AtomicU64::new(0);
+    let ownership_micros = AtomicU64::new(0);
+    let classification_micros = AtomicU64::new(0);
+    let blend_micros = AtomicU64::new(0);
+    let output_micros = AtomicU64::new(0);
     let mut tasks = Vec::new();
     for i in 0..total {
         if !checkpoint(completed, total) {
@@ -1041,6 +1269,12 @@ fn render_layout_tiles_with_options_internal(
                 let peak_workers = &peak_workers;
                 let decode_micros = &decode_micros;
                 let encode_micros = &encode_micros;
+                let geometry_cached_sources = &geometry_cached_sources;
+                let geometry_projection_reuses = &geometry_projection_reuses;
+                let ownership_micros = &ownership_micros;
+                let classification_micros = &classification_micros;
+                let blend_micros = &blend_micros;
+                let output_micros = &output_micros;
                 let sources_ref = sources.as_slice();
                 let source_bytes_ref = source_bytes.as_slice();
                 let dir_ref = dir.as_path();
@@ -1063,6 +1297,14 @@ fn render_layout_tiles_with_options_internal(
                         &peak_workers,
                         &decode_micros,
                         &encode_micros,
+                        candidate_list_enabled,
+                        geometry_cache_source_slots,
+                        &geometry_cached_sources,
+                        &geometry_projection_reuses,
+                        &ownership_micros,
+                        &classification_micros,
+                        &blend_micros,
+                        &output_micros,
                         use_source_cache,
                         blend_mode,
                         sharpness_aware,
@@ -1089,7 +1331,7 @@ fn render_layout_tiles_with_options_internal(
     let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"estimatedActiveMemoryBytes":active_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"schedule":"2d-block","scheduleBlockSize":4,"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"renderMs":render_ms}),
     )
 }
 
@@ -1420,6 +1662,14 @@ fn render_one_tile(
     peak_workers: &AtomicU64,
     decode_micros: &AtomicU64,
     encode_micros: &AtomicU64,
+    candidate_list_enabled: bool,
+    geometry_cache_source_slots: usize,
+    geometry_cached_sources: &AtomicU64,
+    geometry_projection_reuses: &AtomicU64,
+    ownership_micros: &AtomicU64,
+    classification_micros: &AtomicU64,
+    blend_micros: &AtomicU64,
+    output_micros: &AtomicU64,
     use_cache: bool,
     blend_mode: BlendMode,
     sharpness_aware: bool,
@@ -1457,11 +1707,69 @@ fn render_one_tile(
         (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
     let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
     let mut source_quality_maps = vec![None; sources.len()];
+    let candidate_sources = if candidate_list_enabled {
+        let mut indices = Vec::new();
+        indices.try_reserve_exact(sources.len()).map_err(|error| {
+            crate::Error::Invalid(format!(
+                "cannot reserve renderer candidate indices: {error}"
+            ))
+        })?;
+        for (index, source) in sources.iter().enumerate() {
+            if candidate(source, bounds, left, top, tw, th, width, height) {
+                indices.push(index);
+            }
+        }
+        Some(indices)
+    } else {
+        None
+    };
+    let mut tile_geometry = Vec::<(usize, TileGeometryCache)>::new();
+    if geometry_cache_source_slots > 0 {
+        tile_geometry
+            .try_reserve_exact(geometry_cache_source_slots)
+            .map_err(|error| {
+                crate::Error::Invalid(format!("cannot reserve renderer geometry slots: {error}"))
+            })?;
+        let candidates = candidate_sources
+            .as_deref()
+            .expect("geometry cache reserves the candidate list");
+        // Warp candidates are selected first; each class retains source order.
+        for active_warp in [true, false] {
+            for &index in candidates {
+                if tile_geometry.len() == geometry_cache_source_slots {
+                    break;
+                }
+                let has_active_warp = sources[index]
+                    .source_plane_warp
+                    .as_ref()
+                    .is_some_and(|warp| !warp.is_zero());
+                if has_active_warp == active_warp {
+                    tile_geometry.push((index, TileGeometryCache::new(count)));
+                }
+            }
+        }
+    }
+    let mut tile_cached_source_count = 0u64;
+    let mut tile_projection_reuses = 0u64;
     if let Some(scores) = max_ownership.as_mut() {
-        for (source_index, source) in sources.iter().enumerate() {
-            if !candidate(source, bounds, left, top, tw, th, width, height) {
+        let ownership_started = Instant::now();
+        for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
+        {
+            if candidate_sources.is_none()
+                && !candidate(
+                    &sources[source_index],
+                    bounds,
+                    left,
+                    top,
+                    tw,
+                    th,
+                    width,
+                    height,
+                )
+            {
                 continue;
             }
+            let source = &sources[source_index];
             let quality = source_quality_map(
                 source_index,
                 source,
@@ -1474,14 +1782,21 @@ fn render_one_tile(
                 use_cache,
             )?;
             source_quality_maps[source_index] = Some(quality.clone());
+            let mut cached_geometry = tile_geometry
+                .iter_mut()
+                .find(|(index, _)| *index == source_index)
+                .map(|(_, geometry)| geometry);
             for py in 0..th {
                 for px in 0..tw {
                     let (sy, cy) = x_rays[px as usize];
                     let (sp, cp) = y_rays[py as usize];
                     let world = [sy * cp, sp, cy * cp];
+                    let index = (py * tw + px) as usize;
                     if let Some((source_x, source_y, _, ownership)) = sample_geometry(source, world)
                     {
-                        let index = (py * tw + px) as usize;
+                        if let Some(geometry) = cached_geometry.as_mut() {
+                            geometry.store(index, source_x, source_y);
+                        }
                         scores[index] = scores[index].max(ownership as f32);
                         let (texture_energy, _) =
                             quality.sample(source.width, source.height, source_x, source_y);
@@ -1500,25 +1815,51 @@ fn render_one_tile(
                 }
             }
         }
+        ownership_micros.fetch_add(
+            ownership_started.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
         // Classify sources only after the per-pixel peer sharpness is known.
         // This makes the decision independent of source order and compares
         // local texture at the same projected scene point, rather than a
         // whole-image sharpness score.
-        for (source_index, source) in sources.iter().enumerate() {
-            if !candidate(source, bounds, left, top, tw, th, width, height) {
+        let classification_started = Instant::now();
+        for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
+        {
+            if candidate_sources.is_none()
+                && !candidate(
+                    &sources[source_index],
+                    bounds,
+                    left,
+                    top,
+                    tw,
+                    th,
+                    width,
+                    height,
+                )
+            {
                 continue;
             }
+            let source = &sources[source_index];
             let quality = source_quality_maps[source_index]
                 .as_ref()
                 .expect("quality map prepared in geometry pass");
+            let cached_geometry = tile_geometry
+                .iter()
+                .find(|(index, _)| *index == source_index)
+                .map(|(_, geometry)| geometry);
             for py in 0..th {
                 for px in 0..tw {
                     let (sy, cy) = x_rays[px as usize];
                     let (sp, cp) = y_rays[py as usize];
                     let world = [sy * cp, sp, cy * cp];
-                    if let Some((source_x, source_y, _, ownership)) = sample_geometry(source, world)
-                    {
-                        let index = (py * tw + px) as usize;
+                    let index = (py * tw + px) as usize;
+                    let geometry = if let Some(cached) = cached_geometry {
+                        cached.get(source, index)
+                    } else {
+                        sample_geometry(source, world)
+                    };
+                    if let Some((source_x, source_y, _, ownership)) = geometry {
                         let (texture_energy, obstruction_confidence) =
                             quality.sample(source.width, source.height, source_x, source_y);
                         let sharpness =
@@ -1543,13 +1884,45 @@ fn render_one_tile(
                     }
                 }
             }
+            if tile_geometry
+                .iter()
+                .any(|(index, _)| *index == source_index)
+            {
+                tile_projection_reuses += count as u64;
+            }
         }
+        classification_micros.fetch_add(
+            classification_started.elapsed().as_micros() as u64,
+            Ordering::Relaxed,
+        );
+        geometry_projection_reuses.fetch_add(tile_projection_reuses, Ordering::Relaxed);
+        tile_projection_reuses = 0;
     }
-    for (source_index, source) in sources.iter().enumerate() {
-        if !candidate(source, bounds, left, top, tw, th, width, height) {
+    let blend_started = Instant::now();
+    for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len()) {
+        if candidate_sources.is_none()
+            && !candidate(
+                &sources[source_index],
+                bounds,
+                left,
+                top,
+                tw,
+                th,
+                width,
+                height,
+            )
+        {
             continue;
         }
+        let source = &sources[source_index];
         visits.fetch_add(1, Ordering::Relaxed);
+        let cached = tile_geometry
+            .iter()
+            .find(|(index, _)| *index == source_index)
+            .map(|(_, geometry)| geometry);
+        if cached.is_some() {
+            tile_cached_source_count += 1;
+        }
         let image = source_image(
             source_index,
             source,
@@ -1566,8 +1939,16 @@ fn render_one_tile(
                 let (sy, cy) = x_rays[px as usize];
                 let (sp, cp) = y_rays[py as usize];
                 let world = [sy * cp, sp, cy * cp];
-                if let Some((rgb, weight, ownership, x, y)) = sample(source, &image, world) {
-                    let cell = &mut accum[(py * tw + px) as usize];
+                let index = (py * tw + px) as usize;
+                let geometry = if let Some(cached) = cached {
+                    cached.get(source, index)
+                } else {
+                    sample_geometry(source, world)
+                };
+                if let Some(geometry) = geometry {
+                    let (rgb, weight, ownership, x, y) =
+                        sample_with_geometry(source, &image, geometry);
+                    let cell = &mut accum[index];
                     let blend_weight = match blend_mode {
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
@@ -1600,8 +1981,18 @@ fn render_one_tile(
                 }
             }
         }
+        if cached.is_some() {
+            tile_projection_reuses += count as u64;
+        }
     }
+    geometry_cached_sources.fetch_add(tile_cached_source_count, Ordering::Relaxed);
+    geometry_projection_reuses.fetch_add(tile_projection_reuses, Ordering::Relaxed);
+    blend_micros.fetch_add(
+        blend_started.elapsed().as_micros() as u64,
+        Ordering::Relaxed,
+    );
     let mut tile: RgbaImage = ImageBuffer::from_pixel(tw, th, Rgba([0, 0, 0, 0]));
+    let output_started = Instant::now();
     for py in 0..th {
         for px in 0..tw {
             let cell = accum[(py * tw + px) as usize];
@@ -1610,15 +2001,19 @@ fn render_one_tile(
                     px,
                     py,
                     Rgba([
-                        srgb(f64::from(cell[0] / cell[3])),
-                        srgb(f64::from(cell[1] / cell[3])),
-                        srgb(f64::from(cell[2] / cell[3])),
+                        srgb_from_blend_f32(cell[0] / cell[3]),
+                        srgb_from_blend_f32(cell[1] / cell[3]),
+                        srgb_from_blend_f32(cell[2] / cell[3]),
                         255,
                     ]),
                 );
             }
         }
     }
+    output_micros.fetch_add(
+        output_started.elapsed().as_micros() as u64,
+        Ordering::Relaxed,
+    );
     let out = dir.join(format!("{row}-{col}.png"));
     let temp = dir.join(format!(
         "{row}-{col}.tmp-{}-{:?}.png",
@@ -1868,6 +2263,86 @@ fn render_pyramid_tile(
 mod tests {
     use super::*;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn geometry_cache_reservation_includes_vector_header_at_exact_budget_edges() {
+        let slot_bytes = 4 * 1024 * 1024 + 64;
+        let header_bytes = std::mem::size_of::<Vec<(usize, TileGeometryCache)>>() as u64;
+        let per_worker_limit = GEOMETRY_CACHE_MAX_BYTES_PER_WORKER;
+
+        for workers in 1usize..=8 {
+            let workers_bytes = workers as u64;
+            for slots_requested in 0u64..=4 {
+                let exact_per_worker = if slots_requested == 0 {
+                    0
+                } else {
+                    header_bytes + slots_requested * slot_bytes
+                };
+                let exact_budget = exact_per_worker * workers_bytes;
+                for available in [
+                    exact_budget.saturating_sub(1),
+                    exact_budget,
+                    exact_budget.saturating_add(workers_bytes - 1),
+                ] {
+                    let (slots, reserved_per_worker) = bounded_geometry_cache_slots(
+                        available,
+                        workers,
+                        slot_bytes,
+                        per_worker_limit,
+                        header_bytes,
+                    )
+                    .unwrap();
+                    let reserved_total = reserved_per_worker * workers_bytes;
+                    assert!(reserved_total <= available);
+                    assert!(reserved_per_worker <= per_worker_limit);
+                    if slots > 0 {
+                        assert_eq!(
+                            reserved_per_worker,
+                            header_bytes + slots as u64 * slot_bytes
+                        );
+                    } else {
+                        assert_eq!(reserved_per_worker, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn final_blend_f32_lut_matches_reference_around_every_byte_boundary() {
+        let thresholds = srgb_f32_thresholds();
+        for byte in 1..=255usize {
+            let boundary = thresholds[byte];
+            let start = boundary.saturating_sub(256);
+            let end = boundary.saturating_add(256).min(1.0f32.to_bits());
+            for bits in start..=end {
+                let value = f32::from_bits(bits);
+                assert_eq!(
+                    srgb_from_blend_f32(value),
+                    srgb(f64::from(value)),
+                    "f32 sRGB lookup mismatch near byte {byte} at bits {bits:#010x}"
+                );
+            }
+        }
+
+        // Exercise actual blend-ratio-shaped values plus the complete coarse
+        // bucket boundaries without relying on host random-number libraries.
+        let bucket_base = srgb_f32_bucket_base();
+        for bucket in 0..bucket_base.len() as u32 {
+            let bits = bucket << 16;
+            let value = f32::from_bits(bits);
+            assert_eq!(srgb_from_blend_f32(value), srgb(f64::from(value)));
+        }
+        let mut state = 0x8d12_7a49u32;
+        for _ in 0..100_000 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let bits = state & 1.0f32.to_bits();
+            let value = f32::from_bits(bits);
+            assert_eq!(srgb_from_blend_f32(value), srgb(f64::from(value)));
+        }
+    }
 
     fn wait_for_decode_waiters(cache: &DecodeCache, expected: u64) {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2158,6 +2633,12 @@ mod tests {
         img.put_pixel(0, 1, Rgba([200, 200, 200, 255]));
         img.put_pixel(1, 1, Rgba([255, 255, 255, 255]));
         let (rgb, weight, ownership, _, _) = sample(&source, &img, [0., 0., 1.]).unwrap();
+        let geometry = sample_geometry(&source, [0., 0., 1.]).unwrap();
+        assert_eq!(
+            sample_with_geometry(&source, &img, geometry),
+            (rgb, weight, ownership, geometry.0, geometry.1),
+            "prepared exact geometry must preserve the reference feather sample"
+        );
         let expected = linear((0. + 100. + 200. + 255.) / 4. / 255.);
         assert!((rgb[0] - expected).abs() < 1e-12);
         assert_eq!(weight, 1.);
@@ -3324,10 +3805,65 @@ mod tests {
             );
         }
 
+        let mut shifted_deghost_layout = shifted_layout.clone();
+        shifted_deghost_layout["renderBlendMode"] = serde_json::json!("deghost");
+        let shifted_deghost_cached_dir = root.join("shifted-deghost-cached");
+        let shifted_deghost_fallback_dir = root.join("shifted-deghost-fallback");
+        let shifted_deghost_cached = render_layout_tiles_with_options(
+            &shifted_deghost_layout,
+            &shifted_deghost_cached_dir,
+            128,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        let shifted_deghost_fallback = render_layout_tiles_with_options(
+            &shifted_deghost_layout,
+            &shifted_deghost_fallback_dir,
+            92,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(shifted_deghost_cached["geometryCacheEnabled"], true);
+        assert_eq!(shifted_deghost_fallback["geometryCacheEnabled"], false);
+        assert_eq!(shifted_deghost_cached["workersEffective"].as_u64(), Some(1));
+        assert_eq!(
+            shifted_deghost_fallback["workersEffective"].as_u64(),
+            Some(1)
+        );
+        assert!(
+            shifted_deghost_cached["geometryProjectionEvaluationsAvoided"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            shifted_deghost_fallback["geometryProjectionEvaluationsAvoided"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            shifted_deghost_cached["geometryCacheBytesPerWorkerReserved"]
+                .as_u64()
+                .unwrap()
+                <= GEOMETRY_CACHE_MAX_BYTES_PER_WORKER
+        );
+        for col in 0..3 {
+            let name = format!("level-0/0-{col}.png");
+            assert_eq!(
+                fs::read(shifted_deghost_cached_dir.join(&name)).unwrap(),
+                fs::read(shifted_deghost_fallback_dir.join(&name)).unwrap(),
+                "warped deghost output changed when bounded geometry reuse was disabled"
+            );
+        }
+
         let mut deghost_layout = layout.clone();
         deghost_layout["renderBlendMode"] = serde_json::json!("deghost");
         let deghost_serial_dir = root.join("deghost-serial");
         let deghost_parallel_dir = root.join("deghost-parallel");
+        let deghost_fallback_dir = root.join("deghost-fallback");
         let deghost_serial = render_layout_tiles_with_options(
             &deghost_layout,
             &deghost_serial_dir,
@@ -3346,6 +3882,19 @@ mod tests {
             |_, _| true,
         )
         .unwrap();
+        let deghost_fallback = render_layout_tiles_with_options(
+            &deghost_layout,
+            &deghost_fallback_dir,
+            92,
+            1,
+            true,
+            |_, _| true,
+        )
+        .unwrap();
+        assert_eq!(deghost_serial["geometryCacheEnabled"], true);
+        assert_eq!(deghost_fallback["geometryCacheEnabled"], false);
+        assert_eq!(deghost_serial["workersEffective"].as_u64(), Some(1));
+        assert_eq!(deghost_fallback["workersEffective"].as_u64(), Some(1));
         assert_eq!(serial["blendModel"], "source-edge-smoothstep-feather");
         assert_eq!(
             deghost_serial["blendModel"],
@@ -3367,6 +3916,11 @@ mod tests {
                 deghost_bytes,
                 fs::read(deghost_parallel_dir.join(&name)).unwrap(),
                 "deghost output must be deterministic across worker counts"
+            );
+            assert_eq!(
+                deghost_bytes,
+                fs::read(deghost_fallback_dir.join(&name)).unwrap(),
+                "unwarped deghost output changed when bounded geometry reuse was disabled"
             );
         }
         fs::remove_dir_all(root).unwrap();
@@ -3429,6 +3983,14 @@ mod tests {
         assert_eq!(
             original["blendModel"],
             "sharpness-aware-max-score-softmax-ownership"
+        );
+        assert_eq!(original["geometryCacheEnabled"], true);
+        assert!(original["geometryCachedSourceTileCount"].as_u64().unwrap() > 0);
+        assert!(
+            original["geometryProjectionEvaluationsAvoided"]
+                .as_u64()
+                .unwrap()
+                > 0
         );
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
         assert_eq!(original["completedTiles"], reversed["completedTiles"]);

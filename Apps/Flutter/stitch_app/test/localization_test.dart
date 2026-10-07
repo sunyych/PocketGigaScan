@@ -27,6 +27,11 @@ void main() {
     expect(chinese.text(registration), registration);
     expect(chinese.text(deghost), deghost);
     expect(
+      english.timelineStage('precision-recovery-start'),
+      'Retry registration at higher precision',
+    );
+    expect(chinese.timelineStage('precision-recovery-start'), '提高配准精度后重试');
+    expect(
       english.text(registration),
       'Refines placement from reliable matches in all eight neighboring directions; unreliable matches have less influence. This may take longer.',
     );

@@ -79,6 +79,7 @@ __pycache__/
 !/docs/gigascan/BLUR-REPAIR-PLAN.md
 !/docs/gigascan/LOOP-REGRESSION-PLAN.md
 !/docs/gigascan/DWARF-PERFORMANCE-DESIGN.md
+!/docs/gigascan/HOTPATH-SPEEDUP-DESIGN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md

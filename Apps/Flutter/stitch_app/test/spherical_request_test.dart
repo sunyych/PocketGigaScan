@@ -65,6 +65,7 @@ void main() {
         'featureType',
         'matcherType',
         'registrationMegapixels',
+        'allowPrecisionRecovery',
         'allowNominalGridFallback',
         'autoGridOverlap',
         'refineGridNeighbors',
@@ -84,6 +85,7 @@ void main() {
       expect(request['featureType'], 'sift');
       expect(request['matcherType'], 'bf');
       expect(request['registrationMegapixels'], 2.0);
+      expect(request['allowPrecisionRecovery'], isFalse);
       expect(request['allowNominalGridFallback'], isFalse);
       expect(request['autoGridOverlap'], isTrue);
       expect(request['refineGridNeighbors'], isFalse);
@@ -262,6 +264,7 @@ void main() {
       );
       expect(request['neighborMode'], 'eight');
       expect(request['registrationMegapixels'], 0.6);
+      expect(request['allowPrecisionRecovery'], isTrue);
       expect(request['featureType'], 'orb');
       expect(request['matcherType'], 'bf');
     },

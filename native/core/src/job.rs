@@ -17,7 +17,7 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 18;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 19;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
@@ -137,6 +137,9 @@ fn registration_progress(stage: &str) -> Option<f64> {
         // This callback occurs after the ordinary retry loop and as the optional
         // CLAHE pass begins.
         "clahe-retry" => Some(0.12),
+        // A bounded 2 MP registration retry starts after the fast attempt's
+        // quality gate. Keep progress monotonic while the second pass runs.
+        "precision-recovery-start" => Some(0.18),
         _ if stage.starts_with("grid-component-pose-")
             || stage.starts_with("pixel-refinement-")
             || stage.starts_with("pixel-bundle-") =>
@@ -1348,6 +1351,9 @@ fn alignment_stats(layout: &Value, cache_hit: bool) -> Value {
         "featureType":report["featureType"],
         "matcherType":report["matcherType"],
         "registrationMegapixels":report["registrationMegapixels"],
+        "requestedRegistrationMegapixels":report["requestedRegistrationMegapixels"],
+        "actualRegistrationMegapixels":report["actualRegistrationMegapixels"],
+        "precisionRecovery":report["precisionRecovery"],
         "neighborMode":report["neighborMode"],
         "qualityStatus":report["qualityStatus"],
         "edgeDiagnostics":report["edgeDiagnostics"],
@@ -1356,7 +1362,16 @@ fn alignment_stats(layout: &Value, cache_hit: bool) -> Value {
         "featureExtractionMs":report["featureExtractionMs"],
         "initialMatchingMs":report["initialMatchingMs"],
         "lowContrastRetryMs":report["lowContrastRetryMs"],
+        "lowContrastRetryExtractionMs":report["lowContrastRetryExtractionMs"],
+        "lowContrastRetryMatchingMs":report["lowContrastRetryMatchingMs"],
+        "lowContrastRetryExtractedEndpointCount":report["lowContrastRetryExtractedEndpointCount"],
+        "lowContrastRetryUniqueExtractedFeatureCount":report["lowContrastRetryUniqueExtractedFeatureCount"],
         "claheRetryMs":report["claheRetryMs"],
+        "claheRetryExtractionMs":report["claheRetryExtractionMs"],
+        "claheRetryMatchingMs":report["claheRetryMatchingMs"],
+        "claheRetryExtractedEndpointCount":report["claheRetryExtractedEndpointCount"],
+        "claheRetryUniqueExtractedFeatureCount":report["claheRetryUniqueExtractedFeatureCount"],
+        "claheRetryFeatureCountSemantics":report["claheRetryFeatureCountSemantics"],
         "poseOptimizationMs":report["poseOptimizationMs"],
         "totalAlignmentMs":report["totalAlignmentMs"]
     })
@@ -1793,7 +1808,7 @@ mod tests {
 
     #[test]
     fn alignment_cache_key_ignores_execution_options_but_tracks_algorithm_and_sources() {
-        let request = json!({"fov":70,"grid":{"rows":2},"parallelRendering":true,"workers":4,"useAlignmentCache":true});
+        let request = json!({"fov":70,"grid":{"rows":2},"parallelRendering":true,"workers":4,"useAlignmentCache":true,"allowPrecisionRecovery":true});
         let mut hashes = BTreeMap::new();
         hashes.insert("source.jpg".into(), "a".repeat(64));
         let key = alignment_cache_key(&request, &hashes);
@@ -1807,8 +1822,20 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
+            alignment_cache_key_for_version(19, &request, &hashes),
+            "bounded precision recovery must use cache version 19"
+        );
+        assert_ne!(
+            key,
             alignment_cache_key_for_version(18, &request, &hashes),
-            "fixed-eight-neighbor alignment must use cache version 18"
+            "version 18 layouts predate bounded precision recovery"
+        );
+        let mut recovery_disabled = request.clone();
+        recovery_disabled["allowPrecisionRecovery"] = json!(false);
+        assert_ne!(
+            key,
+            alignment_cache_key(&recovery_disabled, &hashes),
+            "cache identity must include whether precision recovery is allowed"
         );
         assert_ne!(
             key,
@@ -1829,7 +1856,7 @@ mod tests {
 
     #[test]
     fn corrupt_alignment_cache_record_is_rejected() {
-        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3,"edgeDiagnostics":[{"from":0,"to":1,"reliabilityWeightScale":0.05,"loopConflictAmbiguous":true}],"qualityWarnings":["inspect affected seams"]}});
+        let layout = json!({"schemaVersion":1,"projection":"spherical","width":2,"height":1,"yawMinRad":0.12345678901234566,"tiles":[{"cameraToWorld":[0.12345678901234566]}],"report":{"qualityStatus":"needs-visual-review","effectiveMatchingWorkers":3,"requestedRegistrationMegapixels":0.6,"actualRegistrationMegapixels":2.0,"precisionRecovery":{"enabled":true,"eligible":true,"attempted":true,"status":"recovered","requestedRegistrationMegapixels":0.6,"actualRegistrationMegapixels":2.0,"attempts":[{"registrationMegapixels":0.6,"status":"reprojectionQualityFailed"},{"registrationMegapixels":2.0,"status":"completed"}]},"edgeDiagnostics":[{"from":0,"to":1,"reliabilityWeightScale":0.05,"loopConflictAmbiguous":true}],"qualityWarnings":["inspect affected seams"]}});
         let layout_json = serde_json::to_string(&layout).unwrap();
         let hash = fingerprint::sha256_bytes(layout_json.as_bytes());
         let valid =
@@ -1841,6 +1868,12 @@ mod tests {
         assert_eq!(summary["qualityStatus"], "needs-visual-review");
         assert_eq!(summary["matchingWorkers"], 3);
         assert_eq!(summary["cached"], true);
+        assert_eq!(summary["requestedRegistrationMegapixels"], 0.6);
+        assert_eq!(summary["actualRegistrationMegapixels"], 2.0);
+        assert_eq!(
+            summary["precisionRecovery"],
+            layout["report"]["precisionRecovery"]
+        );
         assert_eq!(
             summary["edgeDiagnostics"],
             layout["report"]["edgeDiagnostics"]
@@ -2330,6 +2363,7 @@ mod tests {
             "joint-cycle-prune-round",
             "source-plane-warp-outer-iteration",
             "source-plane-warp-line-search",
+            "precision-recovery-start",
             "registration-complete",
         ];
         let mut progress = 0.02_f64;
@@ -2346,6 +2380,10 @@ mod tests {
             "per-edge retry callbacks add no progress"
         );
         assert_eq!(*reported.last().unwrap(), 0.19);
+        assert_eq!(
+            registration_progress("precision-recovery-start"),
+            Some(0.18)
+        );
         assert!(
             (registration_progress("retry-matching-progress:5/10").unwrap() - 0.11).abs() < 1e-12
         );

@@ -66,6 +66,7 @@ String? canonicalStitchTimelineStage(String? stage) {
     return 'refine-pixel-texture';
   }
   if (stage.startsWith('source-plane-warp-')) return 'fit-local-texture-warp';
+  if (stage == 'precision-recovery-start') return 'precision-recovery-start';
   if (stage.startsWith('joint-cycle-prune-')) {
     return 'prune-conflicting-neighbors';
   }

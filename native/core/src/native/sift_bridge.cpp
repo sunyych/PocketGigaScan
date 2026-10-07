@@ -129,6 +129,24 @@ extern "C" void* lg_sift_features_create_batch(const char* path, int* feature_co
   return create_features(path, feature_count, static_cast<double>(maximum_pixels), 1,
                          contrast_threshold, false, true, use_orb != 0);
 }
+extern "C" void* lg_sift_features_create_contrast_batch(const char* path, int* feature_count,
+                                                            std::size_t maximum_pixels,
+                                                            double contrast_threshold,
+                                                            void* guard, int use_orb) {
+  if (!guard || maximum_pixels == 0 || !std::isfinite(contrast_threshold) ||
+      contrast_threshold <= 0.0 || contrast_threshold > 1.0) return nullptr;
+  return create_features(path, feature_count, static_cast<double>(maximum_pixels), 1,
+                         contrast_threshold, false, true, use_orb != 0);
+}
+extern "C" void* lg_sift_features_create_clahe_batch(const char* path, int* feature_count,
+                                                         std::size_t maximum_pixels,
+                                                         double contrast_threshold,
+                                                         void* guard, int use_orb) {
+  if (!guard || maximum_pixels == 0 || !std::isfinite(contrast_threshold) ||
+      contrast_threshold <= 0.0 || contrast_threshold > 1.0) return nullptr;
+  return create_features(path, feature_count, static_cast<double>(maximum_pixels), 1,
+                         contrast_threshold, true, true, use_orb != 0);
+}
 extern "C" void* lg_sift_features_create(const char* path, int* feature_count) {
   return create_features(path, feature_count, 120000.0);
 }

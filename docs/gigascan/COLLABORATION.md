@@ -1,5 +1,24 @@
 # PocketGigaScan collaboration ledger
 
+## PG-060 renderer hot path and recovery performance
+
+The user reports roughly thirty minutes and requests faster stitching. Luna
+renderer owns exact output-f32 sRGB conversion, bounded f64 geometry reuse and
+coarse instrumentation/tests. Luna registration owns guarded bounded recovery
+feature extraction and precise retry timings/counters; its narrow plumbing spans
+sift_bridge.cpp, register.rs, pipeline/mod.rs, spherical.rs and job.rs. Codex owns
+independent review, this [scope](HOTPATH-SPEEDUP-DESIGN.md), serial SDK execution,
+same-input ROI/full benchmark comparisons, packages and the existing MR update.
+No hard lock, source, resolution, accepted-edge or quality-threshold changes are
+part of this task. Cancellation, old-task ownership and per-job/app memory limits
+remain. The separate DeepSeek bilingual patch is still pending its actual path.
+
+The new fully unlocked 0.6 MP failure is a separate correctness investigation.
+Luna geometry owns a bounded precision-recovery wrapper/tests and cache version;
+Luna precision UI owns narrow request/timeline translations/tests. Codex owns
+real 2.0 MP replay, preserved task evidence and independent gating review. No
+quality limit is raised and no source or weak edge is silently discarded.
+
 ## PG-058 versioned task traceability
 
 The user explicitly adds a versioned per-task master file containing source

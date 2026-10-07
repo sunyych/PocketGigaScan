@@ -21,6 +21,8 @@ const GRID_COMPONENT_STEP_TOLERANCE_RAD: f64 = 1e-7;
 const WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS: usize = 16;
 const WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS: f64 = 48.0;
 const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 8;
+const FAST_REGISTRATION_MEGA_PIXELS: f64 = 0.6;
+const PRECISION_RECOVERY_MEGA_PIXELS: f64 = 2.0;
 const APPROVED_V2_SNAPSHOT_PRODUCER_SHA256: &str =
     "3a1eb012a9f1756b8772f217088fbe904b6ec0803457a72d3d0a36c6f2b9911e";
 fn current_pixel_solver_parameters() -> Value {
@@ -65,7 +67,7 @@ impl From<Error> for SphericalFailure {
 type Mat = [f64; 9];
 const ID: Mat = [1., 0., 0., 0., 1., 0., 0., 0., 1.];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Request {
     rows: usize,
@@ -143,7 +145,7 @@ fn default_feature_type() -> String {
 fn default_matcher_type() -> String {
     "bf".into()
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct InputTile {
     row: usize,
     column: usize,
@@ -4454,6 +4456,8 @@ fn align(
         initial_matching_ms,
         low_contrast_retry_ms,
         clahe_retry_ms,
+        low_contrast_timings,
+        clahe_timings,
         matched_edges,
     ) = job.spherical_match_edges(
         (req.registration_megapixels * 1_000_000.0).round() as usize,
@@ -4926,13 +4930,12 @@ fn align(
         && synthesized_grid_edges
             .iter()
             .any(|edge| edge["rotationSource"] == "nominalFovOverlap");
-    if cycle_prune_budget_exceeded
-        || (!nominal_only_layout && !global_reprojection_rms.is_finite())
-        || !complete_reprojection_evidence && !nominal_only_layout
-        || (!nominal_only_layout
-            && (global_reprojection_rms > MAX_GLOBAL_REPROJECTION_RMS_PIXELS
-                || maximum_edge_reprojection_rms > MAX_EDGE_REPROJECTION_RMS_PIXELS))
-    {
+    let reprojection_quality_failed = !nominal_only_layout
+        && (!global_reprojection_rms.is_finite()
+            || !complete_reprojection_evidence
+            || global_reprojection_rms > MAX_GLOBAL_REPROJECTION_RMS_PIXELS
+            || maximum_edge_reprojection_rms > MAX_EDGE_REPROJECTION_RMS_PIXELS);
+    if cycle_prune_budget_exceeded || reprojection_quality_failed {
         let message = format!(
             "global matched-ray reprojection is {:.2}px RMS (worst edge {:.2}px; limit {:.1}px); supplied intrinsics or scene parallax may be unsuitable",
             global_reprojection_rms,
@@ -4943,6 +4946,7 @@ fn align(
             code: "REGISTRATION_FAILED",
             message,
             diagnostics: Some(json!({
+                "failureReason":if reprojection_quality_failed { "reprojection_quality_gate" } else { "cycle_prune_budget_exceeded" },
                 "featureCount":feature_count,
                 "retryFeatureCount":retry_feature_count,
                 "retryEndpointTileCount":retry_endpoint_count,
@@ -5097,7 +5101,19 @@ fn align(
     report["featureExtractionMs"] = json!(primary_feature_extraction_ms);
     report["initialMatchingMs"] = json!(initial_matching_ms);
     report["lowContrastRetryMs"] = json!(low_contrast_retry_ms);
+    report["lowContrastRetryExtractionMs"] = json!(low_contrast_timings.extraction_ms);
+    report["lowContrastRetryMatchingMs"] = json!(low_contrast_timings.matching_ms);
+    report["lowContrastRetryExtractedEndpointCount"] =
+        json!(low_contrast_timings.extracted_endpoint_count);
+    report["lowContrastRetryUniqueExtractedFeatureCount"] =
+        json!(low_contrast_timings.extracted_feature_count);
     report["claheRetryMs"] = json!(clahe_retry_ms);
+    report["claheRetryExtractionMs"] = json!(clahe_timings.extraction_ms);
+    report["claheRetryMatchingMs"] = json!(clahe_timings.matching_ms);
+    report["claheRetryExtractedEndpointCount"] = json!(clahe_timings.extracted_endpoint_count);
+    report["claheRetryUniqueExtractedFeatureCount"] = json!(clahe_timings.extracted_feature_count);
+    report["claheRetryFeatureCountSemantics"] =
+        json!("legacy-per-edge-sum-of-endpoint-feature-counts");
     report["poseOptimizationMs"] = json!(pose_optimization_ms);
     report["pixelRefinementCameraCount"] = json!(pixel_refined_camera_count);
     report["pixelReinitializedCameraCount"] = json!(pixel_reinitialized_camera_count);
@@ -5352,19 +5368,265 @@ fn align(
     Ok(layout)
 }
 
+fn is_precision_recovery_quality_failure(failure: &SphericalFailure) -> bool {
+    failure.code == "REGISTRATION_FAILED"
+        && failure
+            .diagnostics
+            .as_ref()
+            .is_some_and(|diagnostics| diagnostics["failureReason"] == "reprojection_quality_gate")
+}
+
+fn precision_recovery_enabled(input: &Value) -> std::result::Result<bool, SphericalFailure> {
+    match input.get("allowPrecisionRecovery") {
+        None => Ok(true),
+        Some(Value::Bool(enabled)) => Ok(*enabled),
+        Some(_) => Err(SphericalFailure {
+            code: "INVALID_REQUEST",
+            message: "allowPrecisionRecovery must be a boolean when provided".into(),
+            diagnostics: None,
+        }),
+    }
+}
+
+fn precision_recovery_eligible(request: &Request, enabled: bool) -> bool {
+    enabled
+        && request.placement_mode == "grid-assisted"
+        && (request.registration_megapixels - FAST_REGISTRATION_MEGA_PIXELS).abs() < 1e-9
+}
+
+fn compact_failure_summary(failure: &SphericalFailure) -> Value {
+    let diagnostics = failure.diagnostics.as_ref();
+    let field = |name: &str| {
+        diagnostics
+            .map(|value| value[name].clone())
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "code":failure.code,
+        "message":failure.message,
+        "failureReason":field("failureReason"),
+        "globalRayReprojectionRmsPx":field("globalRayReprojectionRmsPx"),
+        "maximumEdgeReprojectionRmsPx":field("maximumEdgeReprojectionRmsPx"),
+        "completeCorrespondenceEvidence":field("completeCorrespondenceEvidence"),
+        "matchedEdgeCount":field("matchedEdgeCount"),
+        "worstEdges":field("worstEdges")
+    })
+}
+
+fn precision_recovery_report(
+    enabled: bool,
+    eligible: bool,
+    status: &str,
+    requested_megapixels: f64,
+    actual_megapixels: f64,
+    first_attempt_ms: u128,
+    precision_attempt_ms: Option<u128>,
+    first_failure: Option<Value>,
+    total_ms: u128,
+) -> Value {
+    let mut attempts = vec![json!({
+        "registrationMegapixels":requested_megapixels,
+        "status":if first_failure.is_some() { "reprojectionQualityFailed" } else { "completed" },
+        "elapsedMs":first_attempt_ms,
+        "failure":first_failure.clone()
+    })];
+    if let Some(elapsed_ms) = precision_attempt_ms {
+        attempts.push(json!({
+            "registrationMegapixels":PRECISION_RECOVERY_MEGA_PIXELS,
+            "status":if status == "recovered" { "completed" } else { "failed" },
+            "elapsedMs":elapsed_ms
+        }));
+    }
+    json!({
+        "enabled":enabled,
+        "eligible":eligible,
+        "attempted":precision_attempt_ms.is_some(),
+        "status":status,
+        "requestedRegistrationMegapixels":requested_megapixels,
+        "actualRegistrationMegapixels":actual_megapixels,
+        "attempts":attempts,
+        "firstFailure":first_failure,
+        "totalAlignmentMs":total_ms
+    })
+}
+
+fn annotate_precision_recovery_layout(
+    layout: &mut Value,
+    recovery: Value,
+    requested_megapixels: f64,
+    actual_megapixels: f64,
+    total_ms: u128,
+) {
+    layout["report"]["requestedRegistrationMegapixels"] = json!(requested_megapixels);
+    layout["report"]["actualRegistrationMegapixels"] = json!(actual_megapixels);
+    layout["report"]["precisionRecovery"] = recovery;
+    layout["report"]["totalAlignmentMs"] = json!(total_ms);
+}
+
+fn align_with_precision_recovery(
+    request: Request,
+    recovery_enabled: bool,
+    checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    mut run_attempt: impl FnMut(
+        Request,
+        &mut dyn FnMut(&str) -> std::result::Result<(), String>,
+    ) -> std::result::Result<Value, SphericalFailure>,
+) -> std::result::Result<Value, SphericalFailure> {
+    let total_started = std::time::Instant::now();
+    let requested_megapixels = request.registration_megapixels;
+    let eligible = precision_recovery_eligible(&request, recovery_enabled);
+    let first_started = std::time::Instant::now();
+    let first_result = run_attempt(request.clone(), checkpoint);
+    let first_attempt_ms = first_started.elapsed().as_millis();
+    match first_result {
+        Ok(mut layout) => {
+            let total_ms = total_started.elapsed().as_millis();
+            let actual_megapixels = layout["report"]["registrationMegapixels"]
+                .as_f64()
+                .unwrap_or(requested_megapixels);
+            let status = if !recovery_enabled {
+                "disabled"
+            } else if eligible {
+                "notNeeded"
+            } else {
+                "notEligible"
+            };
+            let recovery = precision_recovery_report(
+                recovery_enabled,
+                eligible,
+                status,
+                requested_megapixels,
+                actual_megapixels,
+                first_attempt_ms,
+                None,
+                None,
+                total_ms,
+            );
+            annotate_precision_recovery_layout(
+                &mut layout,
+                recovery,
+                requested_megapixels,
+                actual_megapixels,
+                total_ms,
+            );
+            Ok(layout)
+        }
+        Err(first_failure) if eligible && is_precision_recovery_quality_failure(&first_failure) => {
+            let first_failure_summary = compact_failure_summary(&first_failure);
+            drop(first_failure);
+            if let Err(message) = checkpoint("precision-recovery-start") {
+                return Err(SphericalFailure {
+                    code: "CANCELLED",
+                    message,
+                    diagnostics: Some(json!({
+                        "failureReason":"precision_recovery_cancelled_before_retry",
+                        "requestedRegistrationMegapixels":requested_megapixels,
+                        "actualRegistrationMegapixels":Value::Null,
+                        "precisionRecovery":precision_recovery_report(
+                            recovery_enabled,
+                            eligible,
+                            "cancelledBeforeRetry",
+                            requested_megapixels,
+                            requested_megapixels,
+                            first_attempt_ms,
+                            None,
+                            Some(first_failure_summary),
+                            total_started.elapsed().as_millis()
+                        )
+                    })),
+                });
+            }
+            let mut precision_request = request.clone();
+            precision_request.registration_megapixels = PRECISION_RECOVERY_MEGA_PIXELS;
+            let precision_started = std::time::Instant::now();
+            match run_attempt(precision_request, checkpoint) {
+                Ok(mut layout) => {
+                    let precision_attempt_ms = precision_started.elapsed().as_millis();
+                    let total_ms = total_started.elapsed().as_millis();
+                    let recovery = precision_recovery_report(
+                        recovery_enabled,
+                        eligible,
+                        "recovered",
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        first_attempt_ms,
+                        Some(precision_attempt_ms),
+                        Some(first_failure_summary),
+                        total_ms,
+                    );
+                    annotate_precision_recovery_layout(
+                        &mut layout,
+                        recovery,
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        total_ms,
+                    );
+                    Ok(layout)
+                }
+                Err(mut precision_failure) => {
+                    let precision_attempt_ms = precision_started.elapsed().as_millis();
+                    let total_ms = total_started.elapsed().as_millis();
+                    let precision_failure_summary = compact_failure_summary(&precision_failure);
+                    let recovery = precision_recovery_report(
+                        recovery_enabled,
+                        eligible,
+                        if precision_failure.code == "CANCELLED" {
+                            "cancelledDuringRetry"
+                        } else {
+                            "precisionRecoveryFailed"
+                        },
+                        requested_megapixels,
+                        PRECISION_RECOVERY_MEGA_PIXELS,
+                        first_attempt_ms,
+                        Some(precision_attempt_ms),
+                        Some(first_failure_summary),
+                        total_ms,
+                    );
+                    if let Some(diagnostics) = precision_failure.diagnostics.as_mut() {
+                        diagnostics["requestedRegistrationMegapixels"] =
+                            json!(requested_megapixels);
+                        diagnostics["actualRegistrationMegapixels"] =
+                            json!(PRECISION_RECOVERY_MEGA_PIXELS);
+                        diagnostics["precisionRecovery"] = recovery;
+                        diagnostics["precisionFailure"] = precision_failure_summary;
+                        diagnostics["totalAlignmentMs"] = json!(total_ms);
+                    } else {
+                        precision_failure.diagnostics = Some(json!({
+                            "requestedRegistrationMegapixels":requested_megapixels,
+                            "actualRegistrationMegapixels":PRECISION_RECOVERY_MEGA_PIXELS,
+                            "precisionRecovery":recovery,
+                            "precisionFailure":precision_failure_summary,
+                            "totalAlignmentMs":total_ms
+                        }));
+                    }
+                    Err(precision_failure)
+                }
+            }
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
 pub fn align_json_with_checkpoint(
     input: &str,
     checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>,
 ) -> std::result::Result<Value, SphericalFailure> {
-    let mut request: Request = serde_json::from_str(input).map_err(|e| SphericalFailure {
+    let input_value: Value = serde_json::from_str(input).map_err(|e| SphericalFailure {
         code: "INVALID_REQUEST",
         message: format!("invalid spherical request JSON: {e}"),
         diagnostics: None,
     })?;
+    let recovery_enabled = precision_recovery_enabled(&input_value)?;
+    let mut request: Request =
+        serde_json::from_value(input_value).map_err(|e| SphericalFailure {
+            code: "INVALID_REQUEST",
+            message: format!("invalid spherical request JSON: {e}"),
+            diagnostics: None,
+        })?;
     if let Some(normalized) = normalize_neighbor_mode(&request.neighbor_mode) {
         request.neighbor_mode = normalized.into();
     }
-    align(request, checkpoint)
+    align_with_precision_recovery(request, recovery_enabled, checkpoint, align)
 }
 
 pub fn align_json_detailed(input: &str) -> std::result::Result<Value, SphericalFailure> {
@@ -6206,6 +6468,234 @@ fn refine_correspondence_snapshot_excluding_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn precision_recovery_request() -> Request {
+        serde_json::from_value(json!({
+            "rows":1,"columns":2,
+            "tiles":[
+                {"row":0,"column":0,"path":"a.jpg","placementConstraint":{"kind":"gridPrior","origin":"operator"}},
+                {"row":0,"column":1,"path":"b.jpg","forceGrid":true}
+            ],
+            "fx":75000.0,"fy":75000.0,"cx":1919.5,"cy":1079.5,
+            "sourceWidth":3840,"sourceHeight":2160,
+            "placementMode":"grid-assisted","allowNominalGridFallback":true,
+            "gridHorizontalOverlap":0.3,"gridVerticalOverlap":0.3,
+            "neighborMode":"eight","workers":4,"parallelMatching":true,
+            "registrationMegapixels":0.6,"featureType":"sift","matcherType":"bf",
+            "localTextureWarp":true
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn precision_recovery_flag_defaults_true_and_rejects_non_boolean_values() {
+        assert!(precision_recovery_enabled(&json!({})).unwrap());
+        assert!(precision_recovery_enabled(&json!({"allowPrecisionRecovery":true})).unwrap());
+        assert!(!precision_recovery_enabled(&json!({"allowPrecisionRecovery":false})).unwrap());
+        for value in [json!(null), json!(0), json!("false"), json!([])] {
+            let error =
+                precision_recovery_enabled(&json!({"allowPrecisionRecovery":value})).unwrap_err();
+            assert_eq!(error.code, "INVALID_REQUEST");
+        }
+    }
+
+    fn precision_quality_failure() -> SphericalFailure {
+        SphericalFailure {
+            code: "REGISTRATION_FAILED",
+            message: "quality gate failed".into(),
+            diagnostics: Some(json!({
+                "failureReason":"reprojection_quality_gate",
+                "globalRayReprojectionRmsPx":2.3,
+                "maximumEdgeReprojectionRmsPx":124.0,
+                "completeCorrespondenceEvidence":true,
+                "matchedEdgeCount":700,
+                "worstEdges":[{"from":74,"to":75,"rmsPx":124.0}]
+            })),
+        }
+    }
+
+    #[test]
+    fn precision_recovery_retries_once_at_two_mp_without_changing_geometry_request() {
+        let request = precision_recovery_request();
+        assert!(precision_recovery_eligible(&request, true));
+        let mut calls = Vec::new();
+        let mut runner =
+            |attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls.push(attempt.clone());
+                if calls.len() == 1 {
+                    Err(precision_quality_failure())
+                } else {
+                    Ok(
+                        json!({"report":{"registrationMegapixels":attempt.registration_megapixels,"totalAlignmentMs":20}}),
+                    )
+                }
+            };
+        let mut checkpoint_stages = Vec::new();
+        let mut checkpoint = |stage: &str| {
+            checkpoint_stages.push(stage.to_owned());
+            Ok(())
+        };
+        let layout =
+            align_with_precision_recovery(request.clone(), true, &mut checkpoint, &mut runner)
+                .unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], request);
+        let mut expected_precision_request = request;
+        expected_precision_request.registration_megapixels = 2.0;
+        assert_eq!(calls[1], expected_precision_request);
+        assert_eq!(checkpoint_stages, vec!["precision-recovery-start"]);
+        assert_eq!(layout["report"]["requestedRegistrationMegapixels"], 0.6);
+        assert_eq!(layout["report"]["actualRegistrationMegapixels"], 2.0);
+        assert_eq!(layout["report"]["precisionRecovery"]["status"], "recovered");
+        assert_eq!(
+            layout["report"]["precisionRecovery"]["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            layout["report"]["totalAlignmentMs"],
+            layout["report"]["precisionRecovery"]["totalAlignmentMs"]
+        );
+    }
+
+    #[test]
+    fn precision_recovery_preserves_precise_failure_and_first_failure_without_third_attempt() {
+        let request = precision_recovery_request();
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                if calls == 1 {
+                    Err(precision_quality_failure())
+                } else {
+                    Err(SphericalFailure {
+                        code: "REGISTRATION_FAILED",
+                        message: "2 MP still fails the unchanged gate".into(),
+                        diagnostics: Some(json!({
+                            "failureReason":"reprojection_quality_gate",
+                            "maximumEdgeReprojectionRmsPx":13.0
+                        })),
+                    })
+                }
+            };
+        let mut checkpoint = |_| Ok(());
+        let failure =
+            align_with_precision_recovery(request, true, &mut checkpoint, &mut runner).unwrap_err();
+        assert_eq!(calls, 2);
+        assert_eq!(failure.message, "2 MP still fails the unchanged gate");
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionFailure"]
+                ["maximumEdgeReprojectionRmsPx"],
+            13.0
+        );
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionRecovery"]["firstFailure"]
+                ["maximumEdgeReprojectionRmsPx"],
+            124.0
+        );
+        assert_eq!(
+            failure.diagnostics.as_ref().unwrap()["precisionRecovery"]["attempts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn precision_recovery_does_not_retry_non_gate_disabled_or_non_fast_requests() {
+        let request = precision_recovery_request();
+        let failures = [
+            SphericalFailure {
+                code: "REGISTRATION_FAILED",
+                message: "graph failure".into(),
+                diagnostics: Some(json!({"failureReason":"disconnected_graph"})),
+            },
+            SphericalFailure {
+                code: "CANCELLED",
+                message: "cancelled".into(),
+                diagnostics: None,
+            },
+        ];
+        for failure in failures {
+            let mut calls = 0;
+            let mut runner = |_attempt: Request,
+                              _checkpoint: &mut dyn FnMut(
+                &str,
+            )
+                -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(SphericalFailure {
+                    code: failure.code,
+                    message: failure.message.clone(),
+                    diagnostics: failure.diagnostics.clone(),
+                })
+            };
+            let mut checkpoint = |_| Ok(());
+            assert!(align_with_precision_recovery(
+                request.clone(),
+                true,
+                &mut checkpoint,
+                &mut runner
+            )
+            .is_err());
+            assert_eq!(calls, 1);
+        }
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(precision_quality_failure())
+            };
+        let mut checkpoint = |_| Ok(());
+        assert!(align_with_precision_recovery(
+            request.clone(),
+            false,
+            &mut checkpoint,
+            &mut runner
+        )
+        .is_err());
+        assert_eq!(calls, 1);
+        let mut precise_request = request.clone();
+        precise_request.registration_megapixels = 2.0;
+        assert!(!precision_recovery_eligible(&precise_request, true));
+        let mut visual_request = request;
+        visual_request.placement_mode = "visual".into();
+        assert!(!precision_recovery_eligible(&visual_request, true));
+    }
+
+    #[test]
+    fn precision_recovery_honors_cancellation_before_second_attempt() {
+        let request = precision_recovery_request();
+        let mut calls = 0;
+        let mut runner =
+            |_attempt: Request,
+             _checkpoint: &mut dyn FnMut(&str) -> std::result::Result<(), String>| {
+                calls += 1;
+                Err(precision_quality_failure())
+            };
+        let mut checkpoint = |stage: &str| {
+            if stage == "precision-recovery-start" {
+                Err("cancelled".into())
+            } else {
+                Ok(())
+            }
+        };
+        let failure =
+            align_with_precision_recovery(request, true, &mut checkpoint, &mut runner).unwrap_err();
+        assert_eq!(calls, 1);
+        assert_eq!(failure.code, "CANCELLED");
+        assert_eq!(
+            failure.diagnostics.unwrap()["precisionRecovery"]["status"],
+            "cancelledBeforeRetry"
+        );
+    }
 
     #[test]
     fn warp_step_comparison_handles_grid_level_changes_without_losing_field() {
