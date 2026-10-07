@@ -89,6 +89,51 @@ class _MemoryTasks extends TaskRepository {
   }
 }
 
+class _AccessDeniedTaskRemoval extends _MemoryTasks {
+  _AccessDeniedTaskRemoval(super.taskRoot);
+
+  bool failNextRemoval = false;
+
+  @override
+  Future<void> removeTaskRecord(String id) async {
+    if (failNextRemoval) {
+      failNextRemoval = false;
+      throw FileSystemException(
+        'Access is denied',
+        '${taskRoot.path}${Platform.pathSeparator}$id${Platform.pathSeparator}.removed.tmp-test',
+        OSError('Access is denied', 5),
+      );
+    }
+    await super.removeTaskRecord(id);
+  }
+}
+
+class _AccessDeniedBatchQueueSave extends BatchQueueRepository {
+  _AccessDeniedBatchQueueSave(this.directory);
+
+  final Directory directory;
+  bool failNextSave = false;
+
+  @override
+  Future<Directory> root() async {
+    await directory.create(recursive: true);
+    return directory;
+  }
+
+  @override
+  Future<void> save(BatchQueue queue) async {
+    if (failNextSave) {
+      failNextSave = false;
+      throw FileSystemException(
+        'Access is denied',
+        '${directory.path}${Platform.pathSeparator}${queue.id}${Platform.pathSeparator}batch.json',
+        OSError('Access is denied', 5),
+      );
+    }
+    await super.save(queue);
+  }
+}
+
 class _GatedTaskLoads extends _MemoryTasks {
   _GatedTaskLoads(super.taskRoot);
 
@@ -400,6 +445,7 @@ void main() {
   late BatchQueueRepository queues;
   late _FakeApi api;
   late BatchQueueController controller;
+  BatchQueueController? secondaryController;
   late DateTime currentTime;
 
   setUp(() async {
@@ -415,6 +461,7 @@ void main() {
       ),
     );
     api = _FakeApi();
+    secondaryController = null;
     currentTime = DateTime.utc(2026, 10, 3);
     controller = BatchQueueController(
       api: api,
@@ -426,6 +473,8 @@ void main() {
   });
 
   tearDown(() async {
+    secondaryController?.dispose();
+    await secondaryController?.drain();
     controller.dispose();
     await controller.drain();
     if (await temporary.exists()) await temporary.delete(recursive: true);
@@ -730,6 +779,135 @@ void main() {
     expect(tasks.removed, isNot(contains(taskId)));
     expect(controller.queues.single.items, hasLength(1));
   });
+
+  test(
+    'storage-denied task removal keeps durable queue ownership and can retry',
+    () async {
+      await _makeFolder(parent, 'storage-denied', 4);
+      final failingTasks = _AccessDeniedTaskRemoval(
+        Directory('${temporary.path}${Platform.pathSeparator}tasks'),
+      );
+      final failingController = secondaryController = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: failingTasks,
+        clock: () => currentTime,
+      );
+      await failingController.initialize();
+      await failingController.addParent(parent.path);
+      final queue = failingController.queues.single;
+      final item = queue.items.single;
+      await failingController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.jobs.length == 1);
+      final taskId = failingController.queues.single.items.single.taskId!;
+      final task = failingTasks.values[taskId]!;
+      final original = File(task.photos.first.storedPath);
+      final output = Directory(task.outputDirectory)
+        ..createSync(recursive: true);
+      final exported = File(
+        '${output.path}${Platform.pathSeparator}panorama.png',
+      )..writeAsBytesSync([8, 7, 6, 5]);
+      failingTasks.failNextRemoval = true;
+
+      await expectLater(
+        failingController.removeTask(taskId),
+        throwsA(
+          isA<FileSystemException>().having(
+            (error) => error.osError?.errorCode,
+            'errno',
+            5,
+          ),
+        ),
+      );
+
+      expect(failingController.queues.single.items.single.taskId, taskId);
+      expect((await queues.loadAll()).single.items.single.taskId, taskId);
+      expect(failingTasks.values.containsKey(taskId), isTrue);
+      expect(failingTasks.removed, isNot(contains(taskId)));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+
+      await failingController.removeTask(taskId);
+
+      expect(failingController.queues.single.items, isEmpty);
+      expect((await queues.loadAll()).single.items, isEmpty);
+      expect(failingTasks.values.containsKey(taskId), isFalse);
+      expect(failingTasks.removed, contains(taskId));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+    },
+  );
+
+  test(
+    'queue-save denial keeps in-memory ownership and retry uses tombstoned task cache',
+    () async {
+      await _makeFolder(parent, 'queue-save-denied', 4);
+      final failingQueues = _AccessDeniedBatchQueueSave(
+        Directory('${temporary.path}${Platform.pathSeparator}retry-queues'),
+      );
+      final failingController = secondaryController = BatchQueueController(
+        api: api,
+        queueRepository: failingQueues,
+        taskRepository: tasks,
+        clock: () => currentTime,
+      );
+      await failingController.initialize();
+      await failingController.addParent(parent.path);
+      final queue = failingController.queues.single;
+      final item = queue.items.single;
+      await failingController.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.jobs.length == 1);
+      final taskId = failingController.queues.single.items.single.taskId!;
+      final task = tasks.values[taskId]!;
+      final original = File(task.photos.first.storedPath);
+      final output = Directory(task.outputDirectory)
+        ..createSync(recursive: true);
+      final exported = File(
+        '${output.path}${Platform.pathSeparator}panorama.png',
+      )..writeAsBytesSync([8, 7, 6, 5]);
+      failingQueues.failNextSave = true;
+
+      await expectLater(
+        failingController.removeTask(taskId),
+        throwsA(
+          isA<FileSystemException>().having(
+            (error) => error.osError?.errorCode,
+            'errno',
+            5,
+          ),
+        ),
+      );
+
+      expect(failingController.queues.single.items.single.taskId, taskId);
+      expect(
+        (await failingQueues.loadAll()).single.items.single.taskId,
+        taskId,
+      );
+      expect(tasks.values.containsKey(taskId), isFalse);
+      expect(tasks.removed, contains(taskId));
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+
+      await failingController.removeTask(taskId);
+
+      expect(failingController.queues.single.items, isEmpty);
+      expect((await failingQueues.loadAll()).single.items, isEmpty);
+      expect(original.existsSync(), isTrue);
+      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+    },
+  );
 
   test(
     'TIFF batch queue persists format and assigns TIFF export paths',

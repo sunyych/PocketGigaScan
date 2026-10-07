@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart' hide Text;
 import 'package:path/path.dart' as p;
 
@@ -10,6 +9,7 @@ import 'services/batch_queue_controller.dart';
 import 'services/native_job_api.dart';
 import 'services/mobile_storage_service.dart';
 import 'services/mobile_runtime_service.dart';
+import 'services/platform_file_dialogs.dart';
 import 'services/settings_controller.dart';
 import 'services/power_service.dart';
 import 'models/stitch_task.dart';
@@ -94,11 +94,31 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   Future<void> _selectParent() async {
     if (_busy || (_mobile && !_android)) return;
     await widget.settingsController?.ready;
-    final path = _android
-        ? await _storage.pickBatchParent()
-        : await FilePicker.platform.getDirectoryPath(
-            dialogTitle: '选择包含多个全景子目录的母目录',
-          );
+    if (!mounted) return;
+    String? path;
+    try {
+      path = _android
+          ? await _storage.pickBatchParent()
+          : await PlatformFileDialogs().getDirectoryPath(
+              dialogTitle: StitchLocalizations.of(
+                context,
+              ).chooseBatchParentFolder,
+              confirmButtonText: StitchLocalizations.of(context).chooseFolder,
+            );
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              StitchLocalizations.of(
+                context,
+              ).folderSelectionFailed(error.toString()),
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (path == null) return;
     if (!mounted) {
       if (_android) await _storage.releaseBatchParent(path);

@@ -23,6 +23,22 @@ pwsh -File scripts/build-dwarf-stitch-windows.ps1 `
 The builder verifies dependency versions/checksums. Its `-PlanOnly` option
 prints the pinned versions and output paths without building.
 
+Local test executables must run from a normal user directory. A development
+workspace may carry an inherited Windows Low Mandatory Level label; an EXE
+created or extracted there then starts at low integrity even when Explorer is
+running normally. That process cannot write ordinary AppData task records.
+Extract the release ZIP into a fresh Downloads directory and check the process
+integrity when diagnosing `Access is denied` errors. Do not grant broad AppData
+permissions or require administrator execution. ZIP contents do not carry the
+development directory's Windows ACL or mandatory label.
+
+Windows binaries currently have no Authenticode signature. SmartScreen's
+unknown-publisher warning is a distribution/signing concern, distinct from
+task-storage access and import-dialog failures. Trusted code signing and
+publisher reputation require a real signing certificate; a self-signed test
+certificate does not establish that reputation. See Microsoft's
+[SmartScreen documentation](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
+
 ## Android
 
 The Android application shares Flutter and the vendored native processing engine.

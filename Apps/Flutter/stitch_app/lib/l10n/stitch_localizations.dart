@@ -135,6 +135,8 @@ class StitchLocalizations {
   String get defaultOutputFolder => text('使用默认文件夹');
   String get useDefaultFolder => text('使用默认文件夹');
   String get chooseFolder => text('选择文件夹');
+  String get chooseBatchParentFolder => text('选择包含多个全景子目录的母目录');
+  String folderSelectionFailed(String error) => '${text('无法选择文件夹：')}$error';
   String get retryOutputCopy => text('重试复制到输出文件夹');
   String outputCopyFailed(String error) => '${text('复制到输出文件夹失败：')}$error';
   String settingsOption(String value) => text(switch (value) {
@@ -698,6 +700,7 @@ class StitchLocalizations {
     '无法读取本地任务：': 'Could not load local tasks: ',
     '导入失败：': 'Import failed: ',
     '无法加入批处理：': 'Could not add batch: ',
+    '无法选择文件夹：': 'Could not choose a folder: ',
     '资源设置失败：': 'Could not save resource settings: ',
     '暂停请求失败：': 'Pause request failed: ',
     '取消请求失败：': 'Cancel request failed: ',

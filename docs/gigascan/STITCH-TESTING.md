@@ -93,3 +93,13 @@ physical camera capture, and real-photo full-resolution visual acceptance remain
 separate gates. The synthetic analytic-RGB and reprojection thresholds are
 regression gates, not a substitute for reviewing real-photo seams and crops.
 New standalone build evidence is recorded separately.
+
+`windows_import_test.dart` exercises the Windows Flutter engine and the real
+streamed-copy/hash/JPEG-metadata/task-persistence path for every JPEG in an
+external directory. Supply `--dart-define=TEST_WINDOWS_IMPORT_DIR=C:/fixtures/originals`
+with `flutter test integration_test/windows_import_test.dart -d windows`.
+Without the define or Windows engine it explicitly skips. Once enabled, a
+missing directory or fewer than 37 JPEGs fails. It substitutes the picker only;
+opening, cancelling and selecting files in the actual Windows dialog remain a
+separate native UI check. The fixture and prior export are hash-checked before
+and after import, and only its isolated temporary task copy is cleaned up.

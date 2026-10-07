@@ -1,9 +1,9 @@
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'models/app_settings.dart';
 import 'models/stitch_quality.dart';
 import 'services/settings_controller.dart';
 import 'services/mobile_storage_service.dart';
+import 'services/platform_file_dialogs.dart';
 import 'services/memory_budget_policy.dart';
 import 'l10n/stitch_localizations.dart';
 
@@ -340,7 +340,9 @@ class _SettingsPageState extends State<SettingsPage> {
                                             )))
                                         .pickOutputFolder())
                                     ?.uri
-                              : await FilePicker.platform.getDirectoryPath();
+                              : await PlatformFileDialogs().getDirectoryPath(
+                                  confirmButtonText: l.chooseFolder,
+                                );
                           if (path != null) {
                             await widget.controller.updateWith(
                               (latest) =>

@@ -1385,20 +1385,33 @@ class BatchQueueController extends ChangeNotifier {
       } else if (_isActivePhase(task.phase)) {
         throw StateError('任务缺少原生作业编号；无法确认已停止');
       }
-      for (final ref in refs) {
-        final current = _find(ref.$1.id, ref.$2.id);
-        if (current == null) continue;
-        final queue = current.queue;
-        final next = queue.copyWith(
-          items: [
-            for (final item in queue.items)
-              if (item.id != ref.$2.id) item,
-          ],
-        );
-        _queues[current.index] = next;
-        await _save(next);
-      }
+      // Commit the task tombstone before dropping durable queue ownership. If
+      // storage denies the metadata write, leave the queue reference available
+      // for an explicit retry and keep the task visible in the local cache.
       await _taskRepository.removeTaskRecord(taskId);
+      for (final ref in refs) {
+        while (true) {
+          final current = _find(ref.$1.id, ref.$2.id);
+          if (current == null) break;
+          final queue = current.queue;
+          final next = queue.copyWith(
+            items: [
+              for (final item in queue.items)
+                if (item.id != ref.$2.id) item,
+            ],
+          );
+          await _save(next);
+          final live = _find(ref.$1.id, ref.$2.id);
+          if (live == null) break;
+          if (!identical(live.queue, queue)) {
+            // Recompute after every awaited write so a concurrent queue edit
+            // cannot be overwritten by a stale removal snapshot.
+            continue;
+          }
+          _queues[live.index] = next;
+          break;
+        }
+      }
       _taskCache.remove(taskId);
       for (final ref in refs) {
         _inFlight.remove(ref.$2.id);

@@ -156,6 +156,7 @@ class StitchHomePage extends StatefulWidget {
     this.mobileStorageService,
     this.mobileRuntimeService,
     this.settingsController,
+    this.photoImporter,
   });
   final JobApi? jobApi;
   final PowerGate? powerGate;
@@ -169,6 +170,7 @@ class StitchHomePage extends StatefulWidget {
   final MobileStorageService? mobileStorageService;
   final MobileRuntimeService? mobileRuntimeService;
   final SettingsController? settingsController;
+  final PhotoImporter? photoImporter;
   @override
   State<StitchHomePage> createState() => _StitchHomePageState();
 }
@@ -182,7 +184,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   late final MobileRuntimeService? _runtime = _android
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
-  final _importer = PhotoImporter();
+  late final _importer = widget.photoImporter ?? PhotoImporter();
   late final JobApi _api = widget.jobApi ?? NativeJobApi();
   late final BatchQueueController? _batchController = (_mobile && !_android)
       ? null

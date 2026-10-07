@@ -1,5 +1,36 @@
 # PocketGigaScan collaboration ledger
 
+## PG-061 Windows import and local-storage diagnosis
+
+The user reported a native file-dialog crash and errno-5 failures creating tasks
+and writing removal tombstones. Luna picker coder owns the platform-dialog
+adapter, dependency/localized folder prompts and adapter tests. Luna workflow
+coder owns the injectable importer and host/Windows-engine workflow tests. Luna
+storage coder owns deletion ordering and its failure/retry test. Codex owns
+independent review, read-only Windows token/ACL investigation, serial SDK checks,
+ordinary-directory test staging, release packages and the existing PR #5 update.
+
+The observed workspace EXE inherits Low Mandatory Level and starts with integrity
+RID 4096; the user's existing AppData root still grants their account FullControl.
+A fresh copy of the same 1.3.3 binary in Downloads inherits normal permissions,
+starts at RID 8192, and opens/cancels the native picker successfully. No Windows
+security settings, existing directory ACLs, originals or exports are changed.
+This storage diagnosis is separate from historical ucrtbase fatal-exit events.
+
+The replacement Windows path uses Flutter's endorsed file-selector native
+Common Item Dialog; Android continues its streamed file-picker/SAF behavior.
+Task removal commits its tombstone before removing durable batch references;
+an errno-5 write failure leaves task and queue ownership available for retry.
+Independent review rejected an invalid JPEG fixture and a duplicate translation
+key, and required real selector-adapter tests and wall-clock filesystem waits.
+Host analysis is clean; all 284 Flutter tests and the final 33-test deletion
+controller suite pass. Independent review also required queue-save-before-publish
+and repeated snapshot rebasing; both tombstone and queue-write errno-5 retries
+retain originals and exports. Host copied-photo checks use a real-clock service
+test, with cancel/error/count widget coverage separate from native import UI.
+Release/UI qualification remains in progress; see the
+[PG-061 evidence record](evidence/WINDOWS-IMPORT-2026-10-07.md).
+
 ## PG-060 renderer hot path and recovery performance
 
 The user reports roughly thirty minutes and requests faster stitching. Luna

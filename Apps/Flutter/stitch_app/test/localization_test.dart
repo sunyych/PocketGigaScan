@@ -17,6 +17,27 @@ import 'support/empty_batch_queue_controller.dart';
 import 'support/localization_surface_fakes.dart';
 
 void main() {
+  test('folder dialog messages are localized in both supported locales', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+
+    expect(
+      english.chooseBatchParentFolder,
+      'Choose a parent folder containing panorama subfolders',
+    );
+    expect(english.chooseFolder, 'Choose folder');
+    expect(
+      english.folderSelectionFailed('test failure'),
+      'Could not choose a folder: test failure',
+    );
+    expect(chinese.chooseBatchParentFolder, '选择包含多个全景子目录的母目录');
+    expect(chinese.chooseFolder, '选择文件夹');
+    expect(
+      chinese.folderSelectionFailed('test failure'),
+      '无法选择文件夹：test failure',
+    );
+  });
+
   test('quality repair descriptions are localized in both supported locales', () {
     const english = StitchLocalizations(Locale('en'));
     const chinese = StitchLocalizations(Locale('zh'));
