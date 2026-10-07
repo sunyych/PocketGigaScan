@@ -45,13 +45,11 @@ Future<void> _copyFixture(Directory source, Directory destination) async {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  const enabled = bool.fromEnvironment('TEST_BATCH_NATIVE');
 
   testWidgets(
-    'native batch stitches two DWARF3 Tele folders and skips the empty folder',
+    'native batch stitches two DWARF3 Tele folders and skips the empty folder (requires TEST_BATCH_NATIVE and TEST_BATCH_PARENT_DIR)',
     (tester) async {
-      const enabled = bool.fromEnvironment('TEST_BATCH_NATIVE');
-      if (!enabled) return;
-
       await tester.runAsync(() async {
         expect(
           Platform.isWindows,
@@ -304,5 +302,6 @@ void main() {
       });
     },
     timeout: const Timeout(Duration(minutes: 6)),
+    skip: !enabled,
   );
 }

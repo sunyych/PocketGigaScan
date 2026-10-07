@@ -53,12 +53,11 @@ Future<Directory> _copyFourPhotoFolder(
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  const enabled = bool.fromEnvironment('TEST_JXL_NATIVE');
 
   testWidgets(
-    'Windows batch exports JPEG XL and metadata-only task removal retains files',
+    'Windows batch exports JPEG XL and metadata-only task removal retains files (requires TEST_JXL_NATIVE and TEST_JXL_PARENT_DIR)',
     (tester) async {
-      const enabled = bool.fromEnvironment('TEST_JXL_NATIVE');
-      if (!enabled) return;
       await tester.runAsync(() async {
         expect(Platform.isWindows, isTrue, reason: 'Requires Windows FFI.');
         const fixturePath = String.fromEnvironment('TEST_JXL_PARENT_DIR');
@@ -91,7 +90,11 @@ void main() {
           final capabilities = await api.capabilities();
           final caps = capabilities['capabilities']! as Map<String, Object?>;
           expect(caps['jpegXlAvailable'], isTrue);
-          expect(caps['jpegXlLossless'], isTrue);
+          expect(
+            caps['jpegXlLossless'],
+            isFalse,
+            reason: 'JPEG XL output uses lossy RGB with lossless alpha.',
+          );
           await controller.initialize();
           await controller.addParent(
             isolatedFixture.path,
@@ -135,6 +138,8 @@ void main() {
           final exportedBytes = await output.readAsBytes();
           expect(task.exportFormat, ExportFormat.jpegXl);
           expect(task.resultStats?['exportFormat'], 'jxl');
+          expect(task.resultStats?['compression'], 'lossy');
+          expect(task.resultStats?['alpha'], 'lossless-alpha');
           expect(task.exportFingerprint?.sizeBytes, await output.length());
           final stat = await output.stat();
           expect(
@@ -314,5 +319,6 @@ void main() {
         }
       });
     },
+    skip: !enabled,
   );
 }

@@ -93,6 +93,27 @@ or weakening source/layout/producer-receipt qualification. UI persistence tests
 use owned temporary files; resource fixtures use an in-memory settings repository.
 Android admission refreshes live readings instead of retaining the startup value.
 
+The supplemental user-authorized audit assigns disjoint test lanes: Luna geometry
+adds actual perturbed-camera registration/render truth tests; Luna renderer adds
+eight-neighbor checker gates, cache binding and worst/target crop selection; Luna
+UI corrects stale lossy-JXL integration assertions, explicit disabled-gate skips,
+and Python dependencies/tests in CI. Codex independently catches the analytic
+truth frame-gauge error, global-error dilution, missing required-cell neighbor
+coverage, testWidgets boolean skip typing and missing hosted Python dependencies.
+Thresholds are kept fixed. The new native target passes both tests, including
+p95 <=2px / worst <=4px source-boundary checks and same-gate negative controls;
+all 32 Python tests pass without skips. Checker-held-out features are not claimed
+as never seen by the production optimizer.
+
+Final qualification covers 202 normal-builder native tests plus two new synthetic
+integration cases, two ignored external-data cases, 270 Flutter host tests, clean
+analysis, both builder contracts and normal Windows Release. Android native/APK
+source builds and signature/export/alignment/license inspection pass. Product
+source commit is a66a9d9; later additions affect tests/CI/evidence. Final packages
+are version 1.3.2+16. ADB has no connected device; external-fixture FFI, Android
+execution and every real seam remain separate gates. Exact checksums and evidence
+tiers are recorded in the [qualification record](evidence/DWARF-PERFORMANCE-2026-10-06.md).
+
 ## PG-055 idle task progress
 
 The user reports an animated progress bar before pressing Start stitching.

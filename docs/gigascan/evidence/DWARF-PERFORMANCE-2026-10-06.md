@@ -154,9 +154,11 @@ visual graph: all 364 placements still require grid bridging. The center now
 has direct visual evidence but is not visually connected to that reference.
 This distinction is retained in storage and presentation.
 
-Independent spatially held-out cardinal correspondences measure the center's
-four edges as follows. These correspondences are separate from the optimizer's
-training pairs; support counts differ by edge.
+The independent checker's spatially held-out cardinal correspondences measure
+the center's four edges as follows. The split belongs to the checker: it does
+not prove that the production optimizer never used these source features.
+Support counts differ by edge; these measurements are diagnostic evidence,
+complemented by synthetic tests with independently generated ground truth.
 
 | Center edge | Held-out pairs | Before RMS (px) | After RMS (px) |
 | --- | ---: | ---: | ---: |
@@ -178,10 +180,52 @@ better alignment of the right-side building window frames. This qualifies that
 local comparison, not a completed new full-panorama export or all other seams.
 Personal photographs, crops and diagnostic records remain ignored locally.
 
-## Validation pending
+## Host checks and packages
 
-- Native formatting/tests and high-memory renderer/export/admission tests.
-- Flutter analysis, settings/policy/integration tests, EN/ZH and idle progress.
-- Build script contracts; normal Windows Release and source-built Android APK.
-- Exact real-layout pixel comparison, completed TIFF and resource/timing receipts.
-- New fixed-eight real registration and visual seam review, reported separately.
+Product source is commit `a66a9d9f5b19ffe549935290a894c7512c61b192`.
+Subsequent additions strengthen tests, CI and evidence without changing product
+code. Native formatting passes. The normal Windows builder executes 202 native
+tests with two external-data tests explicitly ignored. The additional
+`misaligned_grid_render` target executes two tests, for 204 executed native
+tests in total. The new target is also discovered by unfiltered Cargo tests.
+Flutter analysis is clean and all 270 host tests pass. The targeted 63-test run
+is a subset, not an additional test count. All 32 Python tests and both Windows
+and Android builder-contract scripts pass. No Python tests are skipped.
+
+The Windows Release is built normally from the vendored engine source, with
+verified dependencies. Every ZIP member matches the packaged source SHA-256;
+the executable reports version `1.3.2+16`. The packaged native DLL SHA-256 is
+`c048a1f907fef31bcdccdb3845ef3733d9ec55247a03262cd67cb725ca3481a6`.
+The Android engine is independently source-built for ARM64/API29. Final APK
+inspection verifies package `com.lumiaiq.pocketgigascan`, version `1.3.2`/16,
+minimum API29, target API36, ARM64 exports/dependencies, 16KiB LOAD and ZIP
+alignment, its development-key signature, and all 135 dependency license files.
+
+| Deliverable | Bytes | SHA-256 |
+| --- | ---: | --- |
+| Windows x64 ZIP, 1.3.2+16 | 20744423 | `83310ce0ed1cbceb48cebfbdc17086e7250456c4f3f7adcb4b50f471237d5e75` |
+| Android ARM64 APK, 1.3.2+16 | 39241711 | `207e2f6f0e362ac471a93b43d497c475df57a654adefee5b6e82d1330cf85083` |
+
+Packages and detailed execution receipts remain under ignored `.local` paths.
+ADB reports no connected device. Host tests and APK inspection do not establish
+Android execution, SAF/background recovery under device pressure, camera
+capture, or every real panorama seam. Fixture-dependent Windows FFI integration
+tests were not executed; their disabled configuration now reports explicit skips
+instead of a successful empty test body. Enabled tests still fail for missing
+fixtures. Windows CI installs pinned Python dependencies and runs the checker
+and benchmark tests, alongside the existing full native/Flutter source build.
+
+## Supplemental test audit
+
+| Area | Coverage and boundary |
+| --- | --- |
+| Input misalignment to final pixels | New analytic RGB 2x2/3x3/4x4 captures introduce real camera yaw/pitch/roll errors, including a contiguous three-capture patch. Real registration and feather/deghost, warp-off/on rendering preserve all input identities and exact local eight-neighbor pairs. Unwarped source-boundary reprojection has fixed p95 <=2px / worst <=4px gates in synthetic source pixels; an 8px negative control fails the same gate. RGB truth and bounded coverage checks accompany geometry. These wide-FOV synthetic fixtures are not a real-DWARF seam qualification. |
+| Narrow FOV and incompatible geometry | Existing narrow-FOV positive registration remains; the new physically disjoint narrow-FOV case must fail registration. A single spherical model is not required to repair unsupported parallax. |
+| Real 09_13 | Separate locked/unlocked 3x3 registrations and full-364-layout ROI/crops are recorded above. Original locks are preserved; explicit unlocking in a new task is needed to measure incident neighbors. A new full-panorama export and all-seam review are not claimed. |
+| Seam checker acceptance | Immediate diagonals are optional and unique. Explicit finite aggregate/per-edge error limits, positive support and every available required-cell incident edge are checked. Unknown/empty evidence fails. A small bad edge cannot hide behind a good global mean when per-edge gates are requested. Worst and all measured target-incident crops accompany representative samples. Source/layout/checker-version changes invalidate caches. Checker-owned holdout is not a proof of unseen production training points. |
+| Retry, resource and pixel determinism | Existing bounded retry/cancellation, single-flight decode, parallel/serial rendering, pyramid, pending-limit and concurrent-admission tests remain. Controlled full-resolution 512MiB/16GiB receipts and exact tile/TIFF checks are separate from CI timing assertions. Cold/warm repetitions are not claimed. |
+| Task records and viewer | Existing migration, atomic/tombstone deletion, actual native snapshot shape, hash/identity binding, output-coordinate projection, mouse/touch and EN/ZH tests pass. No end-to-end physical-device trace inspection is claimed. |
+| Export/color semantics | TIFF/PNG lossless tests and independent official `djxl` lossy-RGB/exact-alpha checks remain. Stale JXL lossless capability assertions are fixed. Exposure/color correction is absent and recorded as null/notApplied; no correction parameters are fabricated. |
+
+See [STITCH-TESTING](../STITCH-TESTING.md) for executed host checks versus the
+explicit external-original, FFI and connected-device acceptance gates.

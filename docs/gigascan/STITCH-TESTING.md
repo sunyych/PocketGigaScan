@@ -8,9 +8,10 @@ Windows tests do not qualify an Android package or a physical camera.
 | --- | --- |
 | Original import, EXIF and grid dimensions | Flutter importer/grid/request tests; Rust metadata/planner tests |
 | Neighbor matching and horizontal/vertical overlap | Rust registration/grid-overlap tests; independent seam checker |
-| Texture registration and forced-grid rendering | `native/core/tests/spherical_render.rs`: rendered seam error and displacement negative controls; source retention |
-| Bounded parallel rendering and pyramids | Rust renderer/pyramid/resource tests; Flutter queue admission tests |
-| PNG, TIFF/BigTIFF and JPEG XL | Rust streamed export tests, official independent `djxl` decode; Flutter export/controller regressions |
+| Texture registration and forced-grid rendering | `native/core/tests/spherical_render.rs`: rendered seam error, displacement negative controls, weak-neighbor conflict rejection, and retained source tiles |
+| Misaligned-grid registration and rendering | `native/core/tests/misaligned_grid_render.rs`: analytic independent RGB truth; sampled camera-boundary reprojection p95 ≤ 2 px and worst ≤ 4 px; rendered MAE < 22 overall and < 30 in boundary ROIs; injected pose-error negative controls |
+| Bounded parallel rendering and pyramids | Rust renderer/pyramid/resource tests, including bounded quality-extension and cancellation; Flutter queue admission tests |
+| PNG, TIFF/BigTIFF and JPEG XL | Rust streamed export tests; verified `djxl` decode checks lossy RGB error and exact alpha; Flutter export/controller regressions |
 | Automatic export, retry, cancellation and last-good result | Flutter controller/lifecycle tests; opt-in Windows native integrations |
 | Persisted task deletion without deleting photos | Repository tombstone/serial-write tests; native task deletion verification |
 | Viewer wheel/drag, visible tiles and collapsed status | Viewer widget/gesture/file-binding tests and current screenshot baselines |
@@ -54,21 +55,41 @@ cargo +1.88.0 test --release --locked --manifest-path native/core/Cargo.toml
 Remove-Item Env:LUMIA_JXL_TEST_HELPERS
 cargo +1.88.0 build --release --locked --manifest-path native/core/Cargo.toml
 pwsh -File scripts/test-build-dwarf-stitch-windows.Tests.ps1
-python -m unittest discover -s scripts/tests -p test_verify_spherical_seam_alignment.py
+python -m pip install numpy==2.2.6 opencv-python-headless==4.11.0.86 psutil==7.0.0
+python -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
-The complete Windows builder runs core tests, Flutter analysis/tests and the
+The complete Windows builder runs the full Cargo test suite (which auto-discovers
+the synthetic native integration-test targets), Flutter analysis/tests and the
 normal application release build, probes all three output capabilities, then
-checks every packaged ZIP member against its source SHA-256. See [build
-instructions](../BUILD.md). Goldens are updated only after reviewing an intended
-UI change, followed by a normal test run.
+checks every packaged ZIP member against its source SHA-256. CI also discovers
+all `scripts/tests/test_*.py` tests, including seam and benchmark-runner checks.
+It installs Python 3.12 plus pinned NumPy, headless OpenCV, and psutil first;
+the seam checker imports OpenCV directly, so a missing dependency fails instead
+of skipping its checks.
+See [build instructions](../BUILD.md). Goldens are updated only after reviewing
+an intended UI change, followed by a normal test run.
 
-`integration_test/` native tests are opt-in: enable their `TEST_*_NATIVE` define
-and provide the fixture directory. Disabled native tests are not executed
-evidence. Filesystem widget tests use `tester.runAsync`; an indefinitely animating
-spinner is not acceptance.
+`integration_test/` fixture-dependent native tests are explicitly skipped unless
+their matching `TEST_*_NATIVE` define is enabled. Once enabled, a missing or
+invalid fixture fails the test. `native_smoke_test.dart` always checks the ABI;
+it only adds real-source processing when `TEST_SOURCE_DIR` is supplied. The
+Android parity test always requires its real 2×2 fixture. These opt-in/device
+tests are not part of the Windows hosted workflow. The Windows builder requires
+the pinned independent `djxl` executable and runs the Rust JPEG XL quality
+test, which checks textured lossy RGB error and exact alpha. Filesystem widget
+tests use `tester.runAsync`; an indefinitely animating spinner is not acceptance.
+The standard hosted workflow does not run the fixture-dependent Windows FFI
+integration tests, Android connected-device tests, physical DWARF capture, or
+full-resolution visual seam review; those remain separate acceptance evidence.
 
-The default core suite has two ignored real-data tests. Historical real 384-photo
-registration and original-resolution corner crop evidence remains linked from
-[the roadmap](ROADMAP.md); it does not establish every seam in a full original
-resolution export. New standalone build evidence is recorded separately.
+The default core suite has two ignored real-data tests: preserved 384-photo
+bridge-topology replay (`LUMIA_GRID_COMPONENT_LAYOUT_FIXTURE`) and real-source
+obstruction ROI replay (`LUMIA_RENDERER_TASK_DIR`). Neither runs without its
+external preserved task data. Historical registration and original-resolution
+corner crop evidence remains linked from [the roadmap](ROADMAP.md); it does not
+establish every seam in a full original-resolution export. Android FFI/device,
+physical camera capture, and real-photo full-resolution visual acceptance remain
+separate gates. The synthetic analytic-RGB and reprojection thresholds are
+regression gates, not a substitute for reviewing real-photo seams and crops.
+New standalone build evidence is recorded separately.
