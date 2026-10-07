@@ -86,6 +86,7 @@ __pycache__/
 !/docs/gigascan/evidence/EXPORT-UI-IDENTITY-2026-10-06.md
 !/docs/gigascan/evidence/BLUR-REPAIR-2026-10-06.md
 !/docs/gigascan/evidence/SETTINGS-TIMELINE-2026-10-06.md
+!/docs/gigascan/evidence/LOOP-REGRESSION-2026-10-06.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
