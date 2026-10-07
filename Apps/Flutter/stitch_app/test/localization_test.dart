@@ -119,6 +119,40 @@ void main() {
     );
   });
 
+  test('retry and registration failure stages are localized by family', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+
+    for (final stage in const [
+      'retry-neighbor-matching',
+      'retry-matching',
+      'retry-feature-extraction',
+      'clahe-retry',
+    ]) {
+      expect(english.timelineStage(stage), 'Retry neighbor matching');
+      expect(chinese.timelineStage(stage), '重试相邻照片匹配');
+    }
+    expect(english.timelineStage('registration-failed'), 'Registration failed');
+    expect(chinese.timelineStage('registration-failed'), '配准失败');
+    expect(
+      english.timelineStage('registration-complete'),
+      'Registration complete',
+    );
+    expect(chinese.timelineStage('registration-complete'), '配准完成');
+    for (final stage in const [
+      'retry-matching-progress:42/209',
+      'clahe-retry-progress:42/209',
+    ]) {
+      expect(english.timelineStage(stage), 'Retry neighbor matching (42/209)');
+      expect(chinese.timelineStage(stage), '重试相邻照片匹配（42/209）');
+    }
+    expect(
+      english.timelineStage('retry-matching-progress:bad/209'),
+      'Retry neighbor matching',
+    );
+    expect(chinese.timelineStage('clahe-retry-progress:210/209'), '重试相邻照片匹配');
+  });
+
   test(
     'full image export and retry actions preserve Chinese and translate all formats',
     () {

@@ -31,42 +31,63 @@ class StitchLocalizations {
       isChinese
       ? '开始：$started\n结束：$finished\n$total'
       : 'Started: $started\nFinished: $finished\n$total';
-  String timelineStage(String stage) => text(switch (stage) {
-    'validate' => 'validate',
-    'source-validation' => 'source-validation',
-    'validation-complete' => 'validation-complete',
-    'register' => 'register',
-    'render-level-0' => 'render-level-0',
-    'pyramid' => 'pyramid',
-    'commit-render' => 'commit-render',
-    'commit-export' => 'commit-export',
-    'spool-jxl' => 'spool-jxl',
-    'encode-jxl' => 'encode-jxl',
-    'export' => 'export',
-    'optimize-grid-poses' => 'optimize-grid-poses',
-    'refine-pixel-texture' => 'refine-pixel-texture',
-    'fit-local-texture-warp' => 'fit-local-texture-warp',
-    'grid-overlap-feature-extraction' => 'grid-overlap-feature-extraction',
-    'grid-overlap-pair-matching' => 'grid-overlap-pair-matching',
-    'grid-overlap-complete' => 'grid-overlap-complete',
-    'initial-matching-complete' => 'initial-matching-complete',
-    'matching-edge-batch' => 'matching-edge-batch',
-    'adaptive-diagonal-matching' => 'adaptive-diagonal-matching',
-    'retry-matching' => 'retry-matching',
-    'retry-feature-extraction' => 'retry-feature-extraction',
-    'clahe-retry' => 'clahe-retry',
-    'feature-extraction-batch' => 'feature-extraction-batch',
-    'feature-extraction-complete' => 'feature-extraction-complete',
-    'publish-export' => 'publish-export',
-    'publishing' => 'publishing',
-    'published' => 'published',
-    'publish-failed' => 'publish-failed',
-    'prune-conflicting-neighbors' => 'prune-conflicting-neighbors',
-    'done' => 'done',
-    'paused' => 'paused',
-    'cancelled' => 'cancelled',
-    _ => stage,
-  });
+  String timelineStage(String stage) {
+    if (stage.startsWith('retry-matching-progress:') ||
+        stage.startsWith('clahe-retry-progress:')) {
+      final match = RegExp(r'^[^:]+-progress:(\d+)/(\d+)$').firstMatch(stage);
+      final completed = int.tryParse(match?.group(1) ?? '');
+      final total = int.tryParse(match?.group(2) ?? '');
+      if (completed != null &&
+          total != null &&
+          total > 0 &&
+          completed <= total) {
+        final family = text('retry-neighbor-matching');
+        final count = '$completed/$total';
+        return isChinese ? '$family（$count）' : '$family ($count)';
+      }
+      return text('retry-neighbor-matching');
+    }
+    return text(switch (stage) {
+      'validate' => 'validate',
+      'source-validation' => 'source-validation',
+      'validation-complete' => 'validation-complete',
+      'register' => 'register',
+      'render-level-0' => 'render-level-0',
+      'pyramid' => 'pyramid',
+      'commit-render' => 'commit-render',
+      'commit-export' => 'commit-export',
+      'spool-jxl' => 'spool-jxl',
+      'encode-jxl' => 'encode-jxl',
+      'export' => 'export',
+      'optimize-grid-poses' => 'optimize-grid-poses',
+      'refine-pixel-texture' => 'refine-pixel-texture',
+      'fit-local-texture-warp' => 'fit-local-texture-warp',
+      'grid-overlap-feature-extraction' => 'grid-overlap-feature-extraction',
+      'grid-overlap-pair-matching' => 'grid-overlap-pair-matching',
+      'grid-overlap-complete' => 'grid-overlap-complete',
+      'initial-matching-complete' => 'initial-matching-complete',
+      'matching-edge-batch' => 'matching-edge-batch',
+      'adaptive-diagonal-matching' => 'adaptive-diagonal-matching',
+      'retry-matching' => 'retry-neighbor-matching',
+      'retry-feature-extraction' => 'retry-neighbor-matching',
+      'clahe-retry' => 'retry-neighbor-matching',
+      'retry-neighbor-matching' => 'retry-neighbor-matching',
+      'registration-complete' => 'registration-complete',
+      'registration-failed' => 'registration-failed',
+      'feature-extraction-batch' => 'feature-extraction-batch',
+      'feature-extraction-complete' => 'feature-extraction-complete',
+      'publish-export' => 'publish-export',
+      'publishing' => 'publishing',
+      'published' => 'published',
+      'publish-failed' => 'publish-failed',
+      'prune-conflicting-neighbors' => 'prune-conflicting-neighbors',
+      'done' => 'done',
+      'paused' => 'paused',
+      'cancelled' => 'cancelled',
+      _ => stage,
+    });
+  }
+
   String timelineTotal(String elapsed, {required bool pausedIncluded}) =>
       isChinese
       ? '总用时：$elapsed${pausedIncluded ? '（包含暂停时间）' : ''}'
@@ -422,9 +443,9 @@ class StitchLocalizations {
     'initial-matching-complete': 'Initial matching complete',
     'matching-edge-batch': 'Match neighboring photos',
     'adaptive-diagonal-matching': 'Check diagonal neighbors',
-    'retry-matching': 'Retry photo matching',
-    'retry-feature-extraction': 'Retry feature extraction',
-    'clahe-retry': 'Retry with contrast adjustment',
+    'retry-neighbor-matching': 'Retry neighbor matching',
+    'registration-complete': 'Registration complete',
+    'registration-failed': 'Registration failed',
     'feature-extraction-batch': 'Extract image features',
     'feature-extraction-complete': 'Feature extraction complete',
     'publish-export': 'Copy export to chosen folder',
@@ -942,9 +963,9 @@ class StitchLocalizations {
     'initial-matching-complete': '初始匹配完成',
     'matching-edge-batch': '匹配相邻照片',
     'adaptive-diagonal-matching': '检查对角相邻照片',
-    'retry-matching': '重试照片匹配',
-    'retry-feature-extraction': '重试特征提取',
-    'clahe-retry': '调整对比度后重试',
+    'retry-neighbor-matching': '重试相邻照片匹配',
+    'registration-complete': '配准完成',
+    'registration-failed': '配准失败',
     'feature-extraction-batch': '提取图像特征',
     'feature-extraction-complete': '特征提取完成',
     'publish-export': '复制整图到选定文件夹',

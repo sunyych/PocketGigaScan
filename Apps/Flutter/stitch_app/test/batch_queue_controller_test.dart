@@ -9,6 +9,7 @@ import 'package:stitch_app/models/performance_options.dart';
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
+import 'package:stitch_app/models/stitch_timeline.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
@@ -1421,6 +1422,60 @@ void main() {
           (event) => event.stage == 'optimize-grid-poses',
         ),
         hasLength(1),
+      );
+    },
+  );
+
+  test(
+    'retry family history suppresses a raw retry stage UI duplicate',
+    () async {
+      api.timelineClock = () => currentTime;
+      await _makeFolder(parent, 'retry-stage', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await _waitUntil(() => api.starts == 1, 'retry render start');
+      final job = api.jobs.values.single;
+      job
+        ..stageOverride = 'retry-matching'
+        ..events.add({
+          'id': 1,
+          'timestampUtc': currentTime.millisecondsSinceEpoch,
+          'kind': 'transition',
+          'stage': 'retry-neighbor-matching',
+          'state': 'running',
+          'operation': 'render',
+        });
+
+      await controller.tick();
+      job.stageOverride = 'retry-feature-extraction';
+      await controller.tick();
+      await controller.tick();
+
+      final task = (await tasks.loadById(item.taskId!))!;
+      expect(task.stage, 'retry-feature-extraction');
+      expect(api.starts, 1, reason: 'status polling must not restart render');
+      expect(
+        task.timeline.events.where(
+          (event) => event.stage == 'retry-neighbor-matching',
+        ),
+        hasLength(1),
+      );
+      expect(
+        task.timeline.events.where(
+          (event) =>
+              event.id.startsWith('ui:') &&
+              canonicalStitchTimelineStage(event.stage) ==
+                  'retry-neighbor-matching',
+        ),
+        isEmpty,
       );
     },
   );

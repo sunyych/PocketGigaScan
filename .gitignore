@@ -75,6 +75,7 @@ __pycache__/
 !/docs/gigascan/ANDROID-STITCH-DESIGN.md
 !/docs/gigascan/ANDROID-STITCH-PLAN.md
 !/docs/gigascan/BLUR-REPAIR-PLAN.md
+!/docs/gigascan/LOOP-REGRESSION-PLAN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md

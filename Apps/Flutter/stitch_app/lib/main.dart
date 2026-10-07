@@ -3204,7 +3204,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     'export' => '导出完整图像',
     'export-failed' => '整图导出失败，可重试',
     'done' => '完成',
-    _ => stage,
+    _ => StitchLocalizations.of(context).timelineStage(stage),
   };
 
   String _timelineEventLabel(StitchTimelineEvent event) {

@@ -18,6 +18,8 @@ const MAX_PIXEL_REFINEMENT_ITERATIONS: usize = 30;
 const MAX_GRID_COMPONENT_POSE_ITERATIONS: usize = 30;
 const GRID_COMPONENT_HUBER_ANGLE_RAD: f64 = 0.01;
 const GRID_COMPONENT_STEP_TOLERANCE_RAD: f64 = 1e-7;
+const WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS: usize = 16;
+const WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS: f64 = 48.0;
 const PIXEL_BUNDLE_ALGORITHM_VERSION: u32 = 8;
 const APPROVED_V2_SNAPSHOT_PRODUCER_SHA256: &str =
     "3a1eb012a9f1756b8772f217088fbe904b6ec0803457a72d3d0a36c6f2b9911e";
@@ -407,6 +409,171 @@ fn correspondence_coverage(points: &[[f64; 4]], req: &Request) -> (usize, usize,
     // edge remains usable when its support is spatially narrow.
     let score = 0.25 + 0.75 * (source_count.min(target_count) as f64 / 8.0).clamp(0.0, 1.0);
     (source_count, target_count, score)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CorrespondenceSupportShape {
+    unique_points: usize,
+    source_cells: usize,
+    target_cells: usize,
+    source_rows: usize,
+    target_rows: usize,
+    source_columns: usize,
+    target_columns: usize,
+    source_thin_axis_extent: f64,
+    target_thin_axis_extent: f64,
+}
+
+fn correspondence_support_shape(points: &[[f64; 4]], req: &Request) -> CorrespondenceSupportShape {
+    let mut unique = std::collections::HashSet::<[u64; 4]>::new();
+    let mut source_cells = 0u16;
+    let mut target_cells = 0u16;
+    let mut source_rows = 0u8;
+    let mut target_rows = 0u8;
+    let mut source_columns = 0u8;
+    let mut target_columns = 0u8;
+    let mut source_min_x = f64::INFINITY;
+    let mut source_max_x = f64::NEG_INFINITY;
+    let mut source_min_y = f64::INFINITY;
+    let mut source_max_y = f64::NEG_INFINITY;
+    let mut target_min_x = f64::INFINITY;
+    let mut target_max_x = f64::NEG_INFINITY;
+    let mut target_min_y = f64::INFINITY;
+    let mut target_max_y = f64::NEG_INFINITY;
+    for point in points {
+        if !point.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        let source_cell = |x: f64, y: f64| -> Option<(usize, usize)> {
+            if x < 0.0 || y < 0.0 || x >= req.source_width as f64 || y >= req.source_height as f64 {
+                return None;
+            }
+            let column = ((x / req.source_width as f64) * 4.0).floor() as usize;
+            let row = ((y / req.source_height as f64) * 4.0).floor() as usize;
+            Some((row.min(3), column.min(3)))
+        };
+        let (Some((source_row, source_column)), Some((target_row, target_column))) = (
+            source_cell(point[0], point[1]),
+            source_cell(point[2], point[3]),
+        ) else {
+            continue;
+        };
+        unique.insert(point.map(f64::to_bits));
+        source_cells |= 1 << (source_row * 4 + source_column);
+        target_cells |= 1 << (target_row * 4 + target_column);
+        source_rows |= 1 << source_row;
+        target_rows |= 1 << target_row;
+        source_columns |= 1 << source_column;
+        target_columns |= 1 << target_column;
+        source_min_x = source_min_x.min(point[0]);
+        source_max_x = source_max_x.max(point[0]);
+        source_min_y = source_min_y.min(point[1]);
+        source_max_y = source_max_y.max(point[1]);
+        target_min_x = target_min_x.min(point[2]);
+        target_max_x = target_max_x.max(point[2]);
+        target_min_y = target_min_y.min(point[3]);
+        target_max_y = target_max_y.max(point[3]);
+    }
+    let source_thin_axis_extent = ((source_max_x - source_min_x) / req.source_width as f64)
+        .min((source_max_y - source_min_y) / req.source_height as f64);
+    let target_thin_axis_extent = ((target_max_x - target_min_x) / req.source_width as f64)
+        .min((target_max_y - target_min_y) / req.source_height as f64);
+    CorrespondenceSupportShape {
+        unique_points: unique.len(),
+        source_cells: source_cells.count_ones() as usize,
+        target_cells: target_cells.count_ones() as usize,
+        source_rows: source_rows.count_ones() as usize,
+        target_rows: target_rows.count_ones() as usize,
+        source_columns: source_columns.count_ones() as usize,
+        target_columns: target_columns.count_ones() as usize,
+        source_thin_axis_extent,
+        target_thin_axis_extent,
+    }
+}
+
+fn is_weak_support_loop_conflict(
+    points: &[[f64; 4]],
+    req: &Request,
+    cycle_residual_pixels: f64,
+) -> Option<CorrespondenceSupportShape> {
+    if !cycle_residual_pixels.is_finite()
+        || cycle_residual_pixels < WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS
+    {
+        return None;
+    }
+    let support = correspondence_support_shape(points, req);
+    let source_is_1d =
+        (support.source_cells <= 1 || support.source_rows <= 1 || support.source_columns <= 1)
+            && support.source_thin_axis_extent <= 0.125;
+    let target_is_1d =
+        (support.target_cells <= 1 || support.target_rows <= 1 || support.target_columns <= 1)
+            && support.target_thin_axis_extent <= 0.125;
+    (support.unique_points > 0
+        && support.source_thin_axis_extent.is_finite()
+        && support.target_thin_axis_extent.is_finite()
+        && support.unique_points < WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS
+        && source_is_1d
+        && target_is_1d)
+        .then_some(support)
+}
+
+fn remove_weak_support_loop_conflicts(
+    constraints: &mut Vec<Constraint>,
+    matched_edges: &[crate::pipeline::SphericalMatchEdge],
+    req: &Request,
+    loop_residuals: &std::collections::HashMap<(usize, usize), f64>,
+    edge_diagnostics: &mut [Value],
+) -> Vec<Value> {
+    let mut retained = Vec::with_capacity(constraints.len());
+    let mut rejected = Vec::new();
+    for constraint in constraints.drain(..) {
+        let pair = (constraint.from, constraint.to);
+        let cycle_residual_pixels = loop_residuals.get(&pair).copied().unwrap_or(0.0);
+        let edge = matched_edges
+            .iter()
+            .find(|edge| edge.from == pair.0 && edge.to == pair.1);
+        let support = edge.and_then(|edge| {
+            is_weak_support_loop_conflict(&edge.points, req, cycle_residual_pixels)
+        });
+        let Some(support) = support else {
+            retained.push(constraint);
+            continue;
+        };
+        let mut detail = json!({
+            "from":pair.0,
+            "to":pair.1,
+            "disposition":"weak_support_loop_conflict",
+            "reason":"fewer_than_16_unique_inliers_with_one_dimensional_support_no_wider_than_one_eighth_of_each_image_and_cycle_conflict_at_least_48px",
+            "uniqueInlierCount":support.unique_points,
+            "sourceOccupiedCells":support.source_cells,
+            "targetOccupiedCells":support.target_cells,
+            "sourceOccupiedRows":support.source_rows,
+            "targetOccupiedRows":support.target_rows,
+            "sourceOccupiedColumns":support.source_columns,
+            "targetOccupiedColumns":support.target_columns,
+            "sourceThinAxisExtentFraction":support.source_thin_axis_extent,
+            "targetThinAxisExtentFraction":support.target_thin_axis_extent,
+            "cycleConsistencyPixels":cycle_residual_pixels,
+            "thresholds":{
+                "maximumUniqueInliersExclusive":WEAK_SUPPORT_LOOP_CONFLICT_MAX_UNIQUE_INLIERS,
+                "minimumCycleConflictPixelsInclusive":WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS,
+                "maximumThinAxisExtentFractionInclusive":0.125
+            }
+        });
+        if let Some(diagnostic) = edge_diagnostics.iter_mut().find(|entry| {
+            entry["from"].as_u64() == Some(pair.0 as u64)
+                && entry["to"].as_u64() == Some(pair.1 as u64)
+        }) {
+            diagnostic["disposition"] = json!("weak_support_loop_conflict");
+            diagnostic["rejectionReason"] = detail["reason"].clone();
+            diagnostic["weakSupportLoopConflict"] = detail.clone();
+            detail["rayMedianResidualPx"] = diagnostic["rayMedianResidualPx"].clone();
+        }
+        detail["inliers"] = json!(edge.map_or(0, |edge| edge.inliers));
+        rejected.push(detail);
+    }
+    *constraints = retained;
+    rejected
 }
 
 /// Check each elementary grid loop once (O(rows*columns)). When an alternate
@@ -4238,6 +4405,19 @@ fn align(
             json!(reliability_scales.get(&pair).copied().unwrap_or(1.0));
         diagnostic["loopConflictAmbiguous"] = json!(ambiguous_loops.contains(&pair));
     }
+    let weak_support_loop_rejected_edges = remove_weak_support_loop_conflicts(
+        &mut constraints,
+        &matched_edges,
+        &req,
+        &loop_residuals,
+        &mut edge_diagnostics,
+    );
+    for rejected in &weak_support_loop_rejected_edges {
+        let inliers = rejected["inliers"].as_u64().unwrap_or(0) as f64;
+        let median_residual = rejected["rayMedianResidualPx"].as_f64().unwrap_or(0.0);
+        pairwise_residual_sum = (pairwise_residual_sum - median_residual * inliers).max(0.0);
+        pairwise_residual_weight = (pairwise_residual_weight - inliers).max(0.0);
+    }
     let mut visual_constraints = constraints.clone();
     let root_graph_reachable = connected_tiles(tiles.len(), &visual_constraints);
     let visual_seen = root_anchored_visual_tiles(tiles.len(), &visual_constraints);
@@ -4315,6 +4495,8 @@ fn align(
                             "visualTileCount": visual_seen.iter().filter(|connected| **connected).count(),
                             "totalTileCount": tiles.len(),
                             "acceptedVisualEdgeCount": visual_constraints.len(),
+                            "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+                            "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
                             "horizontalGridStep": grid_step_diagnostic(robust_grid_step(&visual_constraints.iter().filter(|edge| edge.from / req.columns == edge.to / req.columns && edge.to % req.columns == edge.from % req.columns + 1).map(|edge| edge.rotation).collect::<Vec<_>>()).as_ref()),
                             "verticalGridStep": grid_step_diagnostic(robust_grid_step(&visual_constraints.iter().filter(|edge| edge.from % req.columns == edge.to % req.columns && edge.to / req.columns == edge.from / req.columns + 1).map(|edge| edge.rotation).collect::<Vec<_>>()).as_ref()),
                             "edges": edge_diagnostics
@@ -4349,6 +4531,8 @@ fn align(
                             "axis": axis,
                             "stepRadians": angle,
                             "maximumOverlapStepRadians": fov * 0.9,
+                            "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+                            "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
                             "gridHorizontalStep": grid_step_diagnostic(horizontal_grid_step.as_ref()),
                             "gridVerticalStep": grid_step_diagnostic(vertical_grid_step.as_ref()),
                             "edges": edge_diagnostics
@@ -4371,7 +4555,7 @@ fn align(
             message: "visual registration graph is disconnected; no spherical layout emitted"
                 .into(),
             diagnostics: Some(
-                json!({"placementMode":if is_grid_assisted { "grid-assisted" } else { "visual" },"featureCount":feature_count,"retryFeatureCount":retry_feature_count,"retryEndpointTileCount":retry_endpoint_count,"claheRetryFeatureCount":clahe_retry_feature_count,"featureCacheConfiguredEstimateBytes":tiles.len() as u64*2*2500*576,"featureCacheEstimateIsConfiguredNotHardBound":true,"attemptedEdgeCount":matched_edges.len(),"acceptedEdgeCount":visual_constraints.len(),"synthesizedGridEdgeCount":synthesized_grid_edges.len(),"connectedTileCount":seen.iter().filter(|connected| **connected).count(),"visualTileCount":visual_seen.iter().filter(|connected| **connected).count(),"totalTileCount":tiles.len(),"disconnectedTileIndices":disconnected_tiles,"gridEstimatedTileIndices":visual_seen.iter().enumerate().filter_map(|(i, connected)| (!connected).then_some(i)).collect::<Vec<_>>(),"gridHorizontalStepRadians":horizontal_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridVerticalStepRadians":vertical_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridHorizontalStep":grid_step_diagnostic(horizontal_grid_step.as_ref()),"gridVerticalStep":grid_step_diagnostic(vertical_grid_step.as_ref()),"synthesizedGridEdges":synthesized_grid_edges,"edges":edge_diagnostics}),
+                json!({"placementMode":if is_grid_assisted { "grid-assisted" } else { "visual" },"featureCount":feature_count,"retryFeatureCount":retry_feature_count,"retryEndpointTileCount":retry_endpoint_count,"claheRetryFeatureCount":clahe_retry_feature_count,"featureCacheConfiguredEstimateBytes":tiles.len() as u64*2*2500*576,"featureCacheEstimateIsConfiguredNotHardBound":true,"attemptedEdgeCount":matched_edges.len(),"acceptedEdgeCount":visual_constraints.len(),"weakSupportLoopRejectedVisualEdges":weak_support_loop_rejected_edges,"weakSupportLoopRejectedVisualEdgeCount":weak_support_loop_rejected_edges.len(),"synthesizedGridEdgeCount":synthesized_grid_edges.len(),"connectedTileCount":seen.iter().filter(|connected| **connected).count(),"visualTileCount":visual_seen.iter().filter(|connected| **connected).count(),"totalTileCount":tiles.len(),"disconnectedTileIndices":disconnected_tiles,"gridEstimatedTileIndices":visual_seen.iter().enumerate().filter_map(|(i, connected)| (!connected).then_some(i)).collect::<Vec<_>>(),"gridHorizontalStepRadians":horizontal_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridVerticalStepRadians":vertical_grid_step.as_ref().map(|step| log_rotation(step.rotation).iter().map(|value| value*value).sum::<f64>().sqrt()),"gridHorizontalStep":grid_step_diagnostic(horizontal_grid_step.as_ref()),"gridVerticalStep":grid_step_diagnostic(vertical_grid_step.as_ref()),"synthesizedGridEdges":synthesized_grid_edges,"edges":edge_diagnostics}),
             ),
         };
         // Keep the failure actionable in logs that only display the message field.
@@ -4613,6 +4797,8 @@ fn align(
                 "cycleRejectedVisualEdges":cycle_rejected_visual_edges,
                 "cycleLeaveOneOutEvaluations":cycle_loo_evaluations,
                 "cyclePruneBudgetExceeded":cycle_prune_budget_exceeded,
+                "weakSupportLoopRejectedVisualEdges":weak_support_loop_rejected_edges,
+                "weakSupportLoopRejectedVisualEdgeCount":weak_support_loop_rejected_edges.len(),
                 "cyclePruningDisabledUntilJointLeaveOneOut":cycle_pruning_disabled_until_joint_loo,
                 "pixelPcgMaxIterations":pixel_pcg_max_iterations,
                 "pixelPcgMaxRelativeResidual":pixel_pcg_max_relative_residual,
@@ -4683,6 +4869,8 @@ fn align(
         "cycleRejectedVisualEdges": cycle_rejected_visual_edges,
         "cycleLeaveOneOutEvaluations": cycle_loo_evaluations,
         "cyclePruneBudgetExceeded": cycle_prune_budget_exceeded,
+        "weakSupportLoopRejectedVisualEdges": weak_support_loop_rejected_edges,
+        "weakSupportLoopRejectedVisualEdgeCount": weak_support_loop_rejected_edges.len(),
         "cyclePruningDisabledUntilJointLeaveOneOut": cycle_pruning_disabled_until_joint_loo,
         "reliabilityWeightScaleDefinition": "relative confidence = final edge constraint weight / median accepted visual constraint weight, clamped to [0.001, 1.0]; it is not a blur score",
         "cyclePruneBudgetPolicy": "max(1, floor(componentVisualEdgeCount / 20)); the minimum of one can exceed 5% for components smaller than 20 edges",
@@ -4846,6 +5034,12 @@ fn align(
     report["gridVerticalStep"] = grid_step_diagnostic(vertical_grid_step.as_ref());
     report["gridEstimatedPlacementHasDirectVisualEvidence"] = json!(false);
     let mut quality_warnings = Vec::<String>::new();
+    if !weak_support_loop_rejected_edges.is_empty() {
+        quality_warnings.push(format!(
+            "{} neighbor edges with sparse one-dimensional support and severe loop conflicts were excluded; affected placements may rely on measured grid bridges and require visual review",
+            weak_support_loop_rejected_edges.len()
+        ));
+    }
     if is_grid_assisted && !pixel_refinement_converged {
         quality_warnings.push(format!(
             "joint symmetric pixel bundle did not converge within {} iterations",
@@ -6496,6 +6690,353 @@ mod tests {
         assert!(
             concentrated_score > 0.0,
             "valid narrow evidence stays usable"
+        );
+    }
+
+    #[test]
+    fn weak_support_loop_gate_uses_unique_points_two_dimensionality_and_strong_conflicts() {
+        let mut req = grid_request(2, 2);
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let concentrated = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let support = is_weak_support_loop_conflict(&concentrated, &req, 519.66)
+            .expect("the captured 76->77 support is concentrated and cycle-inconsistent");
+        assert_eq!(support.unique_points, 8);
+        assert_eq!((support.source_cells, support.target_cells), (1, 1));
+        assert!(is_weak_support_loop_conflict(&concentrated, &req, 0.0).is_none());
+        assert!(is_weak_support_loop_conflict(&concentrated, &req, 47.99).is_none());
+
+        let thin_strip = vec![
+            [215.4879, 1834.3816, 179.9837, 108.2603],
+            [1019.9611, 1966.0636, 986.3790, 234.3513],
+            [1388.5734, 1961.8910, 1359.2621, 228.9494],
+            [1466.8462, 1906.6553, 1437.8077, 177.1837],
+            [1525.7592, 1968.2759, 1499.7667, 238.9680],
+            [1742.7124, 1874.4271, 1714.1636, 145.5794],
+            [1801.5751, 1914.5775, 1776.7408, 179.7659],
+            [3038.2991, 1903.6947, 3007.5598, 176.5578],
+            [3038.2991, 1903.6947, 3007.5598, 176.5578],
+            [3168.2136, 2020.5734, 3135.1353, 285.7805],
+        ];
+        let strip_support = is_weak_support_loop_conflict(&thin_strip, &req, 945.89)
+            .expect("the captured 50->76 support is a narrow horizontal strip");
+        assert_eq!(strip_support.unique_points, 9);
+        assert_eq!(
+            (strip_support.source_rows, strip_support.target_rows),
+            (1, 1)
+        );
+
+        let normal_horizontal_overlap = (0..15)
+            .map(|index| {
+                let column = index % 3;
+                let row = index / 3;
+                let source_x = 3075.0 + column as f64 * 370.0;
+                let source_y = 120.0 + row as f64 * 390.0;
+                [source_x, source_y, source_x - 3072.0, source_y]
+            })
+            .collect::<Vec<_>>();
+        let normal_support = correspondence_support_shape(&normal_horizontal_overlap, &req);
+        assert_eq!(normal_support.unique_points, 15);
+        assert!(normal_support.source_thin_axis_extent > 0.125);
+        assert!(normal_support.target_thin_axis_extent > 0.125);
+        assert!(
+            is_weak_support_loop_conflict(&normal_horizontal_overlap, &req, 900.0).is_none(),
+            "a normal 20% horizontal overlap with broad vertical support stays visual"
+        );
+
+        let dense_thin_strip = (0..20)
+            .map(|index| {
+                let x = 400.0 + index as f64 * 150.0;
+                [
+                    x,
+                    1900.0 + index as f64 * 4.0,
+                    x - 30.0,
+                    180.0 + index as f64 * 4.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            is_weak_support_loop_conflict(&dense_thin_strip, &req, 900.0).is_none(),
+            "high-support edges remain fail-closed even when the loop residual is large"
+        );
+
+        let broad = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        assert!(is_weak_support_loop_conflict(&broad, &req, 900.0).is_none());
+    }
+
+    #[test]
+    fn weak_support_loop_rejection_keeps_neighbor_graph_and_all_tile_indices() {
+        use crate::pipeline::{SphericalMatchAttempt, SphericalMatchEdge};
+        let mut req = grid_request(2, 2);
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let weak_points = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let dense_points = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        let pairs = [(0, 1), (1, 3), (2, 3), (0, 2)];
+        let mut constraints = pairs
+            .iter()
+            .map(|&(from, to)| Constraint {
+                from,
+                to,
+                rotation: ID,
+                weight: 1.0,
+            })
+            .collect::<Vec<_>>();
+        constraints[0].rotation = ry(0.001);
+        let make_edge = |from, to, points: Vec<[f64; 4]>| SphericalMatchEdge {
+            from,
+            to,
+            from_features: points.len(),
+            to_features: points.len(),
+            matches: points.len(),
+            inliers: points.len(),
+            inlier_ratio: 1.0,
+            homography_residual: 1.0,
+            reason: 0,
+            initial: SphericalMatchAttempt {
+                from_features: points.len(),
+                to_features: points.len(),
+                matches: points.len(),
+                inliers: points.len(),
+                inlier_ratio: 1.0,
+                reason: 0,
+                contrast_threshold: 0.015,
+                clahe: false,
+            },
+            points,
+            retry: None,
+            clahe_retry: None,
+            used_retry: false,
+            used_clahe_retry: false,
+        };
+        let edges = pairs
+            .iter()
+            .map(|&(from, to)| {
+                make_edge(
+                    from,
+                    to,
+                    if (from, to) == (0, 1) {
+                        weak_points.clone()
+                    } else {
+                        dense_points.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = pairs
+            .iter()
+            .map(|&(from, to)| json!({"from":from,"to":to,"disposition":"accepted"}))
+            .collect::<Vec<_>>();
+        let (residuals, _, _) = weight_neighbor_loop_conflicts(2, 2, &mut constraints, &req);
+        assert!(residuals[&(0, 1)] > WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS);
+        let rejected = remove_weak_support_loop_conflicts(
+            &mut constraints,
+            &edges,
+            &req,
+            &residuals,
+            &mut diagnostics,
+        );
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["from"], 0);
+        assert_eq!(rejected[0]["to"], 1);
+        assert_eq!(diagnostics[0]["disposition"], "weak_support_loop_conflict");
+        assert_eq!(constraints.len(), 3);
+        assert_eq!(
+            connected_tiles(4, &constraints),
+            vec![true, true, true, true],
+            "removing one conflicted neighbor must retain every tile through the other neighbors"
+        );
+    }
+
+    #[test]
+    fn weak_support_loop_gate_uses_measured_grid_bridges_and_marks_isolated_tile_estimated() {
+        use crate::pipeline::{SphericalMatchAttempt, SphericalMatchEdge};
+        let rows = 3;
+        let columns = 3;
+        let mut req = grid_request(rows, columns);
+        req.placement_mode = "grid-assisted".into();
+        req.source_width = 3840;
+        req.source_height = 2160;
+        req.fx = 75_000.0;
+        req.fy = 75_000.0;
+        req.cx = 1919.5;
+        req.cy = 1079.5;
+        let true_poses = (0..rows)
+            .flat_map(|row| {
+                (0..columns)
+                    .map(move |column| exp_rotation([row as f64 * 0.02, column as f64 * 0.03, 0.0]))
+            })
+            .collect::<Vec<_>>();
+        let mut constraints = constraints_for_grid_poses(rows, columns, &true_poses);
+        let weak_pairs = [(1, 4), (3, 4), (4, 5), (4, 7)];
+        for edge in &mut constraints {
+            if weak_pairs.contains(&(edge.from, edge.to)) {
+                let perturbation = if edge.from / columns == edge.to / columns {
+                    ry(0.001)
+                } else {
+                    rx(-0.001)
+                };
+                edge.rotation = mul(edge.rotation, perturbation);
+            }
+        }
+        let weak_points = vec![
+            [3135.1353, 285.7805, 118.1161, 286.7257],
+            [3237.9570, 304.7339, 224.0060, 304.5368],
+            [3358.3005, 309.8737, 347.6804, 313.6250],
+            [3471.8428, 194.3099, 450.4269, 195.1647],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3487.2356, 270.6472, 478.2031, 272.3725],
+            [3525.7061, 140.9737, 504.6599, 145.4979],
+            [3611.4868, 110.6401, 589.8616, 114.7049],
+            [3697.5254, 86.0758, 676.3743, 94.8875],
+        ];
+        let dense_points = (0..20)
+            .map(|index| {
+                let column = index % 4;
+                let row = index / 4;
+                let x = 100.0 + column as f64 * 700.0;
+                let y = 100.0 + row as f64 * 350.0;
+                [x, y, x, y]
+            })
+            .collect::<Vec<_>>();
+        let make_edge = |from, to, points: Vec<[f64; 4]>| SphericalMatchEdge {
+            from,
+            to,
+            from_features: points.len(),
+            to_features: points.len(),
+            matches: points.len(),
+            inliers: points.len(),
+            inlier_ratio: 1.0,
+            homography_residual: 1.0,
+            reason: 0,
+            initial: SphericalMatchAttempt {
+                from_features: points.len(),
+                to_features: points.len(),
+                matches: points.len(),
+                inliers: points.len(),
+                inlier_ratio: 1.0,
+                reason: 0,
+                contrast_threshold: 0.015,
+                clahe: false,
+            },
+            points,
+            retry: None,
+            clahe_retry: None,
+            used_retry: false,
+            used_clahe_retry: false,
+        };
+        let edges = constraints
+            .iter()
+            .map(|edge| {
+                make_edge(
+                    edge.from,
+                    edge.to,
+                    if weak_pairs.contains(&(edge.from, edge.to)) {
+                        weak_points.clone()
+                    } else {
+                        dense_points.clone()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = constraints
+            .iter()
+            .map(|edge| json!({"from":edge.from,"to":edge.to,"disposition":"accepted"}))
+            .collect::<Vec<_>>();
+        let (loop_residuals, _, _) =
+            weight_neighbor_loop_conflicts(rows, columns, &mut constraints, &req);
+        for pair in weak_pairs {
+            assert!(loop_residuals[&pair] >= WEAK_SUPPORT_LOOP_CONFLICT_MIN_PIXELS);
+        }
+        let rejected = remove_weak_support_loop_conflicts(
+            &mut constraints,
+            &edges,
+            &req,
+            &loop_residuals,
+            &mut diagnostics,
+        );
+        assert_eq!(rejected.len(), weak_pairs.len());
+
+        let root_visual_tiles = root_anchored_visual_tiles(rows * columns, &constraints);
+        assert!(
+            !root_visual_tiles[4],
+            "the isolated center has no visual pose evidence"
+        );
+        let (grid_constraints, grid_edges, horizontal_step, vertical_step) =
+            synthesize_grid_constraints(
+                rows,
+                columns,
+                &constraints,
+                &root_visual_tiles,
+                None,
+                None,
+                0.05,
+                0.05,
+            )
+            .expect("remaining visual neighbors provide measured row and column steps");
+        assert!(horizontal_step
+            .as_ref()
+            .is_some_and(|step| step.source != "nominalFovOverlap"));
+        assert!(vertical_step
+            .as_ref()
+            .is_some_and(|step| step.source != "nominalFovOverlap"));
+        assert!(grid_edges
+            .iter()
+            .any(|edge| edge["from"] == 1 && edge["to"] == 4));
+        let mut all_placement_constraints = constraints.clone();
+        all_placement_constraints.extend(grid_constraints);
+        assert_eq!(
+            connected_tiles(rows * columns, &all_placement_constraints),
+            vec![true; rows * columns],
+            "all original grid cells remain placeable after weak visual edges are excluded"
+        );
+        assert!(
+            !root_visual_tiles[4],
+            "the bridged center remains grid-estimated"
         );
     }
 

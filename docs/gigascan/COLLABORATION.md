@@ -1,5 +1,40 @@
 # PocketGigaScan collaboration ledger
 
+## PG-054 stitching loop and neighbor regression
+
+User reports 1.3 appears to loop in retry extraction/matching while 1.2 completes
+with occasional seams. Codex located preserved 364- and 384-photo failures and
+a completed 364-photo task. The completed task has different overlap/fallback
+parameters, so it is not evidence of a controlled version regression. The 364
+failure contains 171 extraction/matching alternations and a terminal 55.01px
+worst-edge reprojection error after about six minutes; progress remains 2%.
+
+Luna native owns job timeline/progress/failure diagnostics; Luna Flutter owns
+timeline/localized stages and targeted controller tests; Luna geometry audits
+actual correspondence evidence before any matching change. Codex owns a fresh
+full-resolution replay, independent review, serial SDK checks and packages.
+Originals, task records and exports remain untouched. See the
+[repair plan](LOOP-REGRESSION-PLAN.md). Qualification is in progress.
+
+The exact 364-photo request fails identically in the packaged 1.3 and 1.2.2
+engines: global RMS 1.9555px, worst edge 55.0134px. Elapsed times are 417.688s
+and 479.391s on a machine also running user jobs; these are not isolated speed
+benchmarks. Actual bad cardinal edges 76->77 and 50->76 have only 8 and 9 unique
+inliers, narrow support on both images, and cycle disagreements over 500px.
+Luna geometry excludes only low-support, narrow, severely cycle-inconsistent
+matches before component/grid-bridge construction; all original vertices and
+ordinary reprojection limits remain. Exclusions carry explicit diagnostics and
+visual-review warnings. Native cache version 16 prevents reuse of old alignment.
+
+Luna native batches retry matching within the existing worker limit, preserving
+endpoint caching/order and cancellation. Extraction remains serial under the
+native OpenCV lock. Retry counts now advance real batch progress; Flutter groups
+these substages without merging different jobs or pause boundaries. Failure
+diagnostics persist to a job-owned file rather than being discarded. Independent
+review fixed fixture intrinsics, the cache-version contract and an overly broad
+UI-history assertion. Final normal Windows/Android builds and real rerun remain
+pending; passing preliminary tests do not establish panorama acceptance.
+
 ## PG-051 blurred-photo alignment and overlap repair
 
 Final coordinator qualification: source commit `2deabdc` passes pinned Rust

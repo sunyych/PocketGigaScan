@@ -57,6 +57,33 @@ class StitchTimelineSummary {
   bool get hasKnownStart => startedAtUtc != null;
 }
 
+/// Stage families that represent one logical step in status and timeline UI.
+String? canonicalStitchTimelineStage(String? stage) {
+  if (stage == null) return null;
+  if (stage.startsWith('grid-component-pose-')) return 'optimize-grid-poses';
+  if (stage.startsWith('pixel-refinement-') ||
+      stage.startsWith('pixel-bundle-')) {
+    return 'refine-pixel-texture';
+  }
+  if (stage.startsWith('source-plane-warp-')) return 'fit-local-texture-warp';
+  if (stage.startsWith('joint-cycle-prune-')) {
+    return 'prune-conflicting-neighbors';
+  }
+  if (const {
+    'retry-matching',
+    'retry-feature-extraction',
+    'clahe-retry',
+    'retry-neighbor-matching',
+  }.contains(stage)) {
+    return 'retry-neighbor-matching';
+  }
+  if (stage.startsWith('retry-matching-progress:') ||
+      stage.startsWith('clahe-retry-progress:')) {
+    return 'retry-neighbor-matching';
+  }
+  return stage;
+}
+
 /// Immutable, ordered timeline with id based deduplication.
 class StitchTimeline {
   const StitchTimeline({this.events = const []});
@@ -116,13 +143,19 @@ class StitchTimeline {
   ]);
 
   StitchTimeline _merge(Iterable<StitchTimelineEvent> incoming) {
+    final additions = incoming.toList(growable: false);
+    if (additions.isEmpty) return this;
+
     final byId = <String, StitchTimelineEvent>{
-      for (final event in events) event.id: event,
+      for (final event in events) event.id: _canonicalEvent(event),
     };
-    for (final event in incoming) {
+    var changed = false;
+    for (final rawEvent in additions) {
+      final event = _canonicalEvent(rawEvent);
       final existing = byId[event.id];
       if (existing == null) {
         byId[event.id] = event;
+        changed = true;
       } else if (!_sameEvent(existing, event)) {
         var suffix = 2;
         while (byId.containsKey('${event.id}#$suffix') &&
@@ -138,8 +171,12 @@ class StitchTimeline {
             state: event.state,
             operation: event.operation,
           );
+          changed = true;
         }
       }
+    }
+    if (!changed && events.every((event) => identical(byId[event.id], event))) {
+      return this;
     }
     final indexed = byId.values.toList().asMap().entries.toList()
       ..sort((left, right) {
@@ -160,9 +197,50 @@ class StitchTimeline {
         }
         return left.key.compareTo(right.key);
       });
-    return StitchTimeline(
-      events: List.unmodifiable(indexed.map((entry) => entry.value)),
+    final compacted = <StitchTimelineEvent>[];
+    for (final entry in indexed) {
+      final event = entry.value;
+      final previous = compacted.isEmpty ? null : compacted.last;
+      final eventJobId = _nativeJobId(event);
+      if (event.stage == 'retry-neighbor-matching' &&
+          previous?.stage == event.stage &&
+          previous?.state == event.state &&
+          previous?.operation == event.operation &&
+          eventJobId != null &&
+          eventJobId == _nativeJobId(previous!)) {
+        continue;
+      }
+      compacted.add(event);
+    }
+    if (compacted.length == events.length &&
+        compacted.asMap().entries.every(
+          (entry) => identical(entry.value, events[entry.key]),
+        )) {
+      return this;
+    }
+    return StitchTimeline(events: List.unmodifiable(compacted));
+  }
+
+  StitchTimelineEvent _canonicalEvent(StitchTimelineEvent event) {
+    final stage = canonicalStitchTimelineStage(event.stage);
+    if (event.stage == null || stage == event.stage) return event;
+    return StitchTimelineEvent(
+      id: event.id,
+      timestampUtc: event.timestampUtc,
+      kind: event.kind,
+      stage: stage,
+      state: event.state,
+      operation: event.operation,
     );
+  }
+
+  String? _nativeJobId(StitchTimelineEvent event) {
+    if (!event.id.startsWith('native:')) return null;
+    final separator = event.id.lastIndexOf(':');
+    if (separator <= 'native:'.length) return null;
+    final nativeEventId = event.id.substring(separator + 1).split('#').first;
+    if (int.tryParse(nativeEventId) == null) return null;
+    return event.id.substring('native:'.length, separator);
   }
 
   StitchTimeline merge(StitchTimeline other) => _merge(other.events);

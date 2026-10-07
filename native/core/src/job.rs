@@ -17,7 +17,7 @@ use std::{
 };
 
 const STATE_FILE: &str = "job-state.json";
-const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 15;
+const ALIGNMENT_CACHE_ALGORITHM_VERSION: u32 = 16;
 static JOBS: OnceLock<Mutex<BTreeMap<PathBuf, Arc<Control>>>> = OnceLock::new();
 static ALIGNMENT_CACHE_IO: OnceLock<Mutex<()>> = OnceLock::new();
 fn jobs() -> &'static Mutex<BTreeMap<PathBuf, Arc<Control>>> {
@@ -72,12 +72,61 @@ fn stage_family(stage: &str) -> &str {
         "optimize-grid-poses"
     } else if stage.starts_with("pixel-refinement-") || stage.starts_with("pixel-bundle-") {
         "refine-pixel-texture"
+    } else if matches!(
+        stage,
+        "retry-matching" | "retry-feature-extraction" | "clahe-retry"
+    ) || stage.starts_with("retry-matching-progress:")
+        || stage.starts_with("clahe-retry-progress:")
+    {
+        "retry-neighbor-matching"
     } else if stage.starts_with("joint-cycle-prune-") {
         "prune-conflicting-neighbors"
     } else if stage.starts_with("source-plane-warp-") {
         "fit-local-texture-warp"
     } else {
         stage
+    }
+}
+
+/// Coarse registration progress advances only at named phase boundaries. Per-tile
+/// and per-edge callbacks remain useful cancellation checkpoints, but do not
+/// pretend that each callback is a meaningful fraction of total work.
+fn registration_progress(stage: &str) -> Option<f64> {
+    fn batch_progress(stage: &str, prefix: &str, start: f64) -> Option<f64> {
+        let counts = stage.strip_prefix(prefix)?;
+        let (done, total) = counts.split_once('/')?;
+        let done = done.parse::<u64>().ok()?;
+        let total = total.parse::<u64>().ok()?;
+        if total == 0 || done == 0 || done > total {
+            return None;
+        }
+        Some(start + 0.02 * (done as f64 / total as f64))
+    }
+
+    match stage {
+        "validation-complete" => Some(0.04),
+        "grid-overlap-complete" => Some(0.06),
+        "feature-extraction-complete" => Some(0.08),
+        "initial-matching-complete" => Some(0.10),
+        _ if stage.starts_with("retry-matching-progress:") => {
+            batch_progress(stage, "retry-matching-progress:", 0.10)
+        }
+        _ if stage.starts_with("clahe-retry-progress:") => {
+            batch_progress(stage, "clahe-retry-progress:", 0.12)
+        }
+        // This callback occurs after the ordinary retry loop and as the optional
+        // CLAHE pass begins.
+        "clahe-retry" => Some(0.12),
+        _ if stage.starts_with("grid-component-pose-")
+            || stage.starts_with("pixel-refinement-")
+            || stage.starts_with("pixel-bundle-") =>
+        {
+            Some(0.15)
+        }
+        _ if stage.starts_with("joint-cycle-prune-") => Some(0.17),
+        _ if stage.starts_with("source-plane-warp-") => Some(0.18),
+        "registration-complete" => Some(0.19),
+        _ => None,
     }
 }
 
@@ -114,6 +163,11 @@ struct Control {
 #[derive(Debug)]
 enum RunFailure {
     CooperativeCancellation,
+    Registration {
+        code: String,
+        message: String,
+        diagnostics: Option<Value>,
+    },
     Failed(String),
 }
 
@@ -133,6 +187,18 @@ impl From<String> for RunFailure {
 impl From<&str> for RunFailure {
     fn from(message: &str) -> Self {
         Self::from(message.to_owned())
+    }
+}
+
+fn registration_run_failure(error: spherical::SphericalFailure) -> RunFailure {
+    if error.code == "CANCELLED" {
+        RunFailure::CooperativeCancellation
+    } else {
+        RunFailure::Registration {
+            code: error.code.to_owned(),
+            message: error.message,
+            diagnostics: error.diagnostics,
+        }
     }
 }
 impl Control {
@@ -235,11 +301,11 @@ impl Control {
         let old_progress = s.progress;
         s.stage = stage.into();
         if let Some(p) = progress {
-            s.progress = p;
+            s.progress = p.max(s.progress);
         }
-        let should_persist = old_state != s.state
-            || stage_changed
-            || progress.is_some_and(|p| (p - old_progress).abs() >= 0.005);
+        let progress_changed =
+            progress.is_some_and(|p| (p.max(old_progress) - old_progress).abs() >= 0.005);
+        let should_persist = old_state != s.state || stage_changed || progress_changed;
         if should_persist {
             record_transition(&mut s);
             if let Err(e) = persist(&self.root, &s) {
@@ -892,11 +958,23 @@ fn finish_run_failure(j: &Control, failure: RunFailure) {
     // Cancellation from a renderer checkpoint is the signal used to unwind a
     // pause. A concurrent user cancel takes precedence; genuine errors are
     // never hidden merely because a pause was requested.
+    let failure = match failure {
+        RunFailure::Registration {
+            code,
+            message,
+            diagnostics,
+        } => {
+            finish_registration_failure(j, code, message, diagnostics);
+            return;
+        }
+        failure => failure,
+    };
     j.update(|s| {
         if s.state == "failed" {
             return;
         }
         match failure {
+            RunFailure::Registration { .. } => unreachable!("handled above"),
             RunFailure::CooperativeCancellation if j.cancel.load(Ordering::SeqCst) => {
                 s.state = "cancelled".into();
                 s.stage = "cancelled".into();
@@ -926,6 +1004,62 @@ fn finish_run_failure(j: &Control, failure: RunFailure) {
         }
         s.commit_started = false;
     });
+}
+
+fn finish_registration_failure(
+    j: &Control,
+    code: String,
+    message: String,
+    diagnostics: Option<Value>,
+) {
+    // Serialize the cancellation race with the diagnostic write. If cancellation
+    // already won, keep the established cancelled state and leave no failure file.
+    let mut s = j.snapshot.lock().expect("job lock");
+    if ["failed", "cancelled"].contains(&s.state.as_str()) {
+        return;
+    }
+    if j.cancel.load(Ordering::SeqCst) {
+        s.state = "cancelled".into();
+        s.stage = "cancelled".into();
+        s.error = None;
+        s.commit_started = false;
+        record_transition(&mut s);
+        let _ = persist(&j.root, &s);
+        drop(s);
+        j.changed.notify_all();
+        return;
+    }
+
+    let diagnostic_path = "registration-failure.json";
+    let diagnostic_record = json!({
+        "schemaVersion": 1,
+        "code": code,
+        "message": message,
+        "diagnostics": diagnostics,
+    });
+    let diagnostic_write = write_json_atomic(&j.root.join(diagnostic_path), &diagnostic_record);
+
+    s.state = "failed".into();
+    s.stage = "registration-failed".into();
+    s.commit_started = false;
+    s.error = Some(json!({
+        "code": code,
+        "message": message,
+        "diagnosticsPath": if diagnostic_write.is_ok() { Some(diagnostic_path) } else { None },
+        "diagnosticsPersistError": diagnostic_write.as_ref().err().map(ToString::to_string),
+    }));
+    s.result_stats = Some(json!({
+        "operation": "render",
+        "registrationFailurePath": if diagnostic_write.is_ok() { Some(diagnostic_path) } else { None },
+    }));
+    record_transition(&mut s);
+    if let Err(error) = persist(&j.root, &s) {
+        s.error = Some(json!({"code":"PERSISTENCE_ERROR","message":error.to_string()}));
+        record_transition(&mut s);
+        let _ = persist(&j.root, &s);
+    }
+    drop(s);
+    j.changed.notify_all();
 }
 fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     let total_started = Instant::now();
@@ -966,7 +1100,7 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     });
     let request_text = serde_json::to_string(&j.snapshot().request).map_err(|e| e.to_string())?;
     let mut check = |stage: &str| {
-        if j.checkpoint(stage, None) {
+        if j.checkpoint(stage, registration_progress(stage)) {
             Ok(())
         } else {
             Err("cancelled".into())
@@ -991,7 +1125,7 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
                 cached_layout
             } else {
                 let result = spherical::align_json_with_checkpoint(&request_text, &mut check)
-                    .map_err(|e| e.message)?;
+                    .map_err(registration_run_failure)?;
                 let layout_bytes = serde_json::to_vec(&result).map_err(|e| e.to_string())?;
                 let layout_json =
                     String::from_utf8(layout_bytes.clone()).map_err(|e| e.to_string())?;
@@ -1004,11 +1138,18 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
             }
         } else {
             spherical::align_json_with_checkpoint(&request_text, &mut check)
-                .map_err(|e| e.message)?
+                .map_err(registration_run_failure)?
         }
     } else {
-        spherical::align_json_with_checkpoint(&request_text, &mut check).map_err(|e| e.message)?
+        spherical::align_json_with_checkpoint(&request_text, &mut check)
+            .map_err(registration_run_failure)?
     };
+    j.update(|s| {
+        s.stage = "registration-complete".into();
+        s.progress = s
+            .progress
+            .max(registration_progress("registration-complete").unwrap_or(0.19));
+    });
     if !layout_path.exists() {
         write_json_atomic(&layout_path, &layout)?;
         let hash = fingerprint::sha256_file(&layout_path).map_err(|e| e.to_string())?;
@@ -1638,8 +1779,13 @@ mod tests {
         assert_ne!(key, alignment_cache_key_for_version(4, &request, &hashes));
         assert_eq!(
             key,
+            alignment_cache_key_for_version(16, &request, &hashes),
+            "bounded source-plane warp geometry must use cache version 16"
+        );
+        assert_ne!(
+            key,
             alignment_cache_key_for_version(15, &request, &hashes),
-            "neighbor reliability weighting must use cache version 15"
+            "source-plane warp layouts must not reuse version 15 weak-support results"
         );
         assert_ne!(key, alignment_cache_key_for_version(14, &request, &hashes));
         assert_ne!(
@@ -2013,6 +2159,185 @@ mod tests {
                 .count(),
             1
         );
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retry_stage_family_collapses_per_edge_callbacks_without_losing_live_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("timeline-retry-family");
+        let source = root.with_extension("source");
+        fs::write(&source, b"retry family fixture").unwrap();
+        let control = test_control(&root, &source);
+        for stage in [
+            "retry-matching",
+            "retry-feature-extraction",
+            "retry-matching",
+            "retry-feature-extraction",
+            "clahe-retry",
+            "clahe-retry",
+        ] {
+            assert!(control.checkpoint(stage, None));
+        }
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.stage, "clahe-retry");
+        assert_eq!(
+            snapshot
+                .events
+                .iter()
+                .filter(|event| event["stage"] == "retry-neighbor-matching")
+                .count(),
+            1
+        );
+        assert_eq!(stage_family("retry-matching"), "retry-neighbor-matching");
+        assert_eq!(
+            stage_family("retry-feature-extraction"),
+            "retry-neighbor-matching"
+        );
+        assert_eq!(stage_family("clahe-retry"), "retry-neighbor-matching");
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registration_progress_uses_monotonic_coarse_phase_boundaries() {
+        let stages = [
+            "validation-complete",
+            "grid-overlap-complete",
+            "feature-extraction-complete",
+            "initial-matching-complete",
+            "retry-matching",
+            "retry-feature-extraction",
+            "clahe-retry",
+            "pixel-refinement-sweep",
+            "grid-component-pose-cost",
+            "joint-cycle-prune-round",
+            "source-plane-warp-outer-iteration",
+            "source-plane-warp-line-search",
+            "registration-complete",
+        ];
+        let mut progress = 0.02_f64;
+        let mut reported = Vec::new();
+        for stage in stages {
+            if let Some(boundary) = registration_progress(stage) {
+                progress = progress.max(boundary);
+            }
+            reported.push(progress);
+        }
+        assert!(reported.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(
+            reported[4], reported[5],
+            "per-edge retry callbacks add no progress"
+        );
+        assert_eq!(*reported.last().unwrap(), 0.19);
+        assert!(
+            (registration_progress("retry-matching-progress:5/10").unwrap() - 0.11).abs() < 1e-12
+        );
+        assert!(
+            (registration_progress("retry-matching-progress:10/10").unwrap() - 0.12).abs() < 1e-12
+        );
+        assert!((registration_progress("clahe-retry-progress:1/4").unwrap() - 0.125).abs() < 1e-12);
+        assert!((registration_progress("clahe-retry-progress:4/4").unwrap() - 0.14).abs() < 1e-12);
+        for malformed in [
+            "retry-matching-progress:0/0",
+            "retry-matching-progress:11/10",
+            "retry-matching-progress:nope/10",
+            "retry-matching-progress:1",
+            "clahe-retry-progress:2/1/4",
+        ] {
+            assert_eq!(registration_progress(malformed), None, "{malformed}");
+        }
+        assert_eq!(
+            stage_family("retry-matching-progress:1/4"),
+            "retry-neighbor-matching"
+        );
+        assert_eq!(
+            stage_family("clahe-retry-progress:1/4"),
+            "retry-neighbor-matching"
+        );
+    }
+
+    #[test]
+    fn registration_failure_persists_diagnostics_and_reports_terminal_stage() {
+        let _guard = lock_jobs();
+        let root = temp_dir("registration-failure-diagnostics");
+        let source = root.with_extension("source");
+        fs::write(&source, b"registration failure fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|snapshot| snapshot.state = "paused".into());
+        finish_run_failure(
+            &control,
+            RunFailure::Registration {
+                code: "REGISTRATION_FAILED".into(),
+                message: "quality gate rejected registration".into(),
+                diagnostics: Some(json!({"worstEdgeRmsPx":55.01,"edge":{"from":1,"to":2}})),
+            },
+        );
+        let snapshot = control.snapshot();
+        assert_eq!(
+            snapshot.state, "failed",
+            "a genuine error must survive pause"
+        );
+        assert_eq!(snapshot.stage, "registration-failed");
+        assert_eq!(
+            snapshot.error.as_ref().unwrap()["diagnosticsPath"],
+            "registration-failure.json"
+        );
+        assert_eq!(
+            snapshot.result_stats.as_ref().unwrap()["registrationFailurePath"],
+            "registration-failure.json"
+        );
+        let diagnostic: Value =
+            serde_json::from_slice(&fs::read(root.join("registration-failure.json")).unwrap())
+                .unwrap();
+        assert_eq!(diagnostic["code"], "REGISTRATION_FAILED");
+        assert_eq!(diagnostic["message"], "quality gate rejected registration");
+        assert_eq!(diagnostic["diagnostics"]["worstEdgeRmsPx"], 55.01);
+        assert_eq!(diagnostic["diagnostics"]["edge"]["from"], 1);
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn registration_cancellation_does_not_write_failure_diagnostics() {
+        let _guard = lock_jobs();
+        let root = temp_dir("registration-cancel-no-diagnostics");
+        let source = root.with_extension("source");
+        fs::write(&source, b"registration cancellation fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.cancel.store(true, Ordering::SeqCst);
+        finish_run_failure(
+            &control,
+            RunFailure::Registration {
+                code: "REGISTRATION_FAILED".into(),
+                message: "raced with cancellation".into(),
+                diagnostics: Some(json!({"ignored":true})),
+            },
+        );
+        assert_eq!(control.snapshot().state, "cancelled");
+        assert_eq!(control.snapshot().stage, "cancelled");
+        assert!(!root.join("registration-failure.json").exists());
+        let _ = fs::remove_file(source);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn export_operation_resets_render_completion_progress_before_checkpoints() {
+        let _guard = lock_jobs();
+        let root = temp_dir("export-progress-reset");
+        let source = root.with_extension("source");
+        fs::write(&source, b"export progress fixture").unwrap();
+        let control = test_control(&root, &source);
+        control.update(|snapshot| snapshot.progress = 1.0);
+        control.update(|snapshot| {
+            snapshot.operation = "export".into();
+            snapshot.stage = "export".into();
+            snapshot.progress = 0.92;
+        });
+        assert_eq!(control.snapshot().progress, 0.92);
+        assert!(control.checkpoint("export", Some(0.96)));
+        assert_eq!(control.snapshot().progress, 0.96);
         let _ = fs::remove_file(source);
         let _ = fs::remove_dir_all(root);
     }

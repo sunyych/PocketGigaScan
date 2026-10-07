@@ -32,6 +32,105 @@ void main() {
     expect(merged.events.first.id, 'native:job-a:1');
   });
 
+  test('retry substeps collapse into one neighbor-matching log row', () {
+    expect(
+      canonicalStitchTimelineStage('retry-matching-progress:42/209'),
+      'retry-neighbor-matching',
+    );
+    expect(
+      canonicalStitchTimelineStage('clahe-retry-progress:42/209'),
+      'retry-neighbor-matching',
+    );
+    final batch = <Map<String, Object?>>[
+      for (var index = 1; index <= 418; index++)
+        {
+          'id': index,
+          'timestampUtc': index * 1000,
+          'stage': index.isOdd ? 'retry-matching' : 'retry-feature-extraction',
+          'state': 'running',
+          'operation': 'render',
+        },
+    ];
+
+    final timeline = const StitchTimeline().mergeNativeBatch(
+      batch,
+      jobId: 'retry-job',
+    );
+    final repeatedStatus = timeline.mergeNativeBatch(batch, jobId: 'retry-job');
+
+    expect(timeline.events, hasLength(1));
+    expect(timeline.events.single.stage, 'retry-neighbor-matching');
+    expect(identical(repeatedStatus, timeline), isTrue);
+  });
+
+  test('identical status history returns the same timeline instance', () {
+    const empty = StitchTimeline();
+    final batch = [
+      {
+        'id': 1,
+        'timestampUtc': 1000,
+        'stage': 'register',
+        'state': 'running',
+        'operation': 'render',
+      },
+    ];
+    final first = empty.mergeNativeBatch(batch, jobId: 'job-a');
+
+    expect(
+      identical(first.mergeNativeBatch(batch, jobId: 'job-a'), first),
+      isTrue,
+    );
+  });
+
+  test('retry grouping keeps separate jobs and pause boundaries', () {
+    const empty = StitchTimeline();
+    final differentJobs = empty
+        .mergeNativeBatch([
+          {
+            'id': 1,
+            'timestampUtc': 1000,
+            'stage': 'retry-neighbor-matching',
+            'state': 'running',
+            'operation': 'render',
+          },
+        ], jobId: 'job-a')
+        .mergeNativeBatch([
+          {
+            'id': 1,
+            'timestampUtc': 2000,
+            'stage': 'retry-neighbor-matching',
+            'state': 'running',
+            'operation': 'render',
+          },
+        ], jobId: 'job-b');
+    expect(differentJobs.events, hasLength(2));
+
+    final resumed = empty.mergeNativeBatch([
+      {
+        'id': 1,
+        'timestampUtc': 1000,
+        'stage': 'retry-neighbor-matching',
+        'state': 'running',
+        'operation': 'render',
+      },
+      {
+        'id': 2,
+        'timestampUtc': 2000,
+        'stage': 'paused',
+        'state': 'paused',
+        'operation': 'render',
+      },
+      {
+        'id': 3,
+        'timestampUtc': 3000,
+        'stage': 'retry-neighbor-matching',
+        'state': 'running',
+        'operation': 'render',
+      },
+    ], jobId: 'job-a');
+    expect(resumed.events, hasLength(3));
+  });
+
   test('timeline and task metadata round trip with legacy defaults', () {
     final taskJson = <String, Object?>{
       'id': 'legacy',

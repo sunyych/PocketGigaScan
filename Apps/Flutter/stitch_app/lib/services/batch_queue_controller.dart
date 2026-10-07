@@ -82,21 +82,7 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   String? _normalizedTimelineStage(String? stage) {
-    if (stage == null) return null;
-    if (stage.startsWith('grid-component-pose-')) {
-      return 'optimize-grid-poses';
-    }
-    if (stage.startsWith('pixel-refinement-') ||
-        stage.startsWith('pixel-bundle-')) {
-      return 'refine-pixel-texture';
-    }
-    if (stage.startsWith('source-plane-warp-')) {
-      return 'fit-local-texture-warp';
-    }
-    if (stage.startsWith('joint-cycle-prune-')) {
-      return 'prune-conflicting-neighbors';
-    }
-    return stage;
+    return canonicalStitchTimelineStage(stage);
   }
 
   bool _nativeHistoryCoversTaskState(

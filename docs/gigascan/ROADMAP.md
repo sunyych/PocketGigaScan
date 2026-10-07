@@ -10,6 +10,7 @@ Historical camera-app tasks are retired from this product. Their prior records r
 
 | ID | Goal | Dependencies | Status | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| PG-054 | Diagnose apparent retry loop and real neighbor registration failures | PG-053 | exact full-resolution reproduction and scoped repair in progress | Luna native/UI/geometry coders; Codex coordinator | [Plan](LOOP-REGRESSION-PLAN.md), [Handoff](COLLABORATION.md#pg-054-stitching-loop-and-neighbor-regression) |
 | PG-053 | Persistent settings, timestamped log and output folder defaults | PG-052 | host tests and both Release packages qualified; PR #5 open; Android device qualification pending | Luna settings/timeline/platform coders; Codex review | [PR #5](https://github.com/sunyych/PocketGigaScan/pull/5), [Evidence](evidence/SETTINGS-TIMELINE-2026-10-06.md), [Approved design](../superpowers/specs/2026-10-06-settings-timeline-design.md), [Plan](../superpowers/plans/2026-10-06-settings-timeline.md) |
 | PG-052 | Overlap/export translations and left-aligned collapsed logs | PG-050,PG-051 | shared UI verified; build/commit deferred by user | Luna localization/UI coders; Codex review | [Handoff and host test evidence](COLLABORATION.md#pg-052-overlapexport-translation-and-log-alignment) |
 | PG-046 | Corner texture/coverage repair and automatic export | PG-044,PG-045 (historical) | Windows1.0.8 verified; every-seam/mobile physical pending | Luna coders; Codex review | [Evidence](evidence/CORNER-AUTO-EXPORT-2026-10-05.md) |
