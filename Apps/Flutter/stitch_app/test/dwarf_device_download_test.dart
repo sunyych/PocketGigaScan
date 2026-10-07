@@ -96,16 +96,94 @@ void main() {
     await temp.delete(recursive: true);
   });
 
+  test('parses the redacted DWARF 3 deviceInfo response shape', () {
+    final info = DwarfDeviceInfo.fromJson({
+      'deviceId': 2,
+      'deviceName': 'DWARF3_redacted',
+      'sn': 'redacted',
+      'sdCardInfo': {'hasSdcard': true, 'availableSize': 55, 'totalSize': 104},
+      'apIpAddress': '192.168.88.1',
+      'staIpAddress': '192.168.1.15',
+      'wifiConnectedMode': 1,
+      'activateStatus': 1,
+    });
+    expect(info.deviceId, '2');
+    expect(info.deviceName, 'DWARF3_redacted');
+    expect(info.serialNumber, 'redacted');
+    expect(info.sdCardAvailable, isTrue);
+  });
+
+  test('probe accepts numeric deviceId and rejects absent SD card', () async {
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'code': 0,
+          'data': {
+            'deviceId': 2,
+            'deviceName': 'DWARF3_redacted',
+            'sn': 'redacted',
+            'sdCardInfo': {'hasSdcard': false},
+          },
+        }),
+      );
+      await request.response.close();
+    });
+    final client = DwarfDeviceClient('127.0.0.1', apiPort: server.port);
+    addTearDown(() => client.close(force: true));
+    await expectLater(client.probe(), throwsFormatException);
+  });
+
+  test('probe does not treat a missing identity as a DWARF device', () async {
+    server.listen((request) async {
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(
+        jsonEncode({
+          'code': 0,
+          'data': {
+            'sdCardInfo': {'hasSdcard': true},
+          },
+        }),
+      );
+      await request.response.close();
+    });
+    final client = DwarfDeviceClient('127.0.0.1', apiPort: server.port);
+    addTearDown(() => client.close(force: true));
+    await expectLater(client.probe(), throwsFormatException);
+  });
+
   test(
     'lists panorama originals from the selected directory index only',
     () async {
       expect(() => DwarfDeviceClient('8.8.8.8'), throwsArgumentError);
+      var requestsUsedExpectedHeaders = true;
       server.listen((request) async {
         if (request.method == 'POST') {
+          final requestText = await utf8.decoder.bind(request).join();
+          if (request.contentLength != utf8.encode(requestText).length ||
+              request.headers.value(HttpHeaders.transferEncodingHeader) ==
+                  'chunked' ||
+              request.headers.value(HttpHeaders.contentTypeHeader) !=
+                  'application/json') {
+            requestsUsedExpectedHeaders = false;
+          }
           final route = request.uri.path;
           Object data;
           if (route == '/deviceInfo') {
-            data = {'deviceName': 'DWARF3 test', 'sdCardAvailable': true};
+            data = {
+              'deviceId': 2,
+              'deviceName': 'DWARF3_redacted',
+              'sn': 'redacted',
+              'sdCardInfo': {
+                'hasSdcard': true,
+                'availableSize': 55,
+                'totalSize': 104,
+              },
+              'apIpAddress': '192.168.88.1',
+              'staIpAddress': '192.168.1.15',
+              'wifiConnectedMode': 1,
+              'activateStatus': 1,
+            };
           } else if (route == '/album/list/mediaCounts') {
             data = [
               {'mediaType': 5, 'count': 1},
@@ -141,14 +219,40 @@ void main() {
       );
       addTearDown(() => client.close(force: true));
 
-      expect((await client.probe()).deviceName, 'DWARF3 test');
+      final deviceInfo = await client.probe();
+      expect(deviceInfo.deviceName, 'DWARF3_redacted');
+      expect(deviceInfo.deviceId, '2');
+      expect(deviceInfo.sdCardAvailable, isTrue);
       final panoramas = await client.listPanoramas();
       expect(panoramas, hasLength(1));
+      expect(requestsUsedExpectedHeaders, isTrue);
       final originals = await client.listOriginals(panoramas.single);
       expect(originals.map((source) => source.name), ['0_0.jpg']);
       expect(
         originals.single.url,
         contains('/DWARF3/Panoramas/DWARF_PANORAMA_01/0_0.jpg'),
+      );
+    },
+  );
+
+  test(
+    'reports an empty successful API response as a safe format error',
+    () async {
+      server.listen((request) async {
+        request.response.statusCode = HttpStatus.ok;
+        await request.response.close();
+      });
+      final client = DwarfDeviceClient('127.0.0.1', apiPort: server.port);
+      addTearDown(() => client.close(force: true));
+      await expectLater(
+        client.probe(),
+        throwsA(
+          isA<FormatException>().having(
+            (error) => error.message,
+            'message',
+            'DWARF API returned an empty response',
+          ),
+        ),
       );
     },
   );

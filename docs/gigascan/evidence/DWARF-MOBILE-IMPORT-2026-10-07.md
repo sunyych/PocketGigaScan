@@ -12,7 +12,7 @@ Wireless ADB installed and executed `integration_test/dwarf_device_test.dart` on
 
 The first phone run exposed a queue output path inconsistent with repository reload validation. The coordinator diagnosed the issue; Luna fixed the sibling output location and added reload coverage. The second phone run passed. USB transport instability was resolved by switching to wireless ADB; this was transport recovery, not application recovery.
 
-This fixture proves phone runtime behavior, not real camera firmware compatibility, original-directory accessibility or panorama seam quality. No real DWARF camera capture/download or optical acceptance has been established in this evidence record.
+This initial 1.4.0 fixture proves phone runtime behavior, not real camera firmware compatibility, original-directory accessibility or panorama seam quality. The subsequent real-STA qualification is recorded below; full camera-origin transfers and optical acceptance remain separate evidence.
 
 ## Source and build checks
 
@@ -32,3 +32,16 @@ The coordinator reviewed intentional mobile screenshot changes: added DWARF navi
 ## iOS boundary
 
 The checked-in iOS scaffold, local-network permission strings/ATS, storage/export adapters, thermal/resource readings, durable background interruption handling and optional static native build script are present. Plist parsing and Apple shell syntax pass. Windows cannot compile Xcode/Swift or validate iOS runtime. See [macOS handoff](../DWARF-MOBILE-IOS-HANDOFF.md).
+
+## 1.4.1 real STA follow-up
+
+The actual camera reports numeric `deviceId: 2`, serial alias `sn` and nested `sdCardInfo.hasSdcard`. The former string cast failed before connection completed. The shared parser now accepts that response, preserves legacy fields, and rejects missing identity or explicitly absent SD cards. Only redacted fixtures are committed.
+
+Controlled phone and desktop Dart HTTP comparisons establish that this firmware returns a populated album response for exact `Content-Type: application/json`, but an empty 200 for `application/json; charset=utf-8`. The client now uses exact JSON content type, UTF-8 encoded bytes and explicit Content-Length. Empty/invalid responses produce sanitized errors rather than echoing potentially sensitive response contents.
+
+The final wireless-ADB phone test passed both actual STA identity/album/original enumeration and the independent interruption/resume fixture. At `192.168.1.15`, the actual SDK client found 7 panorama packages; the first package enumerated 217 JPEG originals. No passwords or raw device-info responses were stored or printed. This confirms connection, metadata and directory enumeration on the connected camera; no full real-source download, reconstruction or seam-quality qualification is claimed.
+
+Release 1.4.1+20 supersedes the initial 1.4.0 package. Final analysis is clean and all 308 Flutter tests pass, including 16 protocol/download tests. The ARM64 Release build and v2 signature verification pass. Wireless ADB installed it with `install -r` and launched MainActivity; the phone package manager confirms versionName 1.4.1, versionCode 20, min SDK 29 and target SDK 36. Existing app data was retained. The native engine is unchanged from the qualified 1.4.0 source build.
+
+Artifact: `.local/deliverables/PocketGigaScan-Android-1.4.1-DWARF3.apk`.
+SHA-256: `d914a5c77e41f855b28f5f168761fd0656fb696fb4a4ed607e59d2cd6eb3068a`.

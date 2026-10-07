@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path/path.dart' as p;
@@ -44,6 +45,31 @@ class _FixtureQueues extends BatchQueueRepository {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+
+  const cameraHost = String.fromEnvironment('DWARF_TEST_HOST');
+  if (cameraHost.isNotEmpty) {
+    testWidgets('real STA camera identity and panorama enumeration', (_) async {
+      final camera = DwarfDeviceClient(cameraHost);
+      try {
+        final info = await camera.probe();
+        expect(info.deviceName.toLowerCase(), contains('dwarf'));
+        expect(info.deviceId, isNotEmpty);
+        expect(info.sdCardAvailable, isTrue);
+        final panoramas = await camera.listPanoramas();
+        // Never log raw device responses, serials, credentials or photo names.
+        debugPrint(
+          'Real DWARF identity verified; panorama packages: ${panoramas.length}',
+        );
+        if (panoramas.isNotEmpty) {
+          final originals = await camera.listOriginals(panoramas.first);
+          expect(originals, isNotEmpty);
+          debugPrint('First package enumerated originals: ${originals.length}');
+        }
+      } finally {
+        camera.close(force: true);
+      }
+    });
+  }
 
   testWidgets(
     'phone downloads, reloads and resumes originals before durable queue admission',
@@ -116,14 +142,20 @@ void main() {
             );
           }
           request.response.contentLength = bytes.length - offset;
-        if (interrupt) {
-          interrupt = false;
-          final socket = await request.response.detachSocket(writeHeaders: false);
-          socket.add(utf8.encode('HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nETag: "fixture-v1"\r\nContent-Length: ${bytes.length}\r\nConnection: close\r\n\r\n'));
-          socket.add(bytes.sublist(offset, offset + 8192));
-          await socket.flush();
-          await Future<void>.delayed(const Duration(milliseconds: 50));
-          socket.destroy();
+          if (interrupt) {
+            interrupt = false;
+            final socket = await request.response.detachSocket(
+              writeHeaders: false,
+            );
+            socket.add(
+              utf8.encode(
+                'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nETag: "fixture-v1"\r\nContent-Length: ${bytes.length}\r\nConnection: close\r\n\r\n',
+              ),
+            );
+            socket.add(bytes.sublist(offset, offset + 8192));
+            await socket.flush();
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+            socket.destroy();
             return;
           }
           request.response.add(bytes.sublist(offset));

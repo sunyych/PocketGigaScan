@@ -448,8 +448,12 @@ class DwarfDeviceClient {
         .postUrl(uri)
         .timeout(const Duration(seconds: 15));
     request.followRedirects = false;
-    request.headers.contentType = ContentType.json;
-    request.write(jsonEncode(body));
+    // DWARF firmware returns empty mediaInfos bodies when the charset
+    // parameter is present, so preserve the exact header used by its API.
+    request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
+    final payload = utf8.encode(jsonEncode(body));
+    request.contentLength = payload.length;
+    request.add(payload);
     final response = await request.close().timeout(const Duration(seconds: 20));
     final text = await _readResponse(response, maxBytes: 1024 * 1024);
     if (response.statusCode < 200 || response.statusCode >= 300) {
@@ -458,7 +462,15 @@ class DwarfDeviceClient {
         uri: uri,
       );
     }
-    final decoded = jsonDecode(text);
+    if (text.trim().isEmpty) {
+      throw const FormatException('DWARF API returned an empty response');
+    }
+    Object? decoded;
+    try {
+      decoded = jsonDecode(text);
+    } on FormatException {
+      throw const FormatException('DWARF API returned invalid JSON');
+    }
     if (decoded is! Map) {
       throw const FormatException('DWARF API response has no envelope');
     }

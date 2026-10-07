@@ -20,16 +20,25 @@ class DwarfDeviceInfo {
   final String? deviceId;
   final String? serialNumber;
   final bool? sdCardAvailable;
-  factory DwarfDeviceInfo.fromJson(Map<String, Object?> json) =>
-      DwarfDeviceInfo(
-        deviceName:
-            json['deviceName'] as String? ??
-            json['deviceId'] as String? ??
-            'DWARF',
-        deviceId: json['deviceId'] as String?,
-        serialNumber: json['serialNumber'] as String?,
-        sdCardAvailable: json['sdCardAvailable'] as bool?,
-      );
+  factory DwarfDeviceInfo.fromJson(Map<String, Object?> json) {
+    final deviceId = _stringOrNull(json['deviceId']);
+    final sdCard = json['sdCardInfo'];
+    final nestedAvailability = sdCard is Map
+        ? (sdCard['hasSdcard'] as bool?)
+        : null;
+    return DwarfDeviceInfo(
+      deviceName: json['deviceName'] as String? ?? '',
+      deviceId: deviceId,
+      serialNumber: json['serialNumber'] as String? ?? json['sn'] as String?,
+      sdCardAvailable: json['sdCardAvailable'] as bool? ?? nestedAvailability,
+    );
+  }
+
+  static String? _stringOrNull(Object? value) => switch (value) {
+    String text => text,
+    num number => number.toString(),
+    _ => null,
+  };
 }
 
 class DwarfPanorama {

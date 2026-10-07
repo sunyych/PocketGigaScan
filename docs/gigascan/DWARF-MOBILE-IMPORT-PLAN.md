@@ -19,7 +19,8 @@ iOS receives local-network configuration and storage/resource/lifecycle source a
 - [x] Luna platform coder: Android Wi-Fi access and iOS platform source adapters, build handoff and channel contract tests.
 - [x] Coordinator: independent correctness review, repository-visible handoffs, source tracking, Flutter analysis/tests, core format/tests, build contracts, normal Windows Release build and ARM64 Android APK.
 - [x] Coordinator: connected Android fixture integration checks for transfer/resume, queue reload/deduplication, hashes and native ABI. Release installed without clearing user data.
-- [ ] Real DWARF identity/listing/original download and camera/optical acceptance: pending camera network access. iOS Xcode/device validation: pending macOS.
+- [x] Real STA camera identity, album listing and first-package original enumeration verified on the Android phone (7 packages, 217 originals in first package).
+- [ ] Full camera-source transfer and optical acceptance: pending separate real-source run. iOS Xcode/device validation: pending macOS.
 
 ## Validation boundaries
 
