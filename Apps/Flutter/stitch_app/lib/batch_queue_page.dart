@@ -55,7 +55,6 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   bool _jxlAvailable = false;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
-  bool get _android => widget.androidOverride ?? Platform.isAndroid;
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
 
@@ -63,7 +62,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   void initState() {
     super.initState();
     _controller.addListener(_changed);
-    _controller.requireLargeJobApproval = _android;
+    _controller.requireLargeJobApproval = _mobile;
     if (_ownsController) _controller.initialize();
     _refreshFormatCapabilities();
   }
@@ -92,12 +91,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   }
 
   Future<void> _selectParent() async {
-    if (_busy || (_mobile && !_android)) return;
+    if (_busy) return;
     await widget.settingsController?.ready;
     if (!mounted) return;
     String? path;
     try {
-      path = _android
+      path = _mobile
           ? await _storage.pickBatchParent()
           : await PlatformFileDialogs().getDirectoryPath(
               dialogTitle: StitchLocalizations.of(
@@ -121,7 +120,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     }
     if (path == null) return;
     if (!mounted) {
-      if (_android) await _storage.releaseBatchParent(path);
+      if (_mobile) await _storage.releaseBatchParent(path);
       return;
     }
     var selectedFormat =
@@ -169,7 +168,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       ),
     );
     if (format == null || !mounted) {
-      if (_android) await _storage.releaseBatchParent(path);
+      if (_mobile) await _storage.releaseBatchParent(path);
       return;
     }
     setState(() => _busy = true);
@@ -271,7 +270,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   Future<void> _resourceSettings() async {
     try {
       var budget = widget.resourceBudget;
-      if (_android && widget.runtimeService != null) {
+      if (_mobile && widget.runtimeService != null) {
         try {
           budget = await widget.runtimeService!.readResourceBudget();
         } on Object {
@@ -288,11 +287,11 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       );
       final memory = TextEditingController(
         text:
-            '${budget?.recommendedTotalMemoryBudgetMiB ?? caps['totalMemoryBudgetMiB'] ?? (_android ? 128 : 1024)}',
+            '${budget?.recommendedTotalMemoryBudgetMiB ?? caps['totalMemoryBudgetMiB'] ?? (_mobile ? 128 : 1024)}',
       );
       final jobs = TextEditingController(
         text:
-            '${budget?.recommendedMaxConcurrentJobs ?? caps['maxConcurrentJobs'] ?? (_android ? 1 : 2)}',
+            '${budget?.recommendedMaxConcurrentJobs ?? caps['maxConcurrentJobs'] ?? (_mobile ? 1 : 2)}',
       );
       final values = await showDialog<(int, int, int)>(
         context: context,
@@ -449,7 +448,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           legacyTaskAssociationPresent: true,
           legacyTaskBindingVerified: nativeVerified,
           traceRecord: traceRecord,
-          mobileStorageService: _android ? _storage : null,
+          mobileStorageService: _mobile ? _storage : null,
           exportMimeType: switch (task.exportFormat) {
             ExportFormat.png => 'image/png',
             ExportFormat.tiff => 'image/tiff',
@@ -474,7 +473,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
             rows: task.grid.rows,
             columns: task.grid.columns,
             photoCount: task.photos.length,
-            onBattery: power != PowerState.externalPower && _android,
+            onBattery: power != PowerState.externalPower && _mobile,
           ),
         ),
         actions: [
@@ -505,22 +504,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         ),
         IconButton(
           tooltip: StitchLocalizations.of(context).text('选择母目录'),
-          onPressed: (_mobile && !_android) || _busy ? null : _selectParent,
+          onPressed: _busy ? null : _selectParent,
           icon: const Icon(Icons.create_new_folder_outlined),
         ),
       ],
     ),
-    body: _mobile && !_android
-        ? const Center(
-            child: Padding(
-              padding: EdgeInsets.all(24),
-              child: Text(
-                '批处理仅在 Windows 桌面版开放。移动版仍可使用单任务合成。',
-                textAlign: TextAlign.center,
-              ),
-            ),
-          )
-        : _controller.loading && _controller.queues.isEmpty
+    body: _controller.loading && _controller.queues.isEmpty
         ? const Center(child: CircularProgressIndicator())
         : ListView(
             padding: const EdgeInsets.all(16),
@@ -543,8 +532,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                         const Icon(Icons.queue, size: 44),
                         const SizedBox(height: 12),
                         const Text('选择一个母目录；每个直接子目录会成为独立全景任务。'),
-                        if (_android)
-                          const Text('Android 将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
+                        if (_mobile)
+                          Text(
+                            StitchLocalizations.of(
+                              context,
+                            ).text('移动端将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
+                          ),
                         const SizedBox(height: 12),
                         FilledButton.icon(
                           onPressed: _busy ? null : _selectParent,

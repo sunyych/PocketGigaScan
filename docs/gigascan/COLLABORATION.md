@@ -491,3 +491,15 @@ no devices. See [PG-053 evidence](evidence/SETTINGS-TIMELINE-2026-10-06.md).
 The qualified branch is committed and pushed. [PR #5](https://github.com/sunyych/PocketGigaScan/pull/5)
 is open and attached to the Codex task. Default-branch latest downloads update
 only after merge and a successful publishing build; this handoff does not merge.
+
+## DWARF mobile camera import research
+
+Coordinator research audited current Flutter Android queue/storage paths and the community DWARF HTTP album API for the requested phone-only flow. Existing Android SAF/file-picker import and persistent queue can accept app-owned downloaded source sets, but they do not connect to the DWARF camera; the retired `Apps/Android` tree is absent/ignored. SDK album metadata and its `filePath`/`fileUrl` mapping do not yet prove that a panorama entry exposes all original constituent frames, and raw full-resolution downloads need camera validation. iOS has a runner but needs local-network, storage/lifecycle and static-core packaging qualification. See [research findings and proposed flow](DWARF-MOBILE-DEVICE-IMPORT-RESEARCH.md). No product behavior was changed and no camera protocol/device test was performed.
+
+## PG-062 mobile DWARF3 import
+
+User authorized phone-only DWARF original selection/download and queue stitching, bounded retry/resume and iOS source adaptation. Luna protocol coder owned new download models, HTTP client/service and protocol tests; Luna UI coder owned connection/transfer page, localized copy, queue admission and main lifecycle wiring; Luna platform coder owned Android Wi-Fi entry, iOS runner/adapters and Apple native build support. Coordinator owned independent review, phone integration fixture, validation, evidence and delivery. Work is on `codex/dwarf-mobile-import`.
+
+Review required exact source filenames, package-directory containment, durable source validators/hashes, atomic manifest recovery and complete-only queue admission. The connected phone exposed a queue output-directory mismatch that prevented repository reload; Luna fixed it and added durable reload coverage. Wireless ADB subsequently passes interruption/resume, byte/hash verification, queue reload/deduplication and native ABI/resource availability. The fixture does not establish real DWARF camera or optical acceptance.
+
+iOS source includes local-network permission/ATS, security-scoped storage/export, memory/thermal reporting, durable background interruption and optional static native packaging. Its Xcode build and physical runtime are deferred to the user's macOS work. See [evidence](evidence/DWARF-MOBILE-IMPORT-2026-10-07.md) and [iOS handoff](DWARF-MOBILE-IOS-HANDOFF.md). Final package/regression qualification is recorded in the evidence document.

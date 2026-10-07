@@ -136,6 +136,93 @@ class StitchLocalizations {
   String get useDefaultFolder => text('使用默认文件夹');
   String get chooseFolder => text('选择文件夹');
   String get chooseBatchParentFolder => text('选择包含多个全景子目录的母目录');
+  String get dwarfDeviceImport => text('Import from DWARF3');
+  String get dwarfDeviceTitle => text('DWARF3 panoramas');
+  String get dwarfHost => text('Device address');
+  String get dwarfConnect => text('Connect to device');
+  String get dwarfReconnect => text('Refresh panoramas');
+  String get dwarfOpenWifi => text('Open Wi-Fi settings');
+  String get dwarfWifiOpened =>
+      text('Wi-Fi settings opened. Join DWARF3, then return here.');
+  String get dwarfWifiManual =>
+      text('Open Settings > Wi-Fi, join DWARF3, then return here.');
+  String get dwarfSelectPanoramas => text('Select panoramas to download');
+  String get dwarfDownloadSelected => text('Download selected panoramas');
+  String get dwarfQueueCompleted =>
+      text('Add downloaded panoramas to stitch queue');
+  String get dwarfNoPanoramas =>
+      text('No panoramas are available on the device');
+  String get dwarfConnectHint =>
+      text('Connect to DWARF3 Wi-Fi, then enter the device address.');
+  String get dwarfDefaultHostHint => text('Default address: 192.168.88.1');
+  String get dwarfDownloadPaused => text('Download paused');
+  String get dwarfBackgroundPause => text(
+    'Downloads paused when the app entered the background. Resume while the app is open.',
+  );
+  String get dwarfPauseDownload => text('Pause download');
+  String get dwarfResumeDownload => text('Resume download');
+  String get dwarfRetryDownload => text('Retry failed downloads');
+  String get dwarfDownloadComplete => text('Download complete');
+  String dwarfDownloadedCount(int count) =>
+      isChinese ? '已完成 $count 个全景下载' : '$count panorama download(s) complete';
+  String dwarfDownloadProgress(int done, int total, String status) =>
+      '$done/$total · ${text(status)}';
+  String dwarfDeviceError(String error) =>
+      RegExp(r'[\u4e00-\u9fff]').hasMatch(error)
+      ? error
+      : '${text('DWARF operation failed:')} ${_localizedDwarfError(error)}';
+  String _localizedDwarfError(String error) {
+    if (!isChinese) return error;
+    const messages = <String, String>{
+      'The DWARF SD card is unavailable': 'DWARF 存储卡不可用，请检查设备存储卡。',
+      'No original JPEGs were found': '所选全景目录中没有找到原始 JPEG 照片。',
+      'Selected item is outside DWARF3/Panoramas': '所选项目不在 DWARF3 全景目录中。',
+      'DWARF source changed after it was selected': '设备上的原片列表已变化，请刷新后重新选择全景。',
+      'DWARF server did not confirm the source validator for resume':
+          '设备未确认下载断点对应的原片版本；请重试以重新下载。',
+      'Downloaded source is not a complete JPEG': '下载的文件不是完整 JPEG 原片；可以重试下载。',
+      'Unsafe download manifest': '下载记录路径无效，无法安全恢复。',
+      'Connection refused': '无法连接设备服务。请确认手机已连接 DWARF3 Wi-Fi，地址为 192.168.88.1。',
+      'Failed host lookup': '找不到设备地址。请连接 DWARF3 Wi-Fi，并检查设备地址。',
+      'Network is unreachable': '网络不可达。请确认手机已连接 DWARF3 Wi-Fi。',
+      'timed out': '连接超时。请检查 DWARF3 Wi-Fi 和设备地址后重试。',
+    };
+    for (final entry in messages.entries) {
+      if (error.contains(entry.key)) return entry.value;
+    }
+    return error
+        .replaceFirst('FormatException: ', '数据格式错误：')
+        .replaceFirst('HttpException: ', '设备 HTTP 通信失败：')
+        .replaceFirst('SocketException: ', '网络连接失败：')
+        .replaceFirst('StateError: ', '当前操作无法继续：');
+  }
+
+  String dwarfDownloadState(String state) => text(switch (state) {
+    'downloading' => 'Downloading',
+    'paused' || 'cancelled' => 'Download paused',
+    'completed' => 'Download complete',
+    'failed' => 'Download failed',
+    'queued' => 'Waiting to download',
+    _ => state,
+  });
+  String dwarfByteProgress(int completed, int total) => isChinese
+      ? '已下载 ${_formatBytes(completed)} / ${_formatBytes(total)}'
+      : 'Downloaded ${_formatBytes(completed)} / ${_formatBytes(total)}';
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(1)} KB';
+    final mb = kb / 1024;
+    if (mb < 1024) return '${mb.toStringAsFixed(1)} MB';
+    return '${(mb / 1024).toStringAsFixed(2)} GB';
+  }
+
+  String get dwarfOriginalCount => text('Original photos');
+  String get dwarfUnknownSize => text('Size unknown');
+  String get dwarfDownloadRestored =>
+      text('Recoverable device downloads found');
+  String get dwarfDownloading => text('Downloading');
+  String get dwarfWaiting => text('Waiting to download');
   String folderSelectionFailed(String error) => '${text('无法选择文件夹：')}$error';
   String get retryOutputCopy => text('重试复制到输出文件夹');
   String outputCopyFailed(String error) => '${text('复制到输出文件夹失败：')}$error';
@@ -434,6 +521,64 @@ class StitchLocalizations {
   }
 
   static const _en = <String, String>{
+    'Import from DWARF3': 'Import from DWARF3',
+    'DWARF3 panoramas': 'DWARF3 panoramas',
+    'Device address': 'Device address',
+    'Connect to device': 'Connect to device',
+    'Refresh panoramas': 'Refresh panoramas',
+    'Open Wi-Fi settings': 'Open Wi-Fi settings',
+    'Wi-Fi settings opened. Join DWARF3, then return here.':
+        'Wi-Fi settings opened. Join DWARF3, then return here.',
+    'Open Settings > Wi-Fi, join DWARF3, then return here.':
+        'Open Settings > Wi-Fi, join DWARF3, then return here.',
+    'Select panoramas to download': 'Select panoramas to download',
+    'Download selected panoramas': 'Download selected panoramas',
+    'Add downloaded panoramas to stitch queue':
+        'Add downloaded panoramas to stitch queue',
+    'No panoramas are available on the device':
+        'No panoramas are available on the device',
+    'Connect to DWARF3 Wi-Fi, then enter the device address.':
+        'Connect to DWARF3 Wi-Fi, then enter the device address.',
+    'Default address: 192.168.88.1': 'Default address: 192.168.88.1',
+    'Download paused': 'Download paused',
+    'Downloads paused when the app entered the background. Resume while the app is open.':
+        'Downloads paused when the app entered the background. Resume while the app is open.',
+    'Download failed': 'Download failed',
+    'Pause download': 'Pause download',
+    'Resume download': 'Resume download',
+    'Retry failed downloads': 'Retry failed downloads',
+    'Download complete': 'Download complete',
+    'Device connection failed:': 'Device connection failed:',
+    'DWARF operation failed:': 'DWARF operation failed:',
+    '移动端将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。':
+        'Mobile devices copy the selected folder into private app staging, then import its source photos one panorama at a time.',
+    '无法读取移动端后台暂停记录；请重试后再启动或恢复。':
+        'Could not read mobile background pause records. Retry before starting or resuming work.',
+    '移动端应用进入后台；原生任务仍在停止，等待确认安全暂停。':
+        'The app entered the background; the native job is stopping while a safe pause is confirmed.',
+    '移动端应用进入后台；保留此前成功的导出结果。':
+        'The app entered the background; the previous successful export is preserved.',
+    '移动端应用进入后台；任务已安全暂停。':
+        'The app entered the background; the job is safely paused.',
+    '移动端应用进入后台；已记录原生任务的终止状态。':
+        'The app entered the background; the native job state is recorded.',
+    '无法启动移动端后台运行保护；核心任务尚未启动':
+        'Could not register mobile background handling; the native job has not started.',
+    '移动端无法启动后台任务管理，任务已安全暂停':
+        'Mobile background handling could not start; the job is safely paused.',
+    '移动端无法确认后台安全暂停，正在核对原生任务状态':
+        'Could not confirm a safe mobile background pause; checking native job state.',
+    '移动端无法启动后台任务管理；未开始导出。':
+        'Mobile background handling could not start; export has not started.',
+    '移动端无法确认安全暂停；正在核对原生任务状态。':
+        'Could not confirm a safe pause; checking native job state.',
+    '移动端无法确认安全暂停，正在核对原生任务状态。':
+        'Could not confirm a safe pause; checking native job state.',
+    'Original photos': 'Original photos',
+    'Size unknown': 'Size unknown',
+    'Recoverable device downloads found': 'Recoverable device downloads found',
+    'Downloading': 'Downloading',
+    'Waiting to download': 'Waiting to download',
     '应用内存预算': 'App memory budget',
     '无法确认资源预算': 'Could not verify the resource budget',
     '恢复任务': 'Resume task',
@@ -549,6 +694,12 @@ class StitchLocalizations {
     '确认大型合成任务': 'Confirm large stitching job',
     '无法设置 Android 渲染资源预算，已暂缓启动。':
         'Could not configure Android render resources. The job was not started.',
+    '无法设置 iOS 渲染资源预算，已暂缓启动。':
+        'Could not configure iOS render resources. The job was not started.',
+    '无法保存 iOS 后台暂停记录；请重试后再启动或恢复。':
+        'Could not save the iOS background pause record; retry before starting or resuming.',
+    '无法启动 iOS 后台任务管理；核心任务尚未启动':
+        'iOS could not register foreground work; the native job was not started.',
     '设备温度较高，待温度降低后再启动新任务。':
         'Device temperature is elevated. Wait for it to cool before starting another job.',
     '已按设备当前资源限制并发参数。':
@@ -975,6 +1126,49 @@ class StitchLocalizations {
   };
 
   static const _zh = <String, String>{
+    'Import from DWARF3': '从 DWARF3 导入',
+    'DWARF3 panoramas': 'DWARF3 设备全景',
+    'Device address': '设备地址',
+    'Connect to device': '连接设备',
+    'Refresh panoramas': '刷新全景',
+    'Open Wi-Fi settings': '打开 Wi-Fi 设置',
+    'Wi-Fi settings opened. Join DWARF3, then return here.':
+        'Wi-Fi 设置已打开。请连接 DWARF3，然后返回此页面。',
+    'Open Settings > Wi-Fi, join DWARF3, then return here.':
+        '请打开“设置 > Wi-Fi”，连接 DWARF3 后返回此页面。',
+    'Select panoramas to download': '选择要下载的全景',
+    'Download selected panoramas': '下载所选全景',
+    'Add downloaded panoramas to stitch queue': '将已下载全景加入合成队列',
+    'No panoramas are available on the device': '设备上没有可用的全景',
+    'Connect to DWARF3 Wi-Fi, then enter the device address.':
+        '请连接 DWARF3 Wi-Fi 后输入设备地址。',
+    'Default address: 192.168.88.1': '默认地址：192.168.88.1',
+    'Download paused': '下载已暂停',
+    'Downloads paused when the app entered the background. Resume while the app is open.':
+        '应用进入后台后已暂停下载。请在应用保持打开时继续下载。',
+    'Download failed': '下载失败',
+    'Pause download': '暂停下载',
+    'Resume download': '继续下载',
+    'Retry failed downloads': '重试失败下载',
+    'Download complete': '下载完成',
+    'Device connection failed:': '设备连接失败：',
+    'DWARF operation failed:': 'DWARF 操作失败：',
+    '无法读取移动端后台暂停记录；请重试后再启动或恢复。': '无法读取移动端后台暂停记录；请重试后再启动或恢复。',
+    '移动端应用进入后台；原生任务仍在停止，等待确认安全暂停。': '应用已进入后台；原生任务仍在停止，等待确认安全暂停。',
+    '移动端应用进入后台；保留此前成功的导出结果。': '应用已进入后台；此前成功的整图导出仍会保留。',
+    '移动端应用进入后台；任务已安全暂停。': '应用已进入后台；任务已安全暂停。',
+    '移动端应用进入后台；已记录原生任务的终止状态。': '应用已进入后台；已记录原生任务的终止状态。',
+    '无法启动移动端后台运行保护；核心任务尚未启动': '无法启用移动端后台任务管理；合成任务尚未启动。',
+    '移动端无法启动后台任务管理，任务已安全暂停': '移动端后台任务管理未能启动；任务已安全暂停。',
+    '移动端无法确认后台安全暂停，正在核对原生任务状态': '无法确认后台安全暂停；正在核对原生任务状态。',
+    '移动端无法启动后台任务管理；未开始导出。': '移动端后台任务管理未能启动；尚未开始导出。',
+    '移动端无法确认安全暂停；正在核对原生任务状态。': '无法确认安全暂停；正在核对原生任务状态。',
+    '移动端无法确认安全暂停，正在核对原生任务状态。': '无法确认安全暂停；正在核对原生任务状态。',
+    'Original photos': '原片数量',
+    'Size unknown': '大小未知',
+    'Recoverable device downloads found': '发现可恢复的设备下载',
+    'Downloading': '正在下载',
+    'Waiting to download': '等待下载',
     '设置': '设置',
     '语言': '语言',
     '外观': '外观',
@@ -1069,6 +1263,9 @@ class StitchLocalizations {
     '等待大型任务确认': '等待大型任务确认',
     '确认大型合成任务': '确认大型合成任务',
     '无法设置 Android 渲染资源预算，已暂缓启动。': '无法设置 Android 渲染资源预算，已暂缓启动。',
+    '无法设置 iOS 渲染资源预算，已暂缓启动。': '无法设置 iOS 渲染资源预算，已暂缓启动。',
+    '无法保存 iOS 后台暂停记录；请重试后再启动或恢复。': '无法保存 iOS 后台暂停记录；请重试后再启动或恢复。',
+    '无法启动 iOS 后台任务管理；核心任务尚未启动': '无法启动 iOS 后台任务管理；核心任务尚未启动',
     '设备温度较高，待温度降低后再启动新任务。': '设备温度较高，待温度降低后再启动新任务。',
     '已按设备当前资源限制并发参数。': '已按设备当前资源限制并发参数。',
     '大型任务需要重新确认': '大型任务需要重新确认',

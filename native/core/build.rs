@@ -8,6 +8,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=OPENCV_INCLUDE_PATHS");
     println!("cargo:rerun-if-env-changed=OPENCV_LINK_PATHS");
     println!("cargo:rerun-if-env-changed=OPENCV_LINK_LIBS");
+    println!("cargo:rerun-if-env-changed=OPENCV_LINK_FRAMEWORKS");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_SDK");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_LINK_PATHS");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_TEST_HELPERS");
@@ -38,7 +39,7 @@ fn main() {
     build.compile("lumia_sift_bridge");
 
     let jxl_sdk = std::env::var_os("LUMIA_JXL_SDK").map(std::path::PathBuf::from);
-    if target_os == "windows" || target_os == "android" {
+    if target_os == "windows" || target_os == "android" || target_os == "ios" {
         if let Some(sdk) = jxl_sdk {
             let include = sdk.join("include");
             let lib = std::env::var_os("LUMIA_JXL_LINK_PATHS")
@@ -130,6 +131,7 @@ fn main() {
 
     let windows = target_os == "windows";
     let android = target_os == "android";
+    let ios = target_os == "ios";
     let lib_paths = std::env::var("OPENCV_LINK_PATHS")
         .ok()
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
@@ -144,6 +146,9 @@ fn main() {
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
     }
     let custom_libs = std::env::var("OPENCV_LINK_LIBS").ok();
+    if ios && (custom_libs.is_none() || std::env::var_os("OPENCV_LINK_PATHS").is_none()) {
+        panic!("iOS builds require explicit OPENCV_LINK_PATHS and OPENCV_LINK_LIBS for the supplied static OpenCV SDK");
+    }
     if windows {
         for name in custom_libs
             .as_deref()
@@ -183,10 +188,11 @@ fn main() {
                     "opencv_imgcodecs",
                     "opencv_imgproc",
                     "opencv_core",
+                    "opencv_photo",
                 ]
             })
         {
-            if android {
+            if android || ios {
                 if ["z", "dl", "log", "m"].contains(&name) {
                     println!("cargo:rustc-link-lib={name}");
                 } else {
@@ -194,6 +200,18 @@ fn main() {
                 }
             } else {
                 println!("cargo:rustc-link-lib={name}");
+            }
+        }
+    }
+    if ios {
+        println!("cargo:rustc-link-lib=dylib=c++");
+        if let Ok(frameworks) = std::env::var("OPENCV_LINK_FRAMEWORKS") {
+            for framework in frameworks
+                .split(';')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                println!("cargo:rustc-link-lib=framework={framework}");
             }
         }
     }

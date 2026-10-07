@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
+import 'package:crypto/crypto.dart';
 import 'package:path/path.dart' as p;
 
 import '../models/batch_queue.dart';
@@ -13,6 +14,7 @@ import '../models/performance_options.dart';
 import '../models/stitch_task.dart';
 import '../models/stitch_timeline.dart';
 import '../models/stitch_quality.dart';
+import '../models/dwarf_download.dart';
 import 'batch_folder_importer.dart';
 import 'batch_queue_repository.dart';
 import 'native_job_api.dart';
@@ -21,6 +23,7 @@ import 'mobile_storage_service.dart';
 import 'spherical_request.dart';
 import 'task_repository.dart';
 import 'task_record_service.dart';
+import 'dwarf_download_service.dart';
 
 class BatchQueueController extends ChangeNotifier {
   BatchQueueController({
@@ -966,6 +969,173 @@ class BatchQueueController extends ChangeNotifier {
       error = null;
     } on Object catch (exception) {
       error = '导入批次失败：$exception';
+    } finally {
+      _importing = false;
+      if (!_disposed) notifyListeners();
+    }
+    unawaited(tick());
+  }
+
+  /// Adds only explicitly completed device panorama directories. Source paths
+  /// are persisted in queue items, so retrying this call after a UI/process
+  /// restart cannot create duplicate stitch work.
+  Future<void> addCompletedPanoramas(
+    List<DwarfDownloadBatch> completedBatches, {
+    AppSettings? settings,
+  }) async {
+    if (_importing || completedBatches.isEmpty) return;
+    final validatedPaths = <String>[];
+    for (final requested in completedBatches) {
+      if (!requested.isComplete) {
+        throw StateError('DWARF download ${requested.id} is not complete');
+      }
+      final validator = DwarfDownloadService(
+        rootDirectory: p.dirname(requested.directory),
+      );
+      try {
+        final persisted = await validator.loadBatch(requested.id);
+        if (persisted == null ||
+            !persisted.isComplete ||
+            !p.equals(
+              p.normalize(p.absolute(persisted.directory)),
+              p.normalize(p.absolute(requested.directory)),
+            )) {
+          throw StateError(
+            'DWARF download ${requested.id} has no matching complete manifest',
+          );
+        }
+        for (final file in persisted.files) {
+          final normalizedFile = p.normalize(p.absolute(file.path));
+          if (!file.complete ||
+              !p.isWithin(
+                p.normalize(p.absolute(persisted.directory)),
+                normalizedFile,
+              ) ||
+              !await File(file.path).exists() ||
+              await File(file.path).length() < 4) {
+            throw StateError(
+              'DWARF download ${requested.id} contains an incomplete source file',
+            );
+          }
+          final source = File(file.path);
+          final length = await source.length();
+          final expectedLength = file.original.size;
+          if (expectedLength != null && length != expectedLength) {
+            throw StateError(
+              'DWARF download ${requested.id} contains a source with an unexpected size',
+            );
+          }
+          final digest = await sha256.bind(source.openRead()).first;
+          if (file.sha256 == null || digest.toString() != file.sha256) {
+            throw StateError(
+              'DWARF download ${requested.id} contains a source that failed SHA-256 verification',
+            );
+          }
+        }
+        final snapshot = await _snapshotDirectFolder(persisted.directory);
+        if (snapshot == null ||
+            snapshot.files.length != persisted.files.length) {
+          throw StateError(
+            'DWARF download ${requested.id} contains files outside its completed manifest',
+          );
+        }
+        validatedPaths.add(persisted.directory);
+      } finally {
+        validator.close();
+      }
+    }
+    final uniquePaths = <String>[];
+    for (final path in validatedPaths) {
+      final normalized = p.normalize(p.absolute(path));
+      if (uniquePaths.any((existing) => p.equals(existing, normalized))) {
+        continue;
+      }
+      final alreadyQueued = _queues.any(
+        (queue) => queue.items.any(
+          (item) => p.equals(
+            p.normalize(p.absolute(item.sourceDirectory)),
+            normalized,
+          ),
+        ),
+      );
+      if (!alreadyQueued) uniquePaths.add(normalized);
+    }
+    if (uniquePaths.isEmpty) {
+      error = null;
+      return;
+    }
+    _importing = true;
+    if (!_disposed) notifyListeners();
+    try {
+      final snapshots = <BatchFolderSnapshot>[];
+      for (final path in uniquePaths) {
+        final snapshot = await _snapshotDirectFolder(path);
+        snapshots.add(
+          snapshot ??
+              BatchFolderSnapshot(
+                directory: path,
+                files: const [],
+                error: '全景目录没有可导入的 JPEG 原片',
+              ),
+        );
+      }
+      final parentDirectory = p.dirname(uniquePaths.first);
+      final batchId = _taskRepository.createId();
+      final items = <BatchQueueItem>[];
+      for (final snapshot in snapshots) {
+        final matchingBatch = completedBatches.firstWhere(
+          (batch) => p.equals(
+            p.normalize(p.absolute(batch.directory)),
+            p.normalize(p.absolute(snapshot.directory)),
+          ),
+        );
+        final title = matchingBatch.metadata['title'];
+        items.add(
+          BatchQueueItem(
+            id: _taskRepository.createId(),
+            name: title is String && title.trim().isNotEmpty
+                ? title.trim()
+                : p.basename(snapshot.directory),
+            sourceDirectory: snapshot.directory,
+            state: snapshot.error == null
+                ? BatchItemState.pending
+                : BatchItemState.skipped,
+            message: snapshot.error,
+          ),
+        );
+      }
+      final outputPath = p.join(
+        p.dirname(parentDirectory),
+        '${p.basename(parentDirectory)}_stitched',
+      );
+      final queue = BatchQueue(
+        id: batchId,
+        createdAt: _clock(),
+        parentDirectory: parentDirectory,
+        outputDirectory: outputPath,
+        items: items,
+        outputFormat: settings?.exportFormat ?? ExportFormat.tiff,
+        exportDestination: settings?.outputDirectory,
+        performanceOptions: settings?.performance ?? const PerformanceOptions(),
+        refineGridNeighbors: settings?.refineGridNeighbors ?? true,
+        seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
+        localTextureWarp: settings?.localTextureWarp ?? true,
+      );
+      _queues.insert(0, queue);
+      await _save(queue);
+      if (!_disposed) notifyListeners();
+      for (final snapshot in snapshots) {
+        final item = queue.items.firstWhere(
+          (candidate) =>
+              p.equals(candidate.sourceDirectory, snapshot.directory),
+        );
+        if (item.state == BatchItemState.pending) {
+          await _importSnapshot(queue, item, snapshot);
+        }
+      }
+      error = null;
+    } on Object catch (exception) {
+      error = '设备全景导入失败：$exception';
     } finally {
       _importing = false;
       if (!_disposed) notifyListeners();

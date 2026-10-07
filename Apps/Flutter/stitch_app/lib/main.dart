@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'models/grid_options.dart';
 import 'batch_queue_page.dart';
+import 'dwarf_device_page.dart';
 import 'models/batch_queue.dart';
 import 'models/imported_photo.dart';
 import 'models/performance_options.dart';
@@ -181,20 +182,20 @@ class _StitchHomePageState extends State<StitchHomePage>
   late final bool _android = widget.androidOverride ?? Platform.isAndroid;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
-  late final MobileRuntimeService? _runtime = _android
+  late final MobileRuntimeService? _runtime = _mobile
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
   late final _importer = widget.photoImporter ?? PhotoImporter();
   late final JobApi _api = widget.jobApi ?? NativeJobApi();
-  late final BatchQueueController? _batchController = (_mobile && !_android)
-      ? null
-      : widget.batchQueueController ??
-            BatchQueueController(
-              api: _api,
-              requireLargeJobApproval: _android,
-              runtimeService: _runtime,
-              storageService: _android ? _storage : null,
-            );
+  // ignore: unnecessary_nullable_for_final_variable_declarations
+  late final BatchQueueController? _batchController =
+      widget.batchQueueController ??
+      BatchQueueController(
+        api: _api,
+        requireLargeJobApproval: _mobile,
+        runtimeService: _runtime,
+        storageService: _mobile ? _storage : null,
+      );
   late final PowerGate _power = widget.powerGate ?? PlatformPowerGate();
   late final ForegroundWorkLock _lock =
       widget.foregroundWorkLock ?? PlatformForegroundWorkLock();
@@ -314,7 +315,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   Future<void> _acknowledgeConfirmedQueueTimeouts() async {
     final controller = _batchController;
     final runtime = _runtime;
-    if (!_android ||
+    if (!_mobile ||
         !_androidTimeoutSnapshotReady ||
         controller == null ||
         runtime == null) {
@@ -458,8 +459,8 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
     final batchController = _batchController;
     if (batchController != null) {
-      batchController.requireLargeJobApproval = _android;
-      if (_android) batchController.resourceConfigurationReady = false;
+      batchController.requireLargeJobApproval = _mobile;
+      if (_mobile) batchController.resourceConfigurationReady = false;
       batchController.addListener(_onBatchQueueChanged);
       unawaited(_initializeBatchOwnership(batchController));
     } else {
@@ -495,7 +496,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   ) async {
     var startupTimeoutJobIds = <String>[];
     try {
-      if (_android) {
+      if (_mobile) {
         final configured = await _androidResourcesReady;
         controller.resourceConfigurationReady = configured;
         controller.resourceBudget = _resourceBudget;
@@ -504,7 +505,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         } on Object catch (error) {
           controller.resourceConfigurationReady = false;
           if (mounted) {
-            setState(() => _message = '无法读取 Android 后台超时记录；批处理任务保持待核对：$error');
+            setState(() => _message = '无法读取移动端后台暂停记录；批处理任务保持待核对：$error');
           }
           return;
         }
@@ -524,7 +525,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       if (mounted) setState(() {});
     }
-    if (_android && _pendingRuntimeTimeoutJobIds.isNotEmpty) {
+    if (_mobile && _pendingRuntimeTimeoutJobIds.isNotEmpty) {
       await _processRuntimeTimeouts({
         ...startupTimeoutJobIds,
         ..._pendingRuntimeTimeoutJobIds,
@@ -533,7 +534,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<bool> _configureAndroidResources() async {
-    if (!_android) return true;
+    if (!_mobile) return true;
     final runtime = _runtime;
     MobileResourceBudget budget;
     try {
@@ -558,7 +559,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           budget.totalMemoryMiB > 0 &&
           budget.availableMemoryMiB > 0 &&
           budget.availableMemoryMiB <= budget.totalMemoryMiB,
-      source: 'android-runtime',
+      source: _android ? 'android-runtime' : 'ios-runtime',
     );
     _appMemoryReading = reading;
     final policy = MemoryBudgetPolicy.evaluate(
@@ -605,7 +606,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (!_api.isAvailable || !mounted) return;
     try {
       await widget.settingsController?.ready;
-      if (_android) {
+      if (_mobile) {
         try {
           final budget = await _runtime!.readResourceBudget();
           if (revision != _resourceSyncRevision || !mounted) return;
@@ -618,7 +619,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                 budget.totalMemoryMiB > 0 &&
                 budget.availableMemoryMiB > 0 &&
                 budget.availableMemoryMiB <= budget.totalMemoryMiB,
-            source: 'android-runtime',
+            source: _android ? 'android-runtime' : 'ios-runtime',
           );
         } on Object {
           if (revision != _resourceSyncRevision || !mounted) return;
@@ -630,12 +631,14 @@ class _StitchHomePageState extends State<StitchHomePage>
             thermalStatus: 'unknown',
             readingsValid: false,
           );
-          _appMemoryReading = const MemoryResourceReading(
+          _appMemoryReading = MemoryResourceReading(
             totalMemoryMiB: 128,
             availableMemoryMiB: 128,
             logicalCpuCount: 1,
             valid: false,
-            source: 'android-runtime-fallback',
+            source: _android
+                ? 'android-runtime-fallback'
+                : 'ios-runtime-fallback',
           );
         }
       }
@@ -662,18 +665,18 @@ class _StitchHomePageState extends State<StitchHomePage>
         reading,
         mobile: _mobile,
       );
-      final cpuWorkers = _android
+      final cpuWorkers = _mobile
           ? (_resourceBudget?.recommendedTotalCpuWorkers ?? 1)
           : (caps['totalCpuWorkers'] as num? ?? 1).toInt();
       final nativeSlotLimit = (caps['maxConcurrentJobsLimit'] as num? ?? 8)
           .toInt()
           .clamp(1, 8)
           .toInt();
-      final requestedSlots = _android
+      final requestedSlots = _mobile
           ? (_resourceBudget?.recommendedMaxConcurrentJobs ?? 1)
           : (caps['maxConcurrentJobs'] as num? ?? _appMaxConcurrentJobs)
                 .toInt();
-      final memoryPerSlotMiB = _android ? 128 : 512;
+      final memoryPerSlotMiB = _mobile ? 128 : 512;
       final maxConcurrentJobs = math.max(
         1,
         math.min(
@@ -722,7 +725,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           1,
           math.min(
             _appMaxConcurrentJobs,
-            policy.selectedMiB ~/ (_android ? 128 : 512),
+            policy.selectedMiB ~/ (_mobile ? 128 : 512),
           ),
         );
         _batchController?.desiredMemoryBudgetMiB = policy.selectedMiB;
@@ -815,7 +818,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<bool> _androidCanStart() async {
-    if (!_android) return true;
+    if (!_mobile) return true;
     if (!_androidTimeoutSnapshotReady) {
       try {
         final pending = await _runtime!.readPendingTimeoutJobs();
@@ -837,7 +840,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         }
       } on Object catch (error) {
         if (mounted) {
-          setState(() => _message = '无法读取 Android 后台超时记录；启动、恢复与导出已暂缓：$error');
+          setState(() => _message = '无法读取移动端后台暂停记录；启动、恢复与导出已暂缓：$error');
         }
         return false;
       }
@@ -848,23 +851,33 @@ class _StitchHomePageState extends State<StitchHomePage>
         )) {
       if (mounted) {
         setState(
-          () => _message = StitchLocalizations.of(
-            context,
-          ).text('无法保存 Android 后台暂停记录；请重试后再启动或恢复。'),
+          () => _message = StitchLocalizations.of(context).text(
+            _android
+                ? '无法保存 Android 后台暂停记录；请重试后再启动或恢复。'
+                : '无法保存 iOS 后台暂停记录；请重试后再启动或恢复。',
+          ),
         );
       }
       return false;
     }
-    if (!await _androidResourcesReady) {
-      if (mounted) setState(() => _message = '无法设置 Android 渲染资源预算，已暂缓启动。');
+    if (_mobile && !await _androidResourcesReady) {
+      if (mounted) {
+        setState(
+          () => _message = _android
+              ? '无法设置 Android 渲染资源预算，已暂缓启动。'
+              : '无法设置 iOS 渲染资源预算，已暂缓启动。',
+        );
+      }
       return false;
     }
-    try {
-      _resourceBudget = await _runtime!.readResourceBudget();
-    } on Object {
-      // Keep the last validated initialization reading if a live refresh fails.
+    if (_mobile) {
+      try {
+        _resourceBudget = await _runtime!.readResourceBudget();
+      } on Object {
+        // Keep the last validated initialization reading if a live refresh fails.
+      }
     }
-    if (_resourceBudget?.shouldDeferNewStarts == true) {
+    if (_mobile && _resourceBudget?.shouldDeferNewStarts == true) {
       if (mounted) setState(() => _message = '设备温度较高，待温度降低后再启动新任务。');
       return false;
     }
@@ -902,7 +915,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     Iterable<String> jobIds, {
     bool queueInitializationHandled = false,
   }) async {
-    if (!_android || _processingRuntimeTimeouts) return;
+    if (!_mobile || _processingRuntimeTimeouts) return;
     final requested = jobIds.where((id) => id.isNotEmpty).toSet();
     _processingRuntimeTimeouts = true;
     try {
@@ -961,7 +974,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
     } on Object catch (error) {
       if (mounted) {
-        setState(() => _message = 'Android 后台超时任务仍待安全核对：$error');
+        setState(() => _message = '移动端后台暂停任务仍待安全核对：$error');
       }
     } finally {
       _processingRuntimeTimeouts = false;
@@ -1015,7 +1028,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             phase: phase,
             stage: observed['stage'] as String? ?? task.stage,
             autoExportOnCompletion: false,
-            pauseReason: 'Android 后台运行时限已到，原生任务仍在停止；等待确认安全暂停。',
+            pauseReason: '移动端应用进入后台；原生任务仍在停止，等待确认安全暂停。',
           ),
           expectedGeneration: generation,
           expectedTaskId: task.id,
@@ -1027,7 +1040,7 @@ class _StitchHomePageState extends State<StitchHomePage>
               phase: StitchPhase.completed,
               stage: 'export-failed',
               autoExportOnCompletion: false,
-              pauseReason: 'Android 后台运行时限已到；保留此前成功的导出结果。',
+              pauseReason: '移动端应用进入后台；保留此前成功的导出结果。',
             ),
             expectedGeneration: generation,
             expectedTaskId: task.id,
@@ -1052,8 +1065,8 @@ class _StitchHomePageState extends State<StitchHomePage>
         stage: stage,
         autoExportOnCompletion: false,
         pauseReason: phase == StitchPhase.paused
-            ? 'Android 后台运行时限已到，任务已安全暂停。'
-            : 'Android 后台运行时限已到；已记录原生任务的终止状态。',
+            ? '移动端应用进入后台；任务已安全暂停。'
+            : '移动端应用进入后台；已记录原生任务的终止状态。',
       ),
       expectedGeneration: generation,
       expectedTaskId: task.id,
@@ -1062,7 +1075,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<bool> _confirmLargeJob(StitchTask task) async {
-    if (!_android ||
+    if (!_mobile ||
         !task.needsLargeJobConfirmation ||
         task.hasCurrentLargeJobApproval) {
       return true;
@@ -1102,7 +1115,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<StitchPhase?> _enableMobileRuntime(String jobId) async {
-    if (!_android) return null;
+    if (!_mobile) return null;
     final runtime = _runtime;
     final ready =
         runtime != null &&
@@ -1138,7 +1151,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<bool> _enableMobileRuntimeBeforeStart(String jobId) async {
-    if (!_android) return true;
+    if (!_mobile) return true;
     final ready =
         _runtime != null &&
         await _runtime.setProcessingActive(true, jobId: jobId);
@@ -1150,7 +1163,11 @@ class _StitchHomePageState extends State<StitchHomePage>
     _runtimeGuardUnavailableJobs.add(jobId);
     await _runtime?.setProcessingActive(false, jobId: jobId);
     if (mounted) {
-      setState(() => _message = '无法启动 Android 后台运行保护；核心任务尚未启动');
+      setState(
+        () => _message = _android
+            ? '无法启动 Android 后台运行保护；核心任务尚未启动'
+            : StitchLocalizations.of(context).text('无法启动 iOS 后台任务管理；核心任务尚未启动'),
+      );
     }
     return false;
   }
@@ -1697,8 +1714,8 @@ class _StitchHomePageState extends State<StitchHomePage>
           active = active.copyWith(
             phase: guardedPhase,
             pauseReason: guardedPhase == StitchPhase.paused
-                ? 'Android 无法启动后台运行保护，任务已安全暂停'
-                : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+                ? '移动端无法启动后台任务管理，任务已安全暂停'
+                : '移动端无法确认后台安全暂停，正在核对原生任务状态',
           );
           await _persist(active);
           if (guardedPhase != StitchPhase.paused) _beginPolling();
@@ -1798,8 +1815,8 @@ class _StitchHomePageState extends State<StitchHomePage>
             nativeJobId: jobId,
             phase: guardedPhase,
             pauseReason: guardedPhase == StitchPhase.paused
-                ? 'Android 无法启动后台运行保护，任务已安全暂停'
-                : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+                ? '移动端无法启动后台任务管理，任务已安全暂停'
+                : '移动端无法确认后台安全暂停，正在核对原生任务状态',
           );
           await _persist(active);
           if (guardedPhase != StitchPhase.paused) _beginPolling();
@@ -1830,7 +1847,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _beginPolling();
     } on Object catch (error) {
       final pendingJobId = _task?.nativeJobId ?? _task?.outputDirectory;
-      if (_android && pendingJobId != null) {
+      if (_mobile && pendingJobId != null) {
         _runtimeGuardedJobs.remove(pendingJobId);
         await _runtime?.setProcessingActive(false, jobId: pendingJobId);
       }
@@ -1896,7 +1913,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         expectedTaskId: task.id,
       );
       if (!_isCurrentSelection(generation, task.id)) return;
-      if (updated.phase == StitchPhase.paused && _android) {
+      if (updated.phase == StitchPhase.paused && _mobile) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
         await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
@@ -1935,7 +1952,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         autoExportOnCompletion: false,
         timeline: _mergeResponseTimeline(task, response, task.nativeJobId!),
       );
-      if (updated.phase == StitchPhase.cancelled && _android) {
+      if (updated.phase == StitchPhase.cancelled && _mobile) {
         _runtimeGuardedJobs.remove(task.nativeJobId!);
         await _runtime!.setProcessingActive(false, jobId: task.nativeJobId!);
       }
@@ -2076,7 +2093,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       return;
     }
     final guardFailurePhase =
-        _android && _runtimeGuardedJobs.contains(task.nativeJobId)
+        _mobile && _runtimeGuardedJobs.contains(task.nativeJobId)
         ? null
         : await _enableMobileRuntime(task.nativeJobId!);
     if (!mounted) return;
@@ -2087,8 +2104,8 @@ class _StitchHomePageState extends State<StitchHomePage>
           stage: 'export-deferred',
           clearExportCheckpointPath: true,
           error: guardFailurePhase == StitchPhase.completed
-              ? 'Android 无法启动后台运行保护；未开始导出。'
-              : 'Android 无法确认安全暂停；正在核对原生任务状态。',
+              ? '移动端无法启动后台任务管理；未开始导出。'
+              : '移动端无法确认安全暂停；正在核对原生任务状态。',
         ),
       );
       if (guardFailurePhase != StitchPhase.paused &&
@@ -2100,7 +2117,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       setState(
         () => _message = guardFailurePhase == StitchPhase.completed
             ? '无法启动后台运行保护；整图导出未开始。'
-            : 'Android 无法确认安全暂停，正在核对原生任务状态。',
+            : '移动端无法确认安全暂停，正在核对原生任务状态。',
       );
       return;
     }
@@ -2586,7 +2603,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       final progress = (state['progress'] as num? ?? task.progress)
           .toDouble()
           .clamp(0, 1);
-      if (_android &&
+      if (_mobile &&
           {
             StitchPhase.queued,
             StitchPhase.running,
@@ -2601,8 +2618,8 @@ class _StitchHomePageState extends State<StitchHomePage>
             task.copyWith(
               phase: guardedPhase,
               pauseReason: guardedPhase == StitchPhase.paused
-                  ? 'Android 无法启动后台运行保护，任务已安全暂停'
-                  : 'Android 无法确认后台安全暂停，正在核对原生任务状态',
+                  ? '移动端无法启动后台任务管理，任务已安全暂停'
+                  : '移动端无法确认后台安全暂停，正在核对原生任务状态',
             ),
           );
           if (guardedPhase != StitchPhase.paused) _beginPolling();
@@ -2610,7 +2627,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         }
       }
       if (_background &&
-          (!_android ||
+          (!_mobile ||
               _runtime == null ||
               !_runtimeGuardedJobs.contains(task.nativeJobId)) &&
           {StitchPhase.running, StitchPhase.exporting}.contains(phase) &&
@@ -2711,7 +2728,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                   task.exportPath != reportedPath)
           ? await _publishExport(updated, expectedGeneration: controlGeneration)
           : updated;
-      if (_android &&
+      if (_mobile &&
           {
             StitchPhase.paused,
             StitchPhase.completed,
@@ -3142,31 +3159,47 @@ class _StitchHomePageState extends State<StitchHomePage>
               icon: const Icon(Icons.settings),
               onPressed: _openSettings,
             ),
+          if (_mobile)
+            IconButton(
+              tooltip: StitchLocalizations.of(context).dwarfDeviceImport,
+              onPressed: () async {
+                final controller = _batchController;
+                if (controller == null) return;
+                final navigator = Navigator.of(context);
+                await widget.settingsController?.ready;
+                if (!mounted) return;
+                await navigator.push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => DwarfDevicePage(
+                      queueController: controller,
+                      settingsController: widget.settingsController,
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.camera_alt_outlined),
+            ),
           IconButton(
-            tooltip: StitchLocalizations.of(
-              context,
-            ).text(_mobile && !_android ? '批处理仅限 Windows 桌面版' : '批处理队列'),
-            onPressed: _mobile && !_android
-                ? null
-                : () async {
-                    final navigator = Navigator.of(context);
-                    await widget.settingsController?.ready;
-                    if (!mounted) return;
-                    await navigator.push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => BatchQueuePage(
-                          api: _api,
-                          controller: _batchController,
-                          mobileOverride: _mobile,
-                          androidOverride: _android,
-                          mobileStorageService: _storage,
-                          runtimeService: _runtime,
-                          resourceBudget: _resourceBudget,
-                          settingsController: widget.settingsController,
-                        ),
-                      ),
-                    );
-                  },
+            tooltip: StitchLocalizations.of(context).text('批处理队列'),
+            onPressed: () async {
+              final navigator = Navigator.of(context);
+              await widget.settingsController?.ready;
+              if (!mounted) return;
+              await navigator.push(
+                MaterialPageRoute<void>(
+                  builder: (_) => BatchQueuePage(
+                    api: _api,
+                    controller: _batchController,
+                    mobileOverride: _mobile,
+                    androidOverride: _android,
+                    mobileStorageService: _storage,
+                    runtimeService: _runtime,
+                    resourceBudget: _resourceBudget,
+                    settingsController: widget.settingsController,
+                  ),
+                ),
+              );
+            },
             icon: const Icon(Icons.queue),
           ),
           if (_task != null)

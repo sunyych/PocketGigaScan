@@ -81,7 +81,7 @@ class MobileResourceBudget {
   }
 }
 
-/// Reads current Android resource headroom and manages the render foreground service.
+/// Reads mobile resource headroom and tracks active rendering work.
 class MobileRuntimeService {
   MobileRuntimeService({MethodChannel? channel})
     : _channel =
@@ -123,8 +123,9 @@ class MobileRuntimeService {
     }
   }
 
-  /// Starts/stops the data-sync foreground service while a render is active.
-  /// Returns false only if Android could not start or stop the service.
+  /// Registers active rendering work with the platform runtime.
+  /// Android uses a data-sync foreground service. iOS stores pause requests
+  /// when the app backgrounds; this registration does not prevent suspension.
   Future<bool> setProcessingActive(bool active, {String? jobId}) async {
     try {
       return await _channel.invokeMethod<bool>('setProcessingActive', {

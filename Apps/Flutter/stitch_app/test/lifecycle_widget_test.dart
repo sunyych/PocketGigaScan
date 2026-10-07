@@ -162,27 +162,66 @@ Future<EmptyBatchQueueController?> pumpPage(
   ForegroundWorkLock? foregroundWorkLock,
   List<StitchTask>? tasks,
   FakeRepository? repository,
+  Key? pageKey,
+  Map<String, Object?>? initialManifest,
 }) async {
   final taskRepository = repository ?? FakeRepository(tasks ?? [task]);
-  final queueController = android
+  var effectiveRuntime = runtimeService;
+  if (mobile && !android && effectiveRuntime == null) {
+    const channel = MethodChannel('test.lifecycle-ios-runtime');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          switch (call.method) {
+            case 'readResourceBudget':
+              return <String, Object?>{
+                'totalMemoryMiB': 4096,
+                'availableMemoryMiB': 2048,
+                'cpuCount': 8,
+                'availableStorageMiB': 4096,
+                'thermalStatus': 'none',
+              };
+            case 'readPendingTimeoutJobs':
+              return <String>[];
+            case 'setProcessingActive':
+            case 'acknowledgeTimeoutJobs':
+              return true;
+          }
+          return null;
+        });
+    effectiveRuntime = MobileRuntimeService(channel: channel);
+    addTearDown(() async {
+      await effectiveRuntime?.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+  }
+  final queueController = mobile
       ? EmptyBatchQueueController(api: api, taskRepository: taskRepository)
       : null;
   await tester.pumpWidget(
     ChineseTestApp(
       home: StitchHomePage(
+        key: pageKey,
         initialTask: task,
+        initialManifest: initialManifest,
         jobApi: api,
         powerGate: FakePower(power),
         repository: taskRepository,
         batchQueueController: queueController,
         mobileOverride: mobile,
         androidOverride: android,
-        mobileRuntimeService: runtimeService,
+        mobileRuntimeService: effectiveRuntime,
         foregroundWorkLock: foregroundWorkLock ?? NoopForegroundWorkLock(),
       ),
     ),
   );
   await tester.pump();
+  if (mobile) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(milliseconds: 20));
+  }
   return queueController;
 }
 
@@ -736,7 +775,11 @@ void main() {
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.pump();
-    expect(api.pauses, 1);
+    await _pumpUntil(
+      tester,
+      () => api.pauses == 1,
+      'Mobile task did not pause',
+    );
   });
 
   testWidgets('desktop background leaves the native job running', (
@@ -795,30 +838,41 @@ void main() {
         PowerState.unknown,
         mobile: true,
       );
+      await _pumpUntil(tester, () {
+        final finder = find.widgetWithText(FilledButton, '恢复');
+        return finder.evaluate().isNotEmpty &&
+            tester.widget<FilledButton>(finder).onPressed != null;
+      }, 'Paused mobile task did not become resumable');
       await tester.tap(find.text('恢复'));
-      await tester.pump();
-      expect(api.resumes, 1);
+      await _pumpUntil(
+        tester,
+        () => api.resumes == 1,
+        'Mobile resume did not reach native API',
+      );
 
       final completedApi = FakeApi();
-      await tester.pumpWidget(
-        ChineseTestApp(
-          home: StitchHomePage(
-            key: const ValueKey('completed-task'),
-            initialTask: fixture(StitchPhase.completed, jobId: 'test-job'),
-            initialManifest: const {},
-            jobApi: completedApi,
-            powerGate: FakePower(PowerState.unknown),
-            repository: FakeRepository([]),
-            mobileOverride: true,
-            foregroundWorkLock: NoopForegroundWorkLock(),
-          ),
-        ),
+      await tester.pumpWidget(const SizedBox());
+      final completedQueue = await pumpPage(
+        tester,
+        fixture(StitchPhase.completed, jobId: 'test-job'),
+        completedApi,
+        PowerState.unknown,
+        mobile: true,
+        repository: FakeRepository([]),
+        pageKey: const ValueKey('completed-task'),
+        initialManifest: const {},
       );
+      await _pumpUntil(tester, () {
+        final finder = find.widgetWithText(OutlinedButton, '导出完整 PNG');
+        return finder.evaluate().isNotEmpty &&
+            tester.widget<OutlinedButton>(finder).onPressed != null;
+      }, 'Completed mobile task did not become exportable');
       final exportButton = tester.widget<OutlinedButton>(
         find.widgetWithText(OutlinedButton, '导出完整 PNG'),
       );
       expect(exportButton.onPressed, isNotNull);
       expect(completedApi.exports, 0);
+      completedQueue?.dispose();
     },
   );
 }
