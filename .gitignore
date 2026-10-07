@@ -52,6 +52,7 @@ __pycache__/
 !/.github/workflows/
 /.github/workflows/*
 !/.github/workflows/windows-build.yml
+!/.github/workflows/android-build.yml
 /Dependencies/*
 !/Dependencies/flutter-stitch-core.json
 /docs/*

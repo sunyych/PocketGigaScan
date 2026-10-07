@@ -392,7 +392,7 @@ foreach ($abi in $Abis) {
     $opencvThirdParty = Join-Path $opencvRoot "3rdparty\libs\$($target.OpenCvDir)"
     Require-Path $opencvStatic "OpenCV static libraries ($abi)"
     Require-Path $opencvThirdParty "OpenCV dependency libraries ($abi)"
-    $moduleLibs = @('opencv_stitching','opencv_calib3d','opencv_features2d','opencv_flann','opencv_imgcodecs','opencv_imgproc','opencv_core')
+    $moduleLibs = @('opencv_stitching','opencv_calib3d','opencv_features2d','opencv_flann','opencv_imgcodecs','opencv_imgproc','opencv_photo','opencv_core')
     $commonLibs = @('ade','tbb','ittnotify','libjpeg-turbo','libwebp','libpng','libtiff','libopenjp2','IlmImf','cpufeatures','libprotobuf','z','dl','log','m') + $target.Extra
     $triple = $target.Triple
     $toolPrefix = "$triple$ApiLevel"

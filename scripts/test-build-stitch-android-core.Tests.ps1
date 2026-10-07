@@ -35,6 +35,7 @@ foreach ($required in @(
     "libc++_shared.so",
     "build-manifest.json",
     "`$JxlOnly",
+    "'opencv_photo'",
     "`$BuildTests",
     "bundledIntoApk=`$false",
     "native-licenses",
