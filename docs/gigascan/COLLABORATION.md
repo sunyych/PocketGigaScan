@@ -31,6 +31,25 @@ the assertion uses that same snapshot rather than racing another load. The
 20-second timeout and format assertions remain. Codex reviews the fix and the
 focused TIFF test passes; no queue product logic changes.
 
+Final qualified source is 332c13f, with Dart formatting, clean Flutter analysis,
+all 214 Flutter tests, Rust formatting, 186 native tests (two local fixture tests
+ignored), and Windows/Android builder contracts passing. The normal Windows
+Release builder finishes its source-core, runtime/license and ZIP checks. Android
+Release is rebuilt with the unchanged previously source-built ARM64 core; APK
+inspection verifies FFI/dependencies, 16KiB ELF/ZIP alignment, signature and all
+135 hashed license files. This is shared-widget and package evidence, with no
+new physical-phone or native-window interaction claim.
+
+Version stays 1.3.1+15. Ignored deliverables are
+`PocketGigaScan-Windows-x64-v1.3.1-15-idle-progress-fix.zip` (20,607,254 bytes,
+SHA-256 `81e0752e13ae1b11946dcec3d8b24ca11034a65e9fb4ea58701b8552411b054f`)
+and `PocketGigaScan-Android-arm64-v1.3.1-15-idle-progress-fix.apk` (38,877,431
+bytes, SHA-256 `a9400b59927df5b3a85cc43f0b0da242e9bee260476f36360834f80adeb27ce5`).
+Android package remains `com.lumiaiq.pocketgigascan`, ARM64, minimum API29,
+target API36 and development signing. Local logs are in ignored
+`.local/idle-progress-20261007/`. The completed Luna handoff is independently
+reviewed by Codex and extends existing PR #5 without merging it.
+
 ## PG-054 stitching loop and neighbor regression
 
 User reports 1.3 appears to loop in retry extraction/matching while 1.2 completes
