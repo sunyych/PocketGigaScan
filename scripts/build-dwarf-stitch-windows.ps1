@@ -5,7 +5,8 @@ param(
     [string]$DjxlExecutable,
     [string]$FlutterPath,
     [string]$OutputDirectory,
-    [switch]$PlanOnly
+    [switch]$PlanOnly,
+    [switch]$PrepareSigning
 )
 
 Set-StrictMode -Version Latest
@@ -42,6 +43,7 @@ $packageDir = Join-Path $OutputDirectory 'package'
 $archivePath = Join-Path $OutputDirectory 'PocketGigaScan-Windows-x64.zip'
 $checksumPath = "$archivePath.sha256"
 $manifestOutputPath = Join-Path $OutputDirectory 'build-manifest.json'
+$signingInputPath = Join-Path $OutputDirectory 'PocketGigaScan-Windows-signing-input.zip'
 
 function Assert-OwnedPath([string]$Path, [string]$OwnerRoot, [switch]$InspectTree) {
     $target = [IO.Path]::GetFullPath($Path)
@@ -111,6 +113,20 @@ function Assert-WindowsReleaseAssets([string]$ReleaseDirectory) {
     })
     if ($forbidden.Count -gt 0) {
         throw "Windows Release contains debug or integration-test assets: $($forbidden[0].FullName)"
+    }
+}
+
+function Assert-WindowsProductVersionMetadata([string[]]$Paths, [string]$ExpectedVersion) {
+    foreach ($path in $Paths) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Windows signing input is missing a required product binary: $path"
+        }
+        $versionInfo = (Get-Item -LiteralPath $path).VersionInfo
+        if ($versionInfo.ProductName -ne 'PocketGigaScan' -or
+            $versionInfo.ProductVersion -ne $ExpectedVersion -or
+            $versionInfo.FileVersion -ne $ExpectedVersion) {
+            throw "Windows binary metadata mismatch for '$path': expected ProductName=PocketGigaScan and FileVersion/ProductVersion=$ExpectedVersion, got ProductName='$($versionInfo.ProductName)', FileVersion='$($versionInfo.FileVersion)', ProductVersion='$($versionInfo.ProductVersion)'."
+        }
     }
 }
 
@@ -332,6 +348,8 @@ function Get-BuildPlan {
         nativeOutputs = @('png', 'tiff', 'jxl')
         releaseExecutable = Join-Path $releaseDir 'PocketGigaScan.exe'
         zip = $archivePath
+        signingInputZip = $signingInputPath
+        prepareSigning = [bool]$PrepareSigning
         checksum = $checksumPath
         manifest = $manifestOutputPath
     }
@@ -340,6 +358,10 @@ function Get-BuildPlan {
 if ($PlanOnly) {
     Get-BuildPlan | ConvertTo-Json -Depth 5
     exit 0
+}
+
+if (-not $PrepareSigning) {
+    throw 'Windows release output must be signed by the approved SignPath workflow. Use -PrepareSigning only for the unsigned signing input; finalize the returned signed ZIP with scripts/complete-dwarf-stitch-windows-signing.ps1. This mode does not create a distributable release ZIP.'
 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $native 'Cargo.toml'))) {
@@ -356,6 +378,7 @@ Assert-OwnedPath $packageDir $OutputDirectory
 Assert-OwnedPath $archivePath $OutputDirectory
 Assert-OwnedPath $checksumPath $OutputDirectory
 Assert-OwnedPath $manifestOutputPath $OutputDirectory
+Assert-OwnedPath $signingInputPath $OutputDirectory
 Assert-OwnedPath $opencvSource $cache
 Assert-OwnedPath $opencvBuild $cache
 Assert-OwnedPath $opencvInstall $cache
@@ -594,6 +617,12 @@ $exe = Join-Path $releaseDir 'PocketGigaScan.exe'
 $coreDll = Join-Path $releaseDir 'lumia_gigascan_core.dll'
 if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "Expected executable not found: $exe" }
 if (-not (Test-Path -LiteralPath $coreDll -PathType Leaf)) { throw "Expected Rust core DLL not found beside executable: $coreDll" }
+$appVersion = (Get-Content -LiteralPath (Join-Path $app 'pubspec.yaml') | Where-Object { $_ -match '^version:\s*' } | Select-Object -First 1)
+if (-not $appVersion -or $appVersion -notmatch '^version:\s*([0-9]+\.[0-9]+\.[0-9]+\+[0-9]+)\s*$') {
+    throw 'Flutter pubspec.yaml must provide a numeric version such as 1.4.4+23 for signed Windows binaries.'
+}
+$expectedProductVersion = $Matches[1]
+Assert-WindowsProductVersionMetadata @($exe, $coreDll) $expectedProductVersion
 $executables = @(Get-ChildItem -LiteralPath $releaseDir -Filter '*.exe' -File -Recurse | ForEach-Object Name | Sort-Object -Unique)
 if ($executables.Count -ne 1 -or $executables[0] -ne 'PocketGigaScan.exe') {
     throw "Unexpected Windows executable set in the release directory: $($executables -join ', ')"
@@ -616,6 +645,7 @@ $manifest = [ordered]@{
     architecture = 'windows-x64'
     flutterVersion = $pin.flutterVersion
     rustVersion = $pin.rustVersion
+    windowsProductVersion = $expectedProductVersion
     openCvVersion = $pin.openCvVersion
     openCvSourceSha256 = $pin.openCvSha256
     libjxlVersion = $pin.jxlVersion
@@ -641,11 +671,24 @@ $manifest = [ordered]@{
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 5
 $manifestJson | Set-Content -LiteralPath (Join-Path $packageDir 'build-manifest.json') -Encoding utf8
-$manifestJson | Set-Content -LiteralPath $manifestOutputPath -Encoding utf8
-if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }
-Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $archivePath -CompressionLevel Optimal
-$archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-Set-Content -LiteralPath $checksumPath -Value "$archiveHash  PocketGigaScan-Windows-x64.zip" -Encoding ascii
-Assert-ZipMatchesPackage $archivePath $packageDir
-Write-Host "Build package: $archivePath"
-Write-Host "SHA-256: $archiveHash"
+if ($PrepareSigning) {
+    $baselineFiles = @(Get-ChildItem -LiteralPath $packageDir -File -Recurse | ForEach-Object {
+        [pscustomobject]@{
+            path = [IO.Path]::GetRelativePath($packageDir, $_.FullName).Replace('\', '/')
+            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    } | Sort-Object path)
+    $baseline = [ordered]@{
+        schemaVersion = 1
+        product = 'PocketGigaScan'
+        signedFiles = @('PocketGigaScan.exe', 'lumia_gigascan_core.dll')
+        files = $baselineFiles
+    }
+    $baseline | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $packageDir 'signing-baseline.json') -Encoding utf8
+    if (Test-Path -LiteralPath $signingInputPath) { Remove-Item -LiteralPath $signingInputPath -Force }
+    Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $signingInputPath -CompressionLevel Optimal
+    Assert-ZipMatchesPackage $signingInputPath $packageDir
+    Write-Host "Signing input ZIP (not a release): $signingInputPath"
+    Write-Host 'Upload this ZIP to the approved SignPath signing workflow; finalize its returned signed ZIP before distribution.'
+    exit 0
+}

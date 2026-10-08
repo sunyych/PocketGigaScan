@@ -14,16 +14,31 @@ concurrency:
 
 jobs:
   build:
-    name: Windows x64 release
+    name: Windows x64 build and signing input
     runs-on: windows-2025-vs2026
     timeout-minutes: 180
-    permissions:
-      contents: write
+    outputs:
+      signing_candidate: ${{ steps.signing-candidate.outputs.enabled }}
+      signing_artifact_id: ${{ steps.upload-signing-input.outputs.artifact-id }}
     steps:
       - name: Check out sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Identify trusted signing candidate
+        id: signing-candidate
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          $isCanonicalRepository = $env:REPOSITORY -eq 'sunyych/PocketGigaScan'
+          $isTrustedEvent = $env:EVENT_NAME -in @('push', 'workflow_dispatch')
+          $enabled = $isCanonicalRepository -and $isTrustedEvent
+          "enabled=$($enabled.ToString().ToLowerInvariant())" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+          Write-Host "SignPath candidate: $enabled (event=$env:EVENT_NAME, ref=$env:REF)"
 
       - name: Restore pinned native and Flutter dependencies
         uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
@@ -48,9 +63,32 @@ jobs:
         shell: pwsh
         run: python -m unittest discover -s scripts/tests -p 'test_*.py'
 
-      - name: Build Rust core and Flutter Windows release
+      - name: Validate signed-package finalizer contracts
         shell: pwsh
-        run: ./scripts/build-dwarf-stitch-windows.ps1 -OutputDirectory "$env:RUNNER_TEMP\PocketGigaScan-Windows"
+        run: ./scripts/test-complete-dwarf-stitch-windows-signing.Tests.ps1
+
+      - name: Build and prepare unsigned signing input
+        shell: pwsh
+        run: ./scripts/build-dwarf-stitch-windows.ps1 -PrepareSigning -OutputDirectory "$env:RUNNER_TEMP\PocketGigaScan-Windows"
+
+      - name: Upload non-release signing input
+        if: steps.signing-candidate.outputs.enabled != 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-Windows-unsigned-input-${{ github.sha }}
+          path: ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-signing-input.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload signing input
+        id: upload-signing-input
+        if: steps.signing-candidate.outputs.enabled == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-Windows-signing-input.zip
+          path: ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-signing-input.zip
+          if-no-files-found: error
+          retention-days: 7
 
       - name: Upload Flutter test failure screenshots
         if: failure()
@@ -61,27 +99,125 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: Upload this push build
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+  sign_and_finalize:
+    name: Approve, sign, and verify Windows release
+    needs: build
+    if: needs.build.outputs.signing_candidate == 'true'
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 360
+    environment: windows-signing
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          name: PocketGigaScan-Windows-x64-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-x64.zip
-            ${{ runner.temp }}/PocketGigaScan-Windows/PocketGigaScan-Windows-x64.zip.sha256
-            ${{ runner.temp }}/PocketGigaScan-Windows/build-manifest.json
-          if-no-files-found: error
-          retention-days: 30
+          persist-credentials: false
 
-      - name: Refresh latest Windows prerelease
-        if: >-
-          github.event_name == 'push' &&
-          github.repository == 'sunyych/PocketGigaScan' &&
-          github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      - name: Require complete SignPath configuration
+        shell: pwsh
+        env:
+          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          SIGNPATH_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          SIGNPATH_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $required = @(
+            'SIGNPATH_ORGANIZATION_ID',
+            'SIGNPATH_PROJECT_SLUG',
+            'SIGNPATH_SIGNING_POLICY_SLUG',
+            'SIGNPATH_ARTIFACT_CONFIGURATION_SLUG',
+            'SIGNPATH_SIGNER_THUMBPRINT',
+            'SIGNPATH_API_TOKEN'
+          )
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($missing.Count -gt 0) { throw "Signing is disabled: windows-signing environment configuration is missing: $($missing -join ', '). No final package will be published." }
+
+      - name: Submit SignPath signing request
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.signing_artifact_id }}
+          github-token: ${{ github.token }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 21000
+          output-artifact-directory: ${{ runner.temp }}\signpath-signed
+
+      - name: Download the unsigned input for byte comparison
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PACKAGE_DIR: ${{ runner.temp }}/PocketGigaScan-Windows
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputDirectory = Join-Path $env:RUNNER_TEMP 'signing-input'
+          New-Item -ItemType Directory -Force -Path $inputDirectory | Out-Null
+          & gh run download $env:GITHUB_RUN_ID --name 'PocketGigaScan-Windows-signing-input.zip' --dir $inputDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the unsigned package used for this signing request.' }
+
+      - name: Complete and verify the signed Windows package
+        shell: pwsh
+        env:
+          EXPECTED_SIGNER_THUMBPRINT: ${{ vars.SIGNPATH_SIGNER_THUMBPRINT }}
+        run: |
+          ./scripts/complete-dwarf-stitch-windows-signing.ps1 `
+            -UnsignedPackageZip "$env:RUNNER_TEMP\signing-input\PocketGigaScan-Windows-signing-input.zip" `
+            -SignedPackageZip "$env:RUNNER_TEMP\signpath-signed\PocketGigaScan-Windows-signing-input.zip" `
+            -OutputDirectory "$env:RUNNER_TEMP\PocketGigaScan-Windows-final" `
+            -ExpectedSignerThumbprint $env:EXPECTED_SIGNER_THUMBPRINT
+
+      - name: Upload verified signed release
+        id: upload-signed-release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-Windows-signed-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/PocketGigaScan-Windows-final/PocketGigaScan-Windows-x64.zip
+            ${{ runner.temp }}/PocketGigaScan-Windows-final/PocketGigaScan-Windows-x64.zip.sha256
+            ${{ runner.temp }}/PocketGigaScan-Windows-final/build-manifest.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish_latest:
+    name: Publish latest Windows prerelease
+    needs: sign_and_finalize
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'sunyych/PocketGigaScan' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: windows-2025-vs2026
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download verified signed release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageDirectory = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-Windows-final'
+          New-Item -ItemType Directory -Force -Path $packageDirectory | Out-Null
+          & gh run download $env:GITHUB_RUN_ID --name "PocketGigaScan-Windows-signed-$env:GITHUB_SHA" --dir $packageDirectory
+          if ($LASTEXITCODE -ne 0) { throw 'Could not download the verified signed release artifact.' }
+
+      - name: Refresh latest Windows prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PACKAGE_DIR: ${{ runner.temp }}/PocketGigaScan-Windows-final
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not (Get-Command gh.exe -ErrorAction SilentlyContinue)) { throw 'GitHub CLI is missing from the hosted runner.' }
@@ -93,11 +229,11 @@ jobs:
           foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset)) { throw "Release asset missing: $asset" } }
           & gh release view latest *> $null
           if ($LASTEXITCODE -ne 0) {
-            & gh release create latest @assets --target $env:GITHUB_SHA --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest successful Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
+            & gh release create latest @assets --target $env:GITHUB_SHA --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest signed Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
           } else {
             & gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/latest" --method PATCH --field "sha=$env:GITHUB_SHA" --field force=true
             if ($LASTEXITCODE -ne 0) { throw 'Could not move the latest prerelease tag to this commit.' }
-            & gh release edit latest --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest successful Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
+            & gh release edit latest --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest signed Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
             if ($LASTEXITCODE -ne 0) { throw 'Could not update latest prerelease metadata.' }
             & gh release upload latest @assets --clobber
           }
