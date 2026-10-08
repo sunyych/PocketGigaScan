@@ -24,7 +24,7 @@ renderer identity so incompatible cached render tiles cannot be mixed.
 
 ## Owners and validation steps
 
-- [ ] Luna native coder: renderer integration, bounded ownership module and
+- [x] Luna native coder: renderer integration, bounded ownership module and
   native regressions. First capture failing isolated-wedge/moving-content
   examples; compare old deghost, feather and the new algorithm on the same
   sources and saved geometry. Cover static detail, unique coverage, obstructed
@@ -33,12 +33,12 @@ renderer identity so incompatible cached render tiles cannot be mixed.
   and inspect the last working version once its exact text/platform is known.
   Preserve independently dirty Flutter files; do not guess or suppress genuine
   diagnostic failures. Coordinator has requested the missing prompt text.
-- [ ] Coordinator: independently review map construction costs and numerical
+- [x] Coordinator: independently review map construction costs and numerical
   behavior, locate existing originals/layouts and run bounded real-scene ROI
   comparisons if matching captures are accessible. Run native formatting/tests,
   Flutter analysis/tests, build script contracts and normal Windows Release;
   rebuild Android native core and APK for shared renderer changes.
-- [ ] Coordinator: record before/after crop evidence, retained artifact paths,
+- [x] Coordinator: record before/after crop evidence, retained artifact paths,
   checksums, qualification limits and handoffs in collaboration/roadmap records.
   Update the existing MR with scoped commits and observe Android/Windows CI.
 
