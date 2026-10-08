@@ -803,10 +803,439 @@ void main() {
     );
     expect(remainingChinese, isEmpty, reason: remainingChinese.join('\n'));
   });
+
+  test(
+    'bilingual audit: prefix and regex fallbacks translate dynamic messages',
+    () {
+      const english = StitchLocalizations(Locale('en'));
+      const chinese = StitchLocalizations(Locale('zh'));
+
+      const cases = <String, String>{
+        // Colon-terminated prefix keys; the remainder is preserved verbatim.
+        '无法启动：timeout': 'Could not start: timeout',
+        '无法启用前台任务锁：denied':
+            'Could not enable the foreground task lock: denied',
+        '前台任务锁不可用，正在请求暂停：denied':
+            'Foreground task lock unavailable; requesting pause: denied',
+        '无法创建新任务副本：oops': 'Could not create a task copy: oops',
+        '恢复任务状态失败：boom': 'Failed to restore task state: boom',
+        '无法读取移动端后台暂停记录；启动、恢复与导出已暂缓：err':
+            'Could not read mobile background pause records; '
+            'start, resume and export are deferred: err',
+        '移动端后台暂停任务仍待安全核对：err':
+            'A mobile background-paused task still needs a safety check: err',
+        '无法读取移动端后台暂停记录；批处理任务保持待核对：err':
+            'Could not read mobile background pause records; '
+            'the batch task stays pending verification: err',
+        '无法重新读取母目录：err': 'Could not re-read the parent directory: err',
+        '无法读取子目录：err': 'Could not read the subdirectory: err',
+        '仅支持 JPEG 原片：a.jpg':
+            'Only original JPEG photos are supported: a.jpg',
+        '无法读取所选文件：a.jpg': 'Could not read the selected file: a.jpg',
+        '文件不是有效 JPEG：a.jpg': 'The file is not a valid JPEG: a.jpg',
+        'JPEG marker 顺序无效：a.jpg': 'Invalid JPEG marker order: a.jpg',
+        'JPEG 头中找不到图像尺寸：a.jpg':
+            'No image size found in the JPEG header: a.jpg',
+        '本地合成核心不可用：err': 'The local stitching core is unavailable: err',
+        '调用原生合成核心失败：err':
+            'Failed to call the native stitching core: err',
+        '启动失败：err': 'Failed to start: err',
+        '取消失败：err': 'Failed to cancel: err',
+        '无法读取核心资源：err': 'Could not read core resources: err',
+        '读取批处理队列失败：err': 'Failed to read the batch queue: err',
+        '导入批次失败：err': 'Failed to import the batch: err',
+        '原生任务已创建，正在重新连接：err':
+            'The native job was created; reconnecting: err',
+        '状态暂时不可用，保留原任务并重试：err':
+            'State temporarily unavailable; keeping the original task '
+            'and retrying: err',
+        '恢复状态暂不可用，将自动重试：err':
+            'Recovery state temporarily unavailable; retrying automatically: err',
+        '等待原生导出状态：err': 'Waiting for the native export state: err',
+        '设备全景导入失败：boom': 'Device panorama import failed: boom',
+        '等待连接原生任务：err': 'Waiting to connect to the native job: err',
+        // Regex fallbacks added by the bilingual audit.
+        '原生任务状态为 running；停止确认前保留本地任务':
+            'Native job state is running; '
+            'the local task is kept until stop is confirmed',
+        '原生任务状态为 failed': 'Native job state is failed',
+        '未找到原生库 opencv_core.dll：The specified module was not found.':
+            'Native library opencv_core.dll not found: '
+            'The specified module was not found.',
+        '不兼容的原生核心 ABI：1.2（需要 1.3）':
+            'Incompatible native core ABI: 1.2 (requires 1.3)',
+        '新整图导出failed；保留了此前成功的导出文件。':
+            'New full-image export failed; '
+            'the previously successful export file is preserved.',
+        '整图导出failed。': 'Full image export failed.',
+        '完整PNG（无损）尚未生成。': 'The full PNG has not been generated yet.',
+        '完整图像尚未生成。': 'The full image has not been generated yet.',
+        '合成完成，等待 TIFF（无损，大图自动 BigTIFF） 导出':
+            'Composition complete; waiting for '
+            'TIFF (lossless; BigTIFF for large images) export',
+        '合成完成，正在导出整图 JPEG XL（有损）':
+            'Composition complete; exporting the full JPEG XL',
+        '合成完成，正在导出 PNG': 'Composition complete; exporting PNG',
+        '导出整图 TIFF（无损，大图自动 BigTIFF）': 'Exporting the full TIFF',
+        '重试完整 JPEG XL': 'Retry full JPEG XL',
+        '导出完整 TIFF': 'Export full TIFF',
+        '已请求暂停；等待核心确认（等待当前操作完成）':
+            'Pause requested; waiting for the engine to confirm '
+            '(waiting for the current operation to finish)',
+        '操作完成后已提交暂停请求（等待当前操作完成）':
+            'Operation completed. Pause request submitted. '
+            '(waiting for the current operation to finish)',
+        '按文件名识别 3×2': 'Identified a 3×2 grid from filenames',
+        '估算为 4×2，按行排列': 'Estimated as 4×2, arranged by rows',
+        '已确认文件名中的 3×2 网格与相机视角':
+            'Confirmed the 3×2 grid and camera angles from filenames',
+        '已确认 3×2 顺序排列与相机视角':
+            'Confirmed the 3×2 sequential layout and camera angles',
+        '75% · 本阶段预计剩余 2 分 5 秒':
+            '75% · 2 min 5 sec remaining in this phase',
+        '42% · 本阶段预计剩余 30 秒':
+            '42% · 30 sec remaining in this phase',
+        '合成中 · 估算排列，建议检查':
+            'Stitching · estimated arrangement, review it',
+        '估算布局 · 估算排列，建议检查':
+            'Estimated layout · estimated arrangement, review it',
+        '2 分 5 秒': '2 min 5 sec',
+        '30 秒': '30 sec',
+        '5 张原片 · 3840×2160': '5 source photos · 3840×2160',
+        '5 张原片 · ': '5 source photos',
+      };
+
+      for (final entry in cases.entries) {
+        final translated = english.text(entry.key);
+        expect(translated, entry.value, reason: entry.key);
+        expect(
+          RegExp(r'[\u3400-\u9fff]').hasMatch(translated),
+          isFalse,
+          reason: 'CJK leaked into English: $translated',
+        );
+      }
+      for (final source in const [
+        '合成失败',
+        '整图导出已完成',
+        '母目录不存在',
+        '合成完成，等待整图导出',
+        '估算布局',
+        '无法启动：timeout',
+        '30 秒',
+      ]) {
+        expect(chinese.text(source), source);
+      }
+    },
+  );
+
+  test('bilingual audit: service and UI status keys are localized', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+
+    const cases = <String, String>{
+      '合成失败': 'Stitching failed',
+      '合成已开始': 'Stitching started',
+      '合成已完成': 'Composition completed',
+      '合成完成，等待整图导出':
+          'Composition complete; waiting for the full image export',
+      '整图导出失败': 'Full image export failed',
+      '整图导出已开始': 'Full image export started',
+      '整图导出已完成': 'Full image export completed',
+      '整图导出已暂停，点击恢复继续':
+          'The full image export is paused. Tap Resume to continue',
+      '恢复': 'Resume',
+      '恢复整图导出': 'Resume full image export',
+      '继续导出整图': 'Continue the full image export',
+      '等待核心资源': 'Waiting for engine resources',
+      '等待核心资源以恢复原任务':
+          'Waiting for engine resources to restore the original task',
+      '等待核心资源后自动导出':
+          'Waiting for engine resources, then exporting automatically',
+      '母目录不存在': 'The parent directory does not exist',
+      '母目录中没有直接子目录': 'No direct subdirectory in the parent directory',
+      '没有原片': 'No source photos',
+      '没有选中照片': 'No photos selected',
+      '子目录中没有直接 JPEG 原片':
+          'No direct JPEG source photos in the subdirectory',
+      '全景目录没有可导入的 JPEG 原片':
+          'The panorama directory has no importable JPEG source photos',
+      '原片尺寸不一致': 'The source photos have inconsistent dimensions',
+      '缺少已导入原片': 'Imported source photos are missing',
+      '请先导入原片': 'Import the source photos first',
+      '需要设置行列': 'Set the rows and columns first',
+      '需要设置相机视角': 'Set the camera field of view first',
+      '行列数必须与原片数量一致':
+          'Rows and columns must match the number of source photos',
+      '文件名行列编号超出支持范围':
+          'Filename row/column numbers exceed the supported range',
+      '检测到重复行列文件；请改用顺序模式，全部原片都会保留':
+          'Duplicate row/column files detected; use sequence mode. '
+          'All source photos are kept.',
+      '原片内容已变化；请重新导入以创建新任务':
+          'The source photo content changed; re-import to create a new task',
+      '已有处理目录；请创建新任务，避免覆盖或误恢复旧参数':
+          'A processing directory already exists; create a new task '
+          'to avoid overwriting or accidentally restoring old settings',
+      '任务输入目录已存在，拒绝覆盖':
+          'The task input directory already exists; refusing to overwrite',
+      '任务渲染目录已有内容，拒绝覆盖':
+          'The task render directory already has content; refusing to overwrite',
+      '任务记录丢失': 'Task record is missing',
+      '找不到本地任务记录': 'No local task record found',
+      '找不到该队列任务': 'The queue task was not found',
+      '找不到原始子目录': 'The original subdirectory was not found',
+      '任务仍在处理中；停止后才能删除队列项目':
+          'The task is still processing; stop it before removing the queue item',
+      '队列正在恢复或导入，请稍后再删除':
+          'The queue is recovering or importing; try removing it again later',
+      '队列正在恢复或导入，请稍后再删除任务':
+          'The queue is recovering or importing; '
+          'try removing the task again later',
+      '此队列项目不需要大型任务确认':
+          'This queue item does not need a large-job confirmation',
+      '大型任务需要确认后才会导出':
+          'The large job needs confirmation before exporting',
+      '大型任务需要重新确认后才能导出':
+          'The large job needs to be re-confirmed before exporting',
+      '大型任务尚未安全暂停，确认后不能继续':
+          'The large job is not safely paused yet; it cannot continue '
+          'after confirmation',
+      '后台时间到；整图导出已暂停，点击恢复继续':
+          'Background time limit reached; the full image export is paused. '
+          'Tap Resume to continue',
+      '后台运行已暂停；等待手动恢复导出':
+          'Background run paused; waiting for a manual export resume',
+      'Android 后台运行时限已到；等待手动恢复导出':
+          'The Android background run limit was reached; '
+          'export waits for a manual resume',
+      'Android 无法启动后台运行保护，任务已安全暂停':
+          'Android could not start background protection; the task is safely paused',
+      '无法启动 Android 后台运行保护；导出保持暂停':
+          'Could not start Android background protection; the export stays paused',
+      '共享资源预算已变化，等待释放后再导出整图':
+          'The shared resource budget changed; waiting for it to be released '
+          'before exporting the full image',
+      '等待共享内存预算释放后再导出整图':
+          'Waiting for the shared memory budget to be released before '
+          'exporting the full image',
+      '无法分配不冲突的整图文件名':
+          'Could not assign a non-conflicting full image filename',
+      '原生合成核心不可用': 'The native stitching engine is unavailable',
+      '原生响应不是 JSON 对象': 'The native response is not a JSON object',
+      '原生核心返回空响应': 'The native engine returned an empty response',
+      '本地处理失败': 'Local processing failed',
+      '原生任务的导出状态缺失': 'The native job export state is missing',
+      '原生任务状态路径与渲染目录不匹配':
+          'The native job state path does not match the render directory',
+      '任务缺少原生作业编号；无法确认已停止':
+          'The task is missing its native job ID; stop could not be confirmed',
+      '核心报告导出完成，但找不到整图文件':
+          'The engine reported a completed export, '
+          'but the full image file is missing',
+      '核心报告导出完成，但找不到非空整图文件':
+          'The engine reported a completed export, '
+          'but no non-empty full image file was found',
+      '核心报告导出完成，但输出文件不存在或为空':
+          'The engine reported a completed export, '
+          'but the output file is missing or empty',
+      '核心未报告可用的 JPEG XL 编码器':
+          'The engine did not report an available JPEG XL encoder',
+      '核心未报告可用的 JPEG XL 无损编码器；已阻止启动。':
+          'The engine did not report an available lossless JPEG XL encoder; '
+          'startup was blocked.',
+      '此原生核心未报告内置 JPEG XL 编码器，已阻止导出。':
+          'This native engine did not report a built-in JPEG XL encoder; '
+          'export was blocked.',
+      'JPEG XL（编码器未加载）': 'JPEG XL (encoder not loaded)',
+      '水平视角需介于 1° 与 179°':
+          'Horizontal field of view must be between 1° and 179°',
+      '已提交暂停请求': 'Pause request submitted',
+      '已请求暂停，等待核心确认':
+          'Pause requested; waiting for the engine to confirm',
+      '已请求暂停；等待核心确认':
+          'Pause requested; waiting for the engine to confirm',
+      '已恢复原生任务': 'Restored the native job',
+      '已连接正在运行的原生任务': 'Connected to the running native job',
+      '应用未运行期间的原生状态不会自动恢复':
+          'Native state from while the app was closed is not restored automatically',
+      '删除本地任务记录': 'Delete local task record',
+      '估算布局': 'Estimated layout',
+    };
+
+    for (final entry in cases.entries) {
+      final translated = english.text(entry.key);
+      expect(translated, entry.value, reason: entry.key);
+      expect(
+        RegExp(r'[\u3400-\u9fff]').hasMatch(translated),
+        isFalse,
+        reason: 'CJK leaked into English: $translated',
+      );
+      expect(chinese.text(entry.key), entry.key);
+    }
+  });
+
+  testWidgets(
+    'English queue marks a publish failure without Chinese and offers retry',
+    (tester) async {
+      final api = LocalizationSurfaceJobApi();
+      final queue = EmptyBatchQueueController(
+        api: api,
+        taskRepository: LocalizationSurfaceTaskRepository(),
+        initialQueues: [
+          BatchQueue(
+            id: 'synthetic-queue',
+            createdAt: DateTime.utc(2026),
+            parentDirectory: 'synthetic-parent',
+            outputDirectory: 'synthetic-output',
+            outputFormat: ExportFormat.png,
+            items: const [
+              BatchQueueItem(
+                id: 'synthetic-item',
+                name: 'synthetic scene',
+                sourceDirectory: 'synthetic-parent/scene',
+                state: BatchItemState.completed,
+                publishFailed: true,
+                message: '发布失败：boom。私有整图已保留，可重试发布。',
+              ),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        LumiaStitchApp(
+          locale: const Locale('en'),
+          home: BatchQueuePage(api: api, controller: queue),
+        ),
+      );
+      await tester.pump();
+
+      final remainingChinese = _visibleChinese(tester);
+      expect(find.byTooltip('Retry publishing export'), findsOneWidget);
+      expect(find.byTooltip('Open panorama viewer'), findsOneWidget);
+      expect(
+        find.text(
+          'Publishing failed: boom. The private full image is preserved; '
+          'retry publishing.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('1/1 exported · 0 in progress'), findsOneWidget);
+      expect(remainingChinese, isEmpty, reason: remainingChinese.join('\n'));
+    },
+  );
+
+  testWidgets(
+    'Chinese queue still shows the publish failure message and retry action',
+    (tester) async {
+      final api = LocalizationSurfaceJobApi();
+      final queue = EmptyBatchQueueController(
+        api: api,
+        taskRepository: LocalizationSurfaceTaskRepository(),
+        initialQueues: [
+          BatchQueue(
+            id: 'synthetic-queue',
+            createdAt: DateTime.utc(2026),
+            parentDirectory: 'synthetic-parent',
+            outputDirectory: 'synthetic-output',
+            outputFormat: ExportFormat.png,
+            items: const [
+              BatchQueueItem(
+                id: 'synthetic-item',
+                name: 'synthetic scene',
+                sourceDirectory: 'synthetic-parent/scene',
+                state: BatchItemState.completed,
+                publishFailed: true,
+                message: '发布失败：boom。私有整图已保留，可重试发布。',
+              ),
+            ],
+          ),
+        ],
+      );
+      await tester.pumpWidget(
+        LumiaStitchApp(
+          locale: const Locale('zh', 'CN'),
+          home: BatchQueuePage(api: api, controller: queue),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byTooltip('重试发布整图'), findsOneWidget);
+      expect(
+        find.text('发布失败：boom。私有整图已保留，可重试发布。'),
+        findsOneWidget,
+      );
+      expect(find.text('1/1 已导出 · 0 项处理中'), findsOneWidget);
+    },
+  );
+
+  testWidgets('English viewer source panel translates the output file line', (
+    tester,
+  ) async {
+    final temp = await tester.runAsync(
+      () => Directory.systemTemp.createTemp('viewer-localization-'),
+    );
+    expect(temp, isNotNull);
+    final directory = temp!;
+    addTearDown(() => directory.delete(recursive: true));
+    final output = File('${directory.path}/stitched.tif')
+      ..writeAsBytesSync([1]);
+    final tiles = Directory('${directory.path}/tiles')..createSync();
+    await tester.pumpWidget(
+      LumiaStitchApp(
+        locale: const Locale('en'),
+        home: ExportedImageViewer(
+          exportFilePath: output.path,
+          pyramidDirectory: tiles.path,
+          expectedExportFingerprint: null,
+          legacyTaskAssociationPresent: true,
+          legacyTaskBindingVerified: true,
+        ),
+      ),
+    );
+    for (
+      var attempt = 0;
+      attempt < 50 &&
+          find.byType(CircularProgressIndicator).evaluate().isNotEmpty;
+      attempt++
+    ) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 100)),
+      );
+      await tester.pump();
+    }
+    await tester.pump();
+
+    await tester.tap(find.byTooltip('View output information'));
+    await tester.pump();
+
+    final selectableLines = tester
+        .widgetList<material.SelectableText>(
+          find.byType(material.SelectableText),
+        )
+        .map((widget) => widget.data ?? '')
+        .toList();
+    expect(
+      selectableLines.where((line) => line.startsWith('Output file: ')),
+      isNotEmpty,
+      reason: 'SelectableText lines: $selectableLines',
+    );
+    final remainingChinese = _visibleChinese(tester);
+    expect(remainingChinese, isEmpty, reason: remainingChinese.join('\n'));
+  });
 }
 
-List<String> _visibleChinese(WidgetTester tester) => tester
-    .widgetList<material.Text>(find.byType(material.Text))
-    .map((widget) => widget.data ?? '')
-    .where((text) => RegExp(r'[\u3400-\u9fff]').hasMatch(text))
-    .toList();
+List<String> _visibleChinese(WidgetTester tester) {
+  final data = <String>[
+    ...tester
+        .widgetList<material.Text>(find.byType(material.Text))
+        .map((widget) => widget.data ?? ''),
+    ...tester
+        .widgetList<material.SelectableText>(
+          find.byType(material.SelectableText),
+        )
+        .map((widget) => widget.data ?? ''),
+  ];
+  return data
+      .where((text) => RegExp(r'[\u3400-\u9fff]').hasMatch(text))
+      .toList();
+}

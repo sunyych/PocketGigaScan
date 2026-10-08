@@ -26,6 +26,7 @@ class BatchQueueItem {
     this.message,
     this.estimatedLayout = false,
     this.pauseRequested = false,
+    this.publishFailed = false,
     this.progress = 0,
     this.etaSeconds,
     this.elapsedSeconds = 0,
@@ -45,6 +46,10 @@ class BatchQueueItem {
   final String? message;
   final bool estimatedLayout;
   final bool pauseRequested;
+
+  /// True when the completed task's private export could not be published to
+  /// the chosen folder and the operator can retry publishing from the queue.
+  final bool publishFailed;
   final double progress;
   final int? etaSeconds;
   final int elapsedSeconds;
@@ -62,6 +67,8 @@ class BatchQueueItem {
     bool clearMessage = false,
     bool? estimatedLayout,
     bool? pauseRequested,
+    bool? publishFailed,
+    bool clearPublishFailed = false,
     double? progress,
     int? etaSeconds,
     bool clearEtaSeconds = false,
@@ -82,6 +89,9 @@ class BatchQueueItem {
     message: clearMessage ? null : message ?? this.message,
     estimatedLayout: estimatedLayout ?? this.estimatedLayout,
     pauseRequested: pauseRequested ?? this.pauseRequested,
+    publishFailed: clearPublishFailed
+        ? false
+        : publishFailed ?? this.publishFailed,
     progress: progress ?? this.progress,
     etaSeconds: clearEtaSeconds ? null : etaSeconds ?? this.etaSeconds,
     elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
@@ -100,6 +110,7 @@ class BatchQueueItem {
     'message': message,
     'estimatedLayout': estimatedLayout,
     'pauseRequested': pauseRequested,
+    'publishFailed': publishFailed,
     'progress': progress,
     'etaSeconds': etaSeconds,
     'elapsedSeconds': elapsedSeconds,
@@ -123,6 +134,7 @@ class BatchQueueItem {
     message: json['message'] as String?,
     estimatedLayout: json['estimatedLayout'] as bool? ?? false,
     pauseRequested: json['pauseRequested'] as bool? ?? false,
+    publishFailed: json['publishFailed'] as bool? ?? false,
     progress: (json['progress'] as num? ?? 0).toDouble(),
     etaSeconds: json['etaSeconds'] as int?,
     elapsedSeconds: json['elapsedSeconds'] as int? ?? 0,

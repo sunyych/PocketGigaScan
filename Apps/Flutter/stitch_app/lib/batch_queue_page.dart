@@ -754,7 +754,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                     icon: const Icon(Icons.zoom_in),
                   ),
                 if (item.state == BatchItemState.completed &&
-                    (item.message?.contains('发布失败') ?? false))
+                    item.publishFailed)
                   IconButton(
                     tooltip: StitchLocalizations.of(context).text('重试发布整图'),
                     onPressed: () =>

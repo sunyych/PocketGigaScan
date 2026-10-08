@@ -414,6 +414,7 @@ class BatchQueueController extends ChangeNotifier {
           result.publishError ??
           result.publishedExportPath ??
           result.exportPath,
+      publishFailed: result.publishError != null,
     );
   }
 
@@ -443,7 +444,10 @@ class BatchQueueController extends ChangeNotifier {
                 items.add(
                   completedTask?.publishError == null
                       ? item
-                      : item.copyWith(message: completedTask!.publishError),
+                      : item.copyWith(
+                        message: completedTask!.publishError,
+                        publishFailed: true,
+                      ),
                 );
               } else {
                 items.add(item);
@@ -645,6 +649,7 @@ class BatchQueueController extends ChangeNotifier {
                         completedTask.publishError ??
                         completedTask.publishedExportPath ??
                         savedDestination,
+                    publishFailed: completedTask.publishError != null,
                   ),
                 );
               } else {
@@ -1932,6 +1937,7 @@ class BatchQueueController extends ChangeNotifier {
                     completedTask.publishError ??
                     completedTask.publishedExportPath ??
                     path,
+                publishFailed: completedTask.publishError != null,
               );
             } else {
               await _saveTask(
@@ -2335,6 +2341,7 @@ class BatchQueueController extends ChangeNotifier {
               exportResultTask.publishError ??
               exportResultTask.publishedExportPath ??
               destination.path,
+          publishFailed: exportResultTask.publishError != null,
         );
       } else if (state == 'failed' || state == 'cancelled') {
         await runtimeService?.setProcessingActive(
@@ -2530,6 +2537,7 @@ class BatchQueueController extends ChangeNotifier {
                   completedTask.publishError ??
                   completedTask.publishedExportPath ??
                   destination,
+              publishFailed: completedTask.publishError != null,
             );
           } else {
             await _saveTask(
@@ -3363,12 +3371,20 @@ class BatchQueueController extends ChangeNotifier {
     BatchItemState state, {
     String? message,
     double? progress,
+    bool? publishFailed,
+    bool clearPublishFailed = false,
   }) async {
     final found = _find(queueId, itemId);
     if (found == null) return;
     await _replaceItem(
       found.index,
-      found.item.copyWith(state: state, message: message, progress: progress),
+      found.item.copyWith(
+        state: state,
+        message: message,
+        progress: progress,
+        publishFailed: publishFailed,
+        clearPublishFailed: clearPublishFailed,
+      ),
     );
   }
 

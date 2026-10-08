@@ -986,12 +986,12 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
           if (widget.mobileStorageService != null &&
               widget.exportMimeType != null) ...[
             IconButton(
-              tooltip: '保存整图',
+              tooltip: StitchLocalizations.of(context).text('保存整图'),
               onPressed: () => widget._saveExport(context),
               icon: const Icon(Icons.download),
             ),
             IconButton(
-              tooltip: '分享整图',
+              tooltip: StitchLocalizations.of(context).text('分享整图'),
               onPressed: () => widget._shareExport(context),
               icon: const Icon(Icons.ios_share),
             ),
@@ -1273,7 +1273,9 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
               style: Theme.of(context).textTheme.labelLarge,
             ),
             SelectableText(
-              '输出文件：${widget.exportFilePath}',
+              StitchLocalizations.of(context).text(
+                '输出文件：${widget.exportFilePath}',
+              ),
               maxLines: 2,
               style: Theme.of(context).textTheme.bodySmall,
             ),
@@ -1285,12 +1287,16 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
     );
   }
 
-  String _formatName(String path) => switch (p.extension(path).toLowerCase()) {
-    '.png' => 'PNG',
-    '.tif' || '.tiff' => 'TIFF / BigTIFF',
-    '.jxl' => 'JPEG XL',
-    final extension => '未知格式（$extension）',
-  };
+  String _formatName(String path) {
+    final isChinese = StitchLocalizations.of(context).isChinese;
+    final extension = p.extension(path).toLowerCase();
+    return switch (extension) {
+      '.png' => 'PNG',
+      '.tif' || '.tiff' => 'TIFF / BigTIFF',
+      '.jxl' => 'JPEG XL',
+      _ => isChinese ? '未知格式（$extension）' : 'Unknown format ($extension)',
+    };
+  }
 
   Widget _viewerBody() {
     if (_loading) return const Center(child: CircularProgressIndicator());
