@@ -2,6 +2,10 @@
 //!
 //! The renderer deliberately has no OpenCV/GPU dependency. It consumes the
 //! spherical JSON layout emitted by `spherical::align_json_detailed`.
+use crate::seam_ownership::{
+    adjust_candidates_for_content, coarse_cell_count, coarse_stride, content_disagreement,
+    regularize_owners, CoarseOwnershipMap, OwnershipCandidate,
+};
 use crate::texture_warp::{
     corrected_to_source, validate_source_plane_warp, SourcePlaneWarp,
     SOURCE_WARP_MAX_DISPLACEMENT_PX,
@@ -40,6 +44,18 @@ const SOURCE_QUALITY_BLUR_RELATIVE_MAX: f64 = 0.70;
 const SOURCE_QUALITY_BLUR_PEER_SHARPNESS: f64 = 18.0;
 const SOURCE_QUALITY_SHARPNESS_PATCH_RADIUS: i32 = 4;
 const GEOMETRY_CACHE_MAX_BYTES_PER_WORKER: u64 = 32 * 1024 * 1024;
+const SEAM_OWNERSHIP_MAX_CELLS: usize = 32_768;
+const SEAM_OWNERSHIP_MAX_CANDIDATES: usize = 4;
+const SEAM_OWNERSHIP_REGULARIZATION_COST: f32 = 0.045;
+const SEAM_OWNERSHIP_ITERATIONS: usize = 4;
+
+fn seam_ownership_bytes_per_cell() -> u64 {
+    let candidate_scratch = std::mem::size_of::<Vec<OwnershipCandidate>>()
+        + SEAM_OWNERSHIP_MAX_CANDIDATES * std::mem::size_of::<OwnershipCandidate>();
+    let solver_and_result = 2 * std::mem::size_of::<Option<usize>>() + std::mem::size_of::<f32>();
+    let unaligned = candidate_scratch + solver_and_result;
+    ((unaligned + 15) & !15) as u64
+}
 static RENDERER_IDENTITY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static SRGB_F32_THRESHOLDS: OnceLock<[u32; 256]> = OnceLock::new();
 static SRGB_F32_BUCKET_BASE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -90,7 +106,7 @@ impl BlendMode {
     fn model_name(self) -> &'static str {
         match self {
             Self::Feather => "source-edge-smoothstep-feather",
-            Self::Deghost => "sharpness-aware-max-score-softmax-ownership",
+            Self::Deghost => "sharpness-aware-global-coarse-ownership-v1",
         }
     }
 }
@@ -773,6 +789,167 @@ fn sample_geometry(source: &Source, world: [f64; 3]) -> Option<(f64, f64, f64, f
     Some((x, y, weight, ownership))
 }
 
+fn build_global_ownership_map(
+    width: u32,
+    height: u32,
+    bounds: [f64; 4],
+    sources: &[Source],
+    mut checkpoint: impl FnMut() -> bool,
+) -> crate::Result<CoarseOwnershipMap> {
+    let started = Instant::now();
+    let stride = coarse_stride(width, height, SEAM_OWNERSHIP_MAX_CELLS);
+    let columns = (width as usize).div_ceil(stride);
+    let rows = (height as usize).div_ceil(stride);
+    let cell_count = columns.saturating_mul(rows);
+    let mut stable_sources: Vec<usize> = (0..sources.len()).collect();
+    stable_sources.sort_by(|left, right| {
+        sources[*left]
+            .path
+            .to_string_lossy()
+            .cmp(&sources[*right].path.to_string_lossy())
+    });
+    let mut candidates: Vec<Vec<OwnershipCandidate>> =
+        std::iter::repeat_with(|| Vec::with_capacity(SEAM_OWNERSHIP_MAX_CANDIDATES))
+            .take(cell_count)
+            .collect();
+    for (rank, &source_index) in stable_sources.iter().enumerate() {
+        if !checkpoint() {
+            return Err(crate::Error::Cancelled);
+        }
+        let source = &sources[source_index];
+        let source_image = image::open(&source.path)?.into_rgba8();
+        let quality = SourceQualityMap::from_image(&source_image);
+        for cy in 0..rows {
+            if !checkpoint() {
+                return Err(crate::Error::Cancelled);
+            }
+            let py = (cy * stride + stride / 2).min(height as usize - 1) as u32;
+            let pitch =
+                bounds[3] - (f64::from(py) + 0.5) / f64::from(height) * (bounds[3] - bounds[2]);
+            let (sp, cp) = pitch.sin_cos();
+            for cx in 0..columns {
+                let px = (cx * stride + stride / 2).min(width as usize - 1) as u32;
+                let yaw =
+                    bounds[0] + (f64::from(px) + 0.5) / f64::from(width) * (bounds[1] - bounds[0]);
+                let (sy, cyaw) = yaw.sin_cos();
+                let world = [sy * cp, sp, cyaw * cp];
+                let Some((source_x, source_y, _, ownership)) = sample_geometry(source, world)
+                else {
+                    continue;
+                };
+                let sampled = source_image.get_pixel(
+                    source_x.round().clamp(0.0, f64::from(source.width - 1)) as u32,
+                    source_y.round().clamp(0.0, f64::from(source.height - 1)) as u32,
+                );
+                let (texture, obstruction) =
+                    quality.sample(source.width, source.height, source_x, source_y);
+                let sharpness = quality.sharpness(source.width, source.height, source_x, source_y);
+                let cell = &mut candidates[cy * columns + cx];
+                let obstruction_penalty = if obstruction >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
+                    && texture <= SOURCE_QUALITY_LOW_TEXTURE_MAX
+                {
+                    0.10
+                } else {
+                    0.0
+                };
+                let candidate = OwnershipCandidate {
+                    source: rank,
+                    unary_cost: (0.5 - ownership) as f32 + obstruction_penalty,
+                    color: [sampled[0], sampled[1], sampled[2]],
+                    texture: texture.round().clamp(0.0, 255.0) as u8,
+                    sharpness: sharpness.round().clamp(0.0, 255.0) as u8,
+                    obstruction: (obstruction * 255.0).round().clamp(0.0, 255.0) as u8,
+                };
+                if cell.len() < SEAM_OWNERSHIP_MAX_CANDIDATES {
+                    cell.push(candidate);
+                    continue;
+                }
+                let worst = cell
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, left), (_, right)| left.unary_cost.total_cmp(&right.unary_cost))
+                    .map(|(index, _)| index)
+                    .expect("candidate set has its bounded capacity");
+                if candidate.unary_cost < cell[worst].unary_cost
+                    || (candidate.unary_cost == cell[worst].unary_cost
+                        && candidate.source < cell[worst].source)
+                {
+                    cell[worst] = candidate;
+                }
+            }
+        }
+    }
+    for cell in &mut candidates {
+        adjust_candidates_for_content(
+            cell,
+            SOURCE_QUALITY_BLUR_PEER_TEXTURE as u8,
+            SOURCE_QUALITY_BLUR_PEER_SHARPNESS as u8,
+            SOURCE_QUALITY_BLUR_RELATIVE_MAX as f32,
+        );
+        cell.sort_by(|left, right| {
+            left.unary_cost
+                .total_cmp(&right.unary_cost)
+                .then_with(|| left.source.cmp(&right.source))
+        });
+        cell.truncate(2);
+    }
+    let stable_owners = regularize_owners(
+        columns,
+        rows,
+        &candidates,
+        SEAM_OWNERSHIP_REGULARIZATION_COST,
+        SEAM_OWNERSHIP_ITERATIONS,
+        &mut checkpoint,
+    )
+    .ok_or(crate::Error::Cancelled)?;
+    let confidence = candidates
+        .iter()
+        .zip(stable_owners.iter())
+        .map(|(cell, owner)| {
+            let Some(owner) = owner else {
+                return 0.0;
+            };
+            let Some(owner_cost) = cell
+                .iter()
+                .find(|candidate| candidate.source == *owner)
+                .map(|candidate| candidate.unary_cost)
+            else {
+                return 0.0;
+            };
+            let Some(other_cost) = cell
+                .iter()
+                .filter(|candidate| candidate.source != *owner)
+                .map(|candidate| candidate.unary_cost)
+                .min_by(f32::total_cmp)
+            else {
+                return 0.0;
+            };
+            let geometry_confidence = ((other_cost - owner_cost) / 0.20).clamp(0.0, 1.0);
+            let content_confidence = if cell.len() >= 2 && owner_cost <= other_cost + 0.05 {
+                let delta = content_disagreement(cell[0].color, cell[1].color);
+                ((delta - 0.08) / 0.22).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            geometry_confidence.max(content_confidence)
+        })
+        .collect();
+    let owners = stable_owners
+        .into_iter()
+        .map(|rank| rank.map(|rank| stable_sources[rank]))
+        .collect();
+    Ok(CoarseOwnershipMap {
+        width: columns,
+        height: rows,
+        stride,
+        owners,
+        confidence,
+        prepass_micros: started.elapsed().as_micros() as u64,
+        decoded_sources: sources.len() as u64,
+        scratch_bytes_reserved: (cell_count as u64).saturating_mul(seam_ownership_bytes_per_cell()),
+    })
+}
+
 #[cfg(test)]
 fn sample(
     source: &Source,
@@ -1025,8 +1202,30 @@ fn render_layout_tiles_with_options_internal(
     memory_budget_mib: usize,
     workers_requested: usize,
     use_source_cache: bool,
+    checkpoint: impl FnMut(u64, u64) -> bool,
+    sharpness_aware: bool,
+) -> crate::Result<Value> {
+    render_layout_tiles_with_options_internal_and_ownership(
+        layout,
+        output,
+        memory_budget_mib,
+        workers_requested,
+        use_source_cache,
+        checkpoint,
+        sharpness_aware,
+        sharpness_aware,
+    )
+}
+
+fn render_layout_tiles_with_options_internal_and_ownership(
+    layout: &Value,
+    output: &Path,
+    memory_budget_mib: usize,
+    workers_requested: usize,
+    use_source_cache: bool,
     mut checkpoint: impl FnMut(u64, u64) -> bool,
     sharpness_aware: bool,
+    ownership_aware: bool,
 ) -> crate::Result<Value> {
     if !(32..=crate::job_resources::MAX_JOB_MEMORY_MIB).contains(&memory_budget_mib) {
         return Err(crate::Error::Invalid(format!(
@@ -1113,7 +1312,13 @@ fn render_layout_tiles_with_options_internal(
     let one_worker = worker_base.checked_add(decode_slot_bytes).ok_or_else(|| {
         crate::Error::Invalid("renderer decode memory accounting overflowed".into())
     })?;
-    let fixed_reserve = source_quality_map_reserve;
+    let seam_ownership_reserve = if blend_mode == BlendMode::Deghost && ownership_aware {
+        (coarse_cell_count(width, height, SEAM_OWNERSHIP_MAX_CELLS) as u64)
+            .saturating_mul(seam_ownership_bytes_per_cell())
+    } else {
+        0
+    };
+    let fixed_reserve = source_quality_map_reserve.saturating_add(seam_ownership_reserve);
     if one_worker
         .checked_add(fixed_reserve)
         .map_or(true, |bytes| bytes > budget_bytes)
@@ -1147,6 +1352,7 @@ fn render_layout_tiles_with_options_internal(
         .checked_mul(effective_workers as u64)
         .and_then(|bytes| bytes.checked_add(decode_slot_reserve))
         .and_then(|bytes| bytes.checked_add(source_quality_map_reserve))
+        .and_then(|bytes| bytes.checked_add(seam_ownership_reserve))
         .ok_or_else(|| {
             crate::Error::Invalid("renderer active memory reservation overflowed".into())
         })?;
@@ -1214,6 +1420,17 @@ fn render_layout_tiles_with_options_internal(
         0
     };
     let cache = Arc::new(DecodeCache::new(cache_limit, effective_workers.max(1)));
+    let ownership_map = if blend_mode == BlendMode::Deghost && ownership_aware {
+        Some(build_global_ownership_map(
+            width,
+            height,
+            bounds,
+            &sources,
+            || checkpoint(completed, total),
+        )?)
+    } else {
+        None
+    };
     let hits = AtomicU64::new(0);
     let misses = AtomicU64::new(0);
     let decodes = AtomicU64::new(0);
@@ -1253,6 +1470,7 @@ fn render_layout_tiles_with_options_internal(
         }
     }
     tasks = spatial_block_order(tasks, cols as u32, rows as u32, 4);
+    let ownership_map_ref = ownership_map.as_ref();
     for batch in tasks.chunks(effective_workers) {
         if !checkpoint(completed, total) {
             return Err(crate::Error::Cancelled);
@@ -1260,6 +1478,7 @@ fn render_layout_tiles_with_options_internal(
         let results = std::thread::scope(|scope| {
             let mut joins = Vec::new();
             for &(row, col) in batch {
+                let ownership_map_ref = ownership_map_ref;
                 let cache = cache.clone();
                 let hits = &hits;
                 let misses = &misses;
@@ -1308,6 +1527,7 @@ fn render_layout_tiles_with_options_internal(
                         use_source_cache,
                         blend_mode,
                         sharpness_aware,
+                        ownership_map_ref,
                     )
                 }));
             }
@@ -1328,10 +1548,14 @@ fn render_layout_tiles_with_options_internal(
             }
         }
     }
+    let seam_diagnostics = ownership_map.as_ref().map_or_else(
+        || serde_json::json!({"enabled":false,"stridePx":0,"cellCount":0,"prepassMs":0.0,"decodedSourceCount":0,"mapAndScratchBytesReserved":0}),
+        |map| serde_json::json!({"enabled":true,"stridePx":map.stride,"cellCount":map.owners.len(),"prepassMs":map.prepass_micros as f64/1000.0,"decodedSourceCount":map.decoded_sources,"mapAndScratchBytesReserved":map.scratch_bytes_reserved}),
+    );
     let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"seamOwnership":seam_diagnostics,"renderMs":render_ms}),
     )
 }
 
@@ -1673,6 +1897,7 @@ fn render_one_tile(
     use_cache: bool,
     blend_mode: BlendMode,
     sharpness_aware: bool,
+    ownership_map: Option<&CoarseOwnershipMap>,
 ) -> crate::Result<()> {
     let active = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
     peak_workers.fetch_max(active, Ordering::Relaxed);
@@ -1949,7 +2174,7 @@ fn render_one_tile(
                     let (rgb, weight, ownership, x, y) =
                         sample_with_geometry(source, &image, geometry);
                     let cell = &mut accum[index];
-                    let blend_weight = match blend_mode {
+                    let mut blend_weight = match blend_mode {
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
                             let index = (py * tw + px) as usize;
@@ -1977,6 +2202,30 @@ fn render_one_tile(
                             )
                         }
                     };
+                    if blend_mode == BlendMode::Deghost {
+                        if let Some(ownership_map) = ownership_map {
+                            let global_x = left + px;
+                            let global_y = top + py;
+                            let owner_valid = ownership_map
+                                .owner_at(global_x, global_y)
+                                .is_some_and(|owner| {
+                                    sample_geometry(&sources[owner], world).is_some()
+                                });
+                            let probability = if owner_valid {
+                                ownership_map.source_probability(
+                                    source_index,
+                                    global_x,
+                                    global_y,
+                                    4,
+                                )
+                            } else {
+                                1.0
+                            };
+                            let confidence = ownership_map.confidence_at(global_x, global_y);
+                            let prior = 1.0 - confidence + confidence * probability;
+                            blend_weight *= f64::from(0.05 + 0.95 * prior);
+                        }
+                    }
                     accumulate_weighted(cell, rgb, blend_weight);
                 }
             }
@@ -2964,6 +3213,149 @@ mod tests {
     }
 
     #[test]
+    fn global_ownership_reduces_moving_patch_ghosts_without_softening_static_detail() {
+        const SIZE: u32 = 128;
+        let root = std::env::temp_dir().join(format!(
+            "lumia-seam-patch-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source_a = root.join("a.png");
+        let source_b = root.join("b.png");
+        let mut image_a = patterned_source(SIZE, SIZE);
+        let mut image_b = image_a.clone();
+        for y in 52..76 {
+            for x in 20..40 {
+                image_a.put_pixel(x, y, Rgba([242, 28, 24, 255]));
+            }
+            for x in 82..102 {
+                image_b.put_pixel(x, y, Rgba([18, 38, 244, 255]));
+            }
+        }
+        image_a.save(&source_a).unwrap();
+        image_b.save(&source_b).unwrap();
+        let layout = serde_json::json!({
+            "schemaVersion":1,"projection":"spherical","width":SIZE,"height":SIZE,
+            "yawMinRad":-0.7,"yawMaxRad":0.7,"pitchMinRad":-0.7,"pitchMaxRad":0.7,
+            "renderBlendMode":"deghost",
+            "tiles":[
+                {"path":source_b,"width":SIZE,"height":SIZE,"fx":72.0,"fy":72.0,
+                 "cx":63.5,"cy":63.5,"cameraToWorld":[1,0,0,0,1,0,0,0,1]},
+                {"path":source_a,"width":SIZE,"height":SIZE,"fx":72.0,"fy":72.0,
+                 "cx":63.5,"cy":63.5,"cameraToWorld":[1,0,0,0,1,0,0,0,1]}
+            ]
+        });
+        let legacy_dir = root.join("legacy");
+        let masked_dir = root.join("masked");
+        let expected_dir = root.join("expected-source-a");
+        let alternative_dir = root.join("expected-source-b");
+        let checkpoint = |_, _| true;
+        render_layout_tiles_with_options_internal_and_ownership(
+            &layout,
+            &legacy_dir,
+            32,
+            1,
+            false,
+            checkpoint,
+            true,
+            false,
+        )
+        .unwrap();
+        let mut alternative_layout = layout.clone();
+        alternative_layout["tiles"] = serde_json::json!([layout["tiles"][0].clone()]);
+        render_layout_tiles_with_options_internal(
+            &alternative_layout,
+            &alternative_dir,
+            32,
+            1,
+            false,
+            checkpoint,
+            false,
+        )
+        .unwrap();
+        render_layout_tiles_with_options_internal(
+            &layout,
+            &masked_dir,
+            32,
+            1,
+            false,
+            checkpoint,
+            true,
+        )
+        .unwrap();
+        let mut expected_layout = layout.clone();
+        expected_layout["tiles"] = serde_json::json!([layout["tiles"][1].clone()]);
+        render_layout_tiles_with_options_internal(
+            &expected_layout,
+            &expected_dir,
+            32,
+            1,
+            false,
+            checkpoint,
+            false,
+        )
+        .unwrap();
+        let legacy = collect_level_zero(&legacy_dir, SIZE, SIZE);
+        let masked = collect_level_zero(&masked_dir, SIZE, SIZE);
+        let expected = collect_level_zero(&expected_dir, SIZE, SIZE);
+        let alternative = collect_level_zero(&alternative_dir, SIZE, SIZE);
+        let mut legacy_patch_error = 0u64;
+        let mut masked_patch_error = 0u64;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let expected_a = expected.get_pixel(x, y).0;
+                let expected_b = alternative.get_pixel(x, y).0;
+                let error_to_either_source = |pixel: &[u8; 4]| {
+                    let to_a = pixel
+                        .iter()
+                        .zip(expected_a.iter())
+                        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                        .sum::<u64>();
+                    let to_b = pixel
+                        .iter()
+                        .zip(expected_b.iter())
+                        .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                        .sum::<u64>();
+                    to_a.min(to_b)
+                };
+                legacy_patch_error += error_to_either_source(&legacy.get_pixel(x, y).0);
+                masked_patch_error += error_to_either_source(&masked.get_pixel(x, y).0);
+            }
+        }
+        assert!(
+            masked_patch_error * 5 < legacy_patch_error * 4,
+            "coherent ownership should suppress the shifted patch ghost: legacy={legacy_patch_error}, masked={masked_patch_error}"
+        );
+        let mut static_error = 0u64;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let in_moving_patch =
+                    (49..81).contains(&y) && ((14..37).contains(&x) || (86..111).contains(&x));
+                if in_moving_patch {
+                    continue;
+                }
+                static_error += masked
+                    .get_pixel(x, y)
+                    .0
+                    .iter()
+                    .zip(expected.get_pixel(x, y).0.iter())
+                    .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                    .sum::<u64>();
+            }
+        }
+        let static_samples = u64::from(SIZE * SIZE - (23 * 32) - (25 * 32)) * 3;
+        assert!(
+            static_error as f64 / (static_samples as f64) < 0.05,
+            "static source detail changed by {static_error} total error over {static_samples} channel samples"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn source_quality_map_flags_only_broad_dark_smooth_border_occlusion() {
         // Preserve the original moderate-contrast fixture as a conservative
         // false-positive guard: its sampled ring contrast is ~22.8, just
@@ -3263,8 +3655,8 @@ mod tests {
             false,
         )
         .unwrap();
-        render_layout_tiles_with_options_internal(
-            &layout, &sharp_dir, 32, 1, true, checkpoint, true,
+        render_layout_tiles_with_options_internal_and_ownership(
+            &layout, &sharp_dir, 32, 1, true, checkpoint, true, false,
         )
         .unwrap();
         let legacy = collect_level_zero(&legacy_dir, WIDTH, HEIGHT);
@@ -3898,7 +4290,7 @@ mod tests {
         assert_eq!(serial["blendModel"], "source-edge-smoothstep-feather");
         assert_eq!(
             deghost_serial["blendModel"],
-            "sharpness-aware-max-score-softmax-ownership"
+            "sharpness-aware-global-coarse-ownership-v1"
         );
         assert_eq!(
             deghost_serial["completedTiles"],
@@ -3982,7 +4374,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             original["blendModel"],
-            "sharpness-aware-max-score-softmax-ownership"
+            "sharpness-aware-global-coarse-ownership-v1"
         );
         assert_eq!(original["geometryCacheEnabled"], true);
         assert!(original["geometryCachedSourceTileCount"].as_u64().unwrap() > 0);

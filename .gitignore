@@ -81,6 +81,7 @@ __pycache__/
 !/docs/gigascan/DWARF-MOBILE-IOS-HANDOFF.md
 !/docs/gigascan/ANDROID-STITCH-PLAN.md
 !/docs/gigascan/BLUR-REPAIR-PLAN.md
+!/docs/gigascan/PATCH-SEAM-REPAIR-PLAN.md
 !/docs/gigascan/LOOP-REGRESSION-PLAN.md
 !/docs/gigascan/DWARF-PERFORMANCE-DESIGN.md
 !/docs/gigascan/HOTPATH-SPEEDUP-DESIGN.md
