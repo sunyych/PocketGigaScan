@@ -133,6 +133,8 @@ void main() {
         (4000, 3000),
       );
       expect(batch.photos.single.sha256, isNotEmpty);
+      expect(await source.exists(), isTrue);
+      expect(await source.readAsBytes(), bytes);
     },
   );
 

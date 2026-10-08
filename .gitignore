@@ -52,6 +52,7 @@ __pycache__/
 !/.github/workflows/
 /.github/workflows/*
 !/.github/workflows/windows-build.yml
+!/.github/workflows/android-build.yml
 /Dependencies/*
 !/Dependencies/flutter-stitch-core.json
 /docs/*
@@ -75,6 +76,9 @@ __pycache__/
 !/docs/gigascan/FLUTTER-STITCH.md
 !/docs/gigascan/STITCH-TESTING.md
 !/docs/gigascan/ANDROID-STITCH-DESIGN.md
+!/docs/gigascan/DWARF-MOBILE-DEVICE-IMPORT-RESEARCH.md
+!/docs/gigascan/DWARF-MOBILE-IMPORT-PLAN.md
+!/docs/gigascan/DWARF-MOBILE-IOS-HANDOFF.md
 !/docs/gigascan/ANDROID-STITCH-PLAN.md
 !/docs/gigascan/BLUR-REPAIR-PLAN.md
 !/docs/gigascan/LOOP-REGRESSION-PLAN.md
@@ -94,6 +98,7 @@ __pycache__/
 !/docs/gigascan/evidence/DWARF-PERFORMANCE-2026-10-06.md
 !/docs/gigascan/evidence/HOTPATH-RECOVERY-2026-10-07.md
 !/docs/gigascan/evidence/WINDOWS-IMPORT-2026-10-07.md
+!/docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
@@ -105,10 +110,13 @@ __pycache__/
 /scripts/tests/*
 !/scripts/tests/test_verify_spherical_seam_alignment.py
 !/scripts/tests/test_benchmark_dwarf_render.py
-/Apps/Flutter/stitch_app/ios/
+/Apps/Flutter/stitch_app/ios/Native/
+/Apps/Flutter/stitch_app/ios/Flutter/NativeCore.generated.xcconfig
 /Apps/Flutter/stitch_app/macos/
-/Apps/Flutter/stitch_app/APPLE-BUILD.md
 /Apps/Flutter/stitch_app/tool/native/apple/
+!/Apps/Flutter/stitch_app/tool/native/apple/
+/Apps/Flutter/stitch_app/tool/native/apple/*
+!/Apps/Flutter/stitch_app/tool/native/apple/build_apple_native.sh
 **/test/failures/
 **/*.iml
 **/local.properties

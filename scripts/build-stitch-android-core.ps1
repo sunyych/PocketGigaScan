@@ -205,6 +205,32 @@ function Copy-AndroidLicenseFile([string]$Source, [string]$Destination, [string]
         sha256=(Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
     })
 }
+function Publish-AndroidLicenseStage(
+    [string]$StageRoot,
+    [string]$AssetsOwner,
+    [string]$LicenseRoot,
+    [string]$FlutterCoreRoot,
+    [string]$PrivateStagingRoot,
+    [string]$BackupRoot,
+    [string]$CacheRoot
+) {
+    $assetsOwner = Assert-OwnedPath $AssetsOwner $FlutterCoreRoot
+    $licenseRoot = Assert-OwnedPath $LicenseRoot $assetsOwner
+    $privateStagingRoot = Assert-OwnedPath $PrivateStagingRoot $CacheRoot
+    $backupRoot = Assert-OwnedPath $BackupRoot $CacheRoot
+    $stageRoot = Assert-OwnedPath $StageRoot $privateStagingRoot
+    New-Item -ItemType Directory -Force -Path $assetsOwner, $backupRoot | Out-Null
+    $backup = Assert-OwnedPath (Join-Path $backupRoot "native-licenses-$([guid]::NewGuid().ToString('N'))") $backupRoot
+    if (Test-Path -LiteralPath $licenseRoot) { Move-Item -LiteralPath $licenseRoot -Destination $backup }
+    try {
+        Move-Item -LiteralPath $stageRoot -Destination $licenseRoot
+    } catch {
+        if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $licenseRoot)) {
+            Move-Item -LiteralPath $backup -Destination $licenseRoot
+        }
+        throw
+    }
+}
 function Stage-AndroidLicenses {
     $assetsOwner = Join-Path $repo '.local\flutter-stitch-core\android-assets'
     $licenseRoot = Join-Path $assetsOwner 'native-licenses'
@@ -297,19 +323,14 @@ function Stage-AndroidLicenses {
     }
     $manifestPath = Join-Path $androidLicenseStageRoot 'manifest.json'
     [IO.File]::WriteAllText($manifestPath, ($sourceManifest | ConvertTo-Json -Depth 8), (New-Object System.Text.UTF8Encoding -ArgumentList $false))
-    $assetsOwner = Assert-OwnedPath $assetsOwner (Join-Path $repo '.local\flutter-stitch-core')
-    $licenseRoot = Assert-OwnedPath $licenseRoot $assetsOwner
-    $backup = Assert-OwnedPath (Join-Path $backupRoot "native-licenses-$([guid]::NewGuid().ToString('N'))") $backupRoot
-    Assert-OwnedPath $androidLicenseStageRoot $privateStagingRoot
-    if (Test-Path -LiteralPath $licenseRoot) { Move-Item -LiteralPath $licenseRoot -Destination $backup }
-    try {
-        Move-Item -LiteralPath $androidLicenseStageRoot -Destination $licenseRoot
-    } catch {
-        if ((Test-Path -LiteralPath $backup) -and -not (Test-Path -LiteralPath $licenseRoot)) {
-            Move-Item -LiteralPath $backup -Destination $licenseRoot
-        }
-        throw
-    }
+    Publish-AndroidLicenseStage `
+        $androidLicenseStageRoot `
+        $assetsOwner `
+        $licenseRoot `
+        (Join-Path $repo '.local\flutter-stitch-core') `
+        $privateStagingRoot `
+        $backupRoot `
+        $cache
 }
 
 if ($ApiLevel -ne 29) { throw 'This builder pins Android API 29.' }
@@ -392,7 +413,7 @@ foreach ($abi in $Abis) {
     $opencvThirdParty = Join-Path $opencvRoot "3rdparty\libs\$($target.OpenCvDir)"
     Require-Path $opencvStatic "OpenCV static libraries ($abi)"
     Require-Path $opencvThirdParty "OpenCV dependency libraries ($abi)"
-    $moduleLibs = @('opencv_stitching','opencv_calib3d','opencv_features2d','opencv_flann','opencv_imgcodecs','opencv_imgproc','opencv_core')
+    $moduleLibs = @('opencv_stitching','opencv_calib3d','opencv_features2d','opencv_flann','opencv_imgcodecs','opencv_imgproc','opencv_photo','opencv_core')
     $commonLibs = @('ade','tbb','ittnotify','libjpeg-turbo','libwebp','libpng','libtiff','libopenjp2','IlmImf','cpufeatures','libprotobuf','z','dl','log','m') + $target.Extra
     $triple = $target.Triple
     $toolPrefix = "$triple$ApiLevel"

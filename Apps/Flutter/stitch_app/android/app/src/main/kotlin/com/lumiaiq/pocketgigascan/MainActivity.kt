@@ -63,6 +63,26 @@ class MainActivity : FlutterActivity() {
                 result.success(mapOf("state" to state))
             }
 
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumiaiq.pocketgigascan/deviceNetwork")
+            .setMethodCallHandler { call, result ->
+                if (call.method != "openWifiSettings") {
+                    result.notImplemented()
+                    return@setMethodCallHandler
+                }
+                try {
+                    startActivity(Intent(android.provider.Settings.ACTION_WIFI_SETTINGS))
+                    result.success(mapOf(
+                        "opened" to true,
+                        "guidance" to "Connect to the DWARF3 Wi-Fi network, then return to PocketGigaScan.",
+                    ))
+                } catch (error: Exception) {
+                    result.success(mapOf(
+                        "opened" to false,
+                        "guidance" to "Open Android Settings > Network & internet > Internet and connect to the DWARF3 Wi-Fi network. (${error.message ?: "Wi-Fi settings unavailable"})",
+                    ))
+                }
+            }
+
         runtime = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.lumiaiq.pocketgigascan/runtime")
         runtime.setMethodCallHandler { call, result ->
             when (call.method) {

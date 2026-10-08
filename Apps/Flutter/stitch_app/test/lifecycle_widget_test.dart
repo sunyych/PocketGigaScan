@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/services.dart';
 import 'dart:io';
 import 'package:stitch_app/main.dart';
+import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
@@ -121,6 +122,23 @@ class NoopForegroundWorkLock implements ForegroundWorkLock {
   Future<void> disable() async {}
 }
 
+class RecordingForegroundWorkLock implements ForegroundWorkLock {
+  final List<String> events = [];
+  bool enabled = false;
+
+  @override
+  Future<void> enable() async {
+    enabled = true;
+    events.add('enable');
+  }
+
+  @override
+  Future<void> disable() async {
+    enabled = false;
+    events.add('disable');
+  }
+}
+
 StitchTask fixture(
   StitchPhase phase, {
   String id = 'fixture',
@@ -158,31 +176,75 @@ Future<EmptyBatchQueueController?> pumpPage(
   PowerState power, {
   required bool mobile,
   bool android = false,
+  List<BatchQueue>? initialQueues,
   MobileRuntimeService? runtimeService,
   ForegroundWorkLock? foregroundWorkLock,
   List<StitchTask>? tasks,
   FakeRepository? repository,
+  Key? pageKey,
+  Map<String, Object?>? initialManifest,
 }) async {
   final taskRepository = repository ?? FakeRepository(tasks ?? [task]);
-  final queueController = android
-      ? EmptyBatchQueueController(api: api, taskRepository: taskRepository)
+  var effectiveRuntime = runtimeService;
+  if (mobile && !android && effectiveRuntime == null) {
+    const channel = MethodChannel('test.lifecycle-ios-runtime');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+          switch (call.method) {
+            case 'readResourceBudget':
+              return <String, Object?>{
+                'totalMemoryMiB': 4096,
+                'availableMemoryMiB': 2048,
+                'cpuCount': 8,
+                'availableStorageMiB': 4096,
+                'thermalStatus': 'none',
+              };
+            case 'readPendingTimeoutJobs':
+              return <String>[];
+            case 'setProcessingActive':
+            case 'acknowledgeTimeoutJobs':
+              return true;
+          }
+          return null;
+        });
+    effectiveRuntime = MobileRuntimeService(channel: channel);
+    addTearDown(() async {
+      await effectiveRuntime?.dispose();
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+    });
+  }
+  final queueController = mobile
+      ? EmptyBatchQueueController(
+          api: api,
+          taskRepository: taskRepository,
+          initialQueues: initialQueues ?? const <BatchQueue>[],
+        )
       : null;
   await tester.pumpWidget(
     ChineseTestApp(
       home: StitchHomePage(
+        key: pageKey,
         initialTask: task,
+        initialManifest: initialManifest,
         jobApi: api,
         powerGate: FakePower(power),
         repository: taskRepository,
         batchQueueController: queueController,
         mobileOverride: mobile,
         androidOverride: android,
-        mobileRuntimeService: runtimeService,
+        mobileRuntimeService: effectiveRuntime,
         foregroundWorkLock: foregroundWorkLock ?? NoopForegroundWorkLock(),
       ),
     ),
   );
   await tester.pump();
+  if (mobile) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(milliseconds: 20));
+  }
   return queueController;
 }
 
@@ -246,6 +308,146 @@ void main() {
       'Mobile single-task start did not reach the native API',
     );
     expect(api.starts, 1);
+  });
+
+  testWidgets(
+    'shared foreground lock stays enabled until single and queue work finish',
+    (tester) async {
+      final output = Directory(
+        '${Directory.systemTemp.path}${Platform.pathSeparator}'
+        'shared-lock-${DateTime.now().microsecondsSinceEpoch}',
+      )..createSync();
+      addTearDown(() => output.delete(recursive: true));
+      final task = fixture(
+        StitchPhase.imported,
+        outputDirectory: '${output.path}${Platform.pathSeparator}render',
+      );
+      final tasks = [task];
+      final api = FakeApi();
+      final lock = RecordingForegroundWorkLock();
+      final queues = <BatchQueue>[
+        BatchQueue(
+          id: 'queue-1',
+          createdAt: DateTime.utc(2026),
+          parentDirectory: 'input',
+          outputDirectory: 'output',
+          items: const [
+            BatchQueueItem(
+              id: 'queue-item-1',
+              taskId: 'queue-task-1',
+              name: 'Queued panorama',
+              sourceDirectory: 'input/panorama',
+              state: BatchItemState.ready,
+            ),
+          ],
+        ),
+      ];
+      final controller = await pumpPage(
+        tester,
+        task,
+        api,
+        PowerState.battery,
+        mobile: true,
+        foregroundWorkLock: lock,
+        tasks: tasks,
+        initialQueues: queues,
+      );
+      controller!.notifyListeners();
+      await _pumpUntil(
+        tester,
+        () => lock.events.isNotEmpty,
+        'Idle foreground lock state did not settle',
+      );
+      expect(lock.enabled, isFalse);
+      lock.events.clear();
+      await _pumpUntilStartEnabled(tester);
+      await tester.tap(find.widgetWithText(FilledButton, '开始合成'));
+      await _pumpUntil(
+        tester,
+        () => api.starts == 1,
+        'Single-task start did not reach the native API',
+      );
+      expect(tasks.single.phase, StitchPhase.queued);
+      await _pumpUntil(
+        tester,
+        () => lock.enabled,
+        'Single-task start did not enable the foreground lock',
+      );
+      expect(api.starts, 1);
+
+      await _pumpUntil(
+        tester,
+        () => tasks.single.phase == StitchPhase.running,
+        'Queued single task did not transition to running',
+      );
+      queues[0] = queues.single.copyWith(
+        items: [
+          queues.single.items.single.copyWith(state: BatchItemState.running),
+        ],
+      );
+      controller.notifyListeners();
+
+      api.statusState = 'completed';
+      await _pumpUntil(
+        tester,
+        () => tasks.single.phase == StitchPhase.completed,
+        'Single task did not reach completion',
+      );
+      expect(lock.enabled, isTrue);
+      expect(lock.events, ['enable']);
+
+      queues[0] = queues.single.copyWith(
+        items: [
+          queues.single.items.single.copyWith(state: BatchItemState.completed),
+        ],
+      );
+      controller.notifyListeners();
+      await _pumpUntil(
+        tester,
+        () => !lock.enabled,
+        'Shared foreground lock stayed enabled after the queue completed',
+      );
+      expect(lock.events, ['enable', 'disable']);
+      await tester.pumpWidget(const SizedBox());
+      controller.dispose();
+    },
+  );
+
+  testWidgets('main progress uses active queue item progress', (tester) async {
+    final task = fixture(StitchPhase.completed, id: 'queue-progress-task');
+    final queueController = await pumpPage(
+      tester,
+      task,
+      FakeApi(),
+      PowerState.battery,
+      mobile: true,
+      initialQueues: [
+        BatchQueue(
+          id: 'queue-progress',
+          createdAt: DateTime.utc(2026),
+          parentDirectory: 'input',
+          outputDirectory: 'output',
+          items: [
+            BatchQueueItem(
+              id: 'queue-progress-item',
+              taskId: task.id,
+              name: 'Exporting panorama',
+              sourceDirectory: 'input/panorama',
+              state: BatchItemState.exporting,
+              progress: 0.42,
+            ),
+          ],
+        ),
+      ],
+    );
+    final progress = tester.widget<LinearProgressIndicator>(
+      find.byType(LinearProgressIndicator),
+    );
+    expect(progress.value, closeTo(0.42, 1e-8));
+    expect(find.textContaining('42%'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox());
+    queueController?.dispose();
   });
 
   testWidgets('Android guard failure prevents native job start', (
@@ -736,7 +938,11 @@ void main() {
     );
     tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     await tester.pump();
-    expect(api.pauses, 1);
+    await _pumpUntil(
+      tester,
+      () => api.pauses == 1,
+      'Mobile task did not pause',
+    );
   });
 
   testWidgets('desktop background leaves the native job running', (
@@ -795,30 +1001,41 @@ void main() {
         PowerState.unknown,
         mobile: true,
       );
+      await _pumpUntil(tester, () {
+        final finder = find.widgetWithText(FilledButton, '恢复');
+        return finder.evaluate().isNotEmpty &&
+            tester.widget<FilledButton>(finder).onPressed != null;
+      }, 'Paused mobile task did not become resumable');
       await tester.tap(find.text('恢复'));
-      await tester.pump();
-      expect(api.resumes, 1);
+      await _pumpUntil(
+        tester,
+        () => api.resumes == 1,
+        'Mobile resume did not reach native API',
+      );
 
       final completedApi = FakeApi();
-      await tester.pumpWidget(
-        ChineseTestApp(
-          home: StitchHomePage(
-            key: const ValueKey('completed-task'),
-            initialTask: fixture(StitchPhase.completed, jobId: 'test-job'),
-            initialManifest: const {},
-            jobApi: completedApi,
-            powerGate: FakePower(PowerState.unknown),
-            repository: FakeRepository([]),
-            mobileOverride: true,
-            foregroundWorkLock: NoopForegroundWorkLock(),
-          ),
-        ),
+      await tester.pumpWidget(const SizedBox());
+      final completedQueue = await pumpPage(
+        tester,
+        fixture(StitchPhase.completed, jobId: 'test-job'),
+        completedApi,
+        PowerState.unknown,
+        mobile: true,
+        repository: FakeRepository([]),
+        pageKey: const ValueKey('completed-task'),
+        initialManifest: const {},
       );
+      await _pumpUntil(tester, () {
+        final finder = find.widgetWithText(OutlinedButton, '导出完整 PNG');
+        return finder.evaluate().isNotEmpty &&
+            tester.widget<OutlinedButton>(finder).onPressed != null;
+      }, 'Completed mobile task did not become exportable');
       final exportButton = tester.widget<OutlinedButton>(
         find.widgetWithText(OutlinedButton, '导出完整 PNG'),
       );
       expect(exportButton.onPressed, isNotNull);
       expect(completedApi.exports, 0);
+      completedQueue?.dispose();
     },
   );
 }

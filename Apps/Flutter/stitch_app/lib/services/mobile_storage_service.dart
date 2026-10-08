@@ -1,6 +1,6 @@
 import 'package:flutter/services.dart';
 
-/// Android document-picker operations shared with future mobile platforms.
+/// Mobile document-picker operations shared by Android and iOS.
 /// Folder selections are copied into app-private staging before returning.
 class MobileStorageService {
   const MobileStorageService({MethodChannel? channel})

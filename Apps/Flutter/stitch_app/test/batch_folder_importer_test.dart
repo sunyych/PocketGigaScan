@@ -69,6 +69,8 @@ void main() {
       await _writePhoto(child, name);
     }
     final source = (await importer.snapshot(parent.path)).single;
+    final originalFile = source.files.first;
+    final originalBytes = await originalFile.readAsBytes();
     expect(source.files.map((file) => file.uri.pathSegments.last), [
       '10-10.jpg',
       '10-11.jpg',
@@ -83,6 +85,8 @@ void main() {
     expect(imported.needsLayout, isFalse);
     expect(imported.grid.rows, 2);
     expect(imported.grid.columns, 2);
+    expect(await originalFile.exists(), isTrue);
+    expect(await originalFile.readAsBytes(), originalBytes);
   });
 
   test(

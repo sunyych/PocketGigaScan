@@ -4,6 +4,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/l10n/stitch_localizations.dart';
 import 'package:stitch_app/main.dart';
+import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
@@ -57,6 +58,15 @@ class _Api implements JobApi {
       throw UnimplementedError();
 }
 
+class _RunningApi extends _Api {
+  @override
+  Future<Map<String, Object?>> status(String jobId) async => {
+    'state': 'running',
+    'operation': 'render',
+    'progress': 0.25,
+  };
+}
+
 class _Lock implements ForegroundWorkLock {
   @override
   Future<void> enable() async {}
@@ -65,12 +75,13 @@ class _Lock implements ForegroundWorkLock {
 }
 
 class _Repository extends TaskRepository {
-  _Repository(this.task);
+  _Repository(this.task, {this.otherTasks = const []});
   final StitchTask task;
+  final List<StitchTask> otherTasks;
   StitchTask? duplicate;
   final saved = <StitchTask>[];
   @override
-  Future<List<StitchTask>> loadAll() async => [task];
+  Future<List<StitchTask>> loadAll() async => [task, ...otherTasks];
   @override
   Future<void> save(StitchTask value) async => saved.add(value);
   @override
@@ -145,6 +156,115 @@ StitchTask _task(StitchPhase phase, {String? nativeJobId}) => StitchTask(
 );
 
 void main() {
+  for (final locale in [const Locale('en'), const Locale('zh')]) {
+    testWidgets(
+      '${locale.languageCode}: failed batch-owned task remains directly openable while another task runs',
+      (tester) async {
+        tester.view.physicalSize = const Size(432, 932);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+        final activeTask = _task(
+          StitchPhase.running,
+          nativeJobId: 'active-job',
+        );
+        final failedBase = _task(StitchPhase.failed, nativeJobId: 'failed-job');
+        final failedTask = StitchTask.fromJson({
+          ...failedBase.toJson(),
+          'id': 'presentation-batch-failed',
+        });
+        final repository = _Repository(activeTask, otherTasks: [failedTask]);
+        final api = _RunningApi();
+        final runtimeChannel = const MethodChannel('presentation/runtime');
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(runtimeChannel, (call) async {
+              if (call.method == 'readResourceBudget') {
+                return {
+                  'totalMemoryMiB': 4096,
+                  'availableMemoryMiB': 2048,
+                  'cpuCount': 8,
+                  'availableStorageMiB': 4096,
+                  'thermalStatus': 'normal',
+                };
+              }
+              if (call.method == 'readPendingTimeoutJobs') return <String>[];
+              if (call.method == 'acknowledgeTimeoutJobs') return true;
+              return null;
+            });
+        addTearDown(
+          () => TestDefaultBinaryMessengerBinding
+              .instance
+              .defaultBinaryMessenger
+              .setMockMethodCallHandler(runtimeChannel, null),
+        );
+        final queue = EmptyBatchQueueController(
+          api: api,
+          taskRepository: repository,
+          initialQueues: [
+            BatchQueue(
+              id: 'queue',
+              createdAt: DateTime.utc(2026),
+              parentDirectory: 'source',
+              outputDirectory: 'output',
+              items: [
+                BatchQueueItem(
+                  id: 'active-item',
+                  name: 'Active DWARF panorama',
+                  sourceDirectory: 'source/active',
+                  state: BatchItemState.running,
+                  taskId: activeTask.id,
+                ),
+                BatchQueueItem(
+                  id: 'failed-item',
+                  name: 'Failed DWARF panorama',
+                  sourceDirectory: 'source/panorama',
+                  state: BatchItemState.failed,
+                  taskId: failedTask.id,
+                ),
+              ],
+            ),
+          ],
+        );
+        await tester.pumpWidget(
+          _TestApp(
+            locale: locale,
+            home: StitchHomePage(
+              initialTask: activeTask,
+              jobApi: api,
+              repository: repository,
+              batchQueueController: queue,
+              foregroundWorkLock: _Lock(),
+              mobileOverride: true,
+              androidOverride: true,
+              mobileRuntimeService: MobileRuntimeService(
+                channel: runtimeChannel,
+              ),
+            ),
+          ),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        await tester.tap(find.byIcon(Icons.menu));
+        await tester.pumpAndSettle();
+        final failedRow = find
+            .byKey(const Key('task-row-presentation-batch-failed'))
+            .last;
+        expect(failedRow, findsOneWidget);
+        expect(tester.widget<ListTile>(failedRow).enabled, isTrue);
+        await tester.ensureVisible(failedRow);
+        await tester.tap(failedRow);
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining(
+            locale.languageCode == 'zh' ? '100% · 失败' : '100% · Failed',
+          ),
+          findsOneWidget,
+        );
+        await tester.pumpWidget(const SizedBox.shrink());
+        queue.dispose();
+      },
+    );
+  }
+
   for (final locale in [const Locale('en'), const Locale('zh')]) {
     for (final platform in ['Windows', 'Android']) {
       testWidgets(

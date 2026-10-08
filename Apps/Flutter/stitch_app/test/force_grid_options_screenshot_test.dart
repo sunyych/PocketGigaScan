@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/main.dart';
 import 'package:stitch_app/models/grid_options.dart';
@@ -11,6 +12,7 @@ import 'package:stitch_app/models/performance_options.dart';
 import 'package:stitch_app/services/task_repository.dart';
 import 'package:stitch_app/services/power_service.dart';
 import 'package:stitch_app/services/native_job_api.dart';
+import 'package:stitch_app/services/mobile_runtime_service.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
 
@@ -150,6 +152,35 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
     tester.view.devicePixelRatio = 1;
     final api = _OptionsScreenshotApi();
     final repository = _OptionsScreenshotRepository(task);
+    MobileRuntimeService? runtime;
+    if (mode == 'mobile') {
+      const channel = MethodChannel('test.grid-options-mobile-runtime');
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (call) async {
+            switch (call.method) {
+              case 'readResourceBudget':
+                return <String, Object?>{
+                  'totalMemoryMiB': 4096,
+                  'availableMemoryMiB': 2048,
+                  'cpuCount': 8,
+                  'availableStorageMiB': 4096,
+                  'thermalStatus': 'none',
+                };
+              case 'readPendingTimeoutJobs':
+                return <String>[];
+              case 'setProcessingActive':
+              case 'acknowledgeTimeoutJobs':
+                return true;
+            }
+            return null;
+          });
+      runtime = MobileRuntimeService(channel: channel);
+      addTearDown(() async {
+        await runtime?.dispose();
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, null);
+      });
+    }
     await tester.pumpWidget(
       ChineseTestApp(
         home: StitchHomePage(
@@ -160,6 +191,7 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
             api: api,
             taskRepository: repository,
           ),
+          mobileRuntimeService: runtime,
           foregroundWorkLock: _NoopForegroundLock(),
           mobileOverride: mode == 'mobile',
         ),
