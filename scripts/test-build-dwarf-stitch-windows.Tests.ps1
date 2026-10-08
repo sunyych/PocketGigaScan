@@ -32,6 +32,12 @@ $releaseAssetsAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $releaseAssetsAst) 'Builder must reject incomplete, debug, or integration-test Release assets.'
 Invoke-Expression $releaseAssetsAst.Extent.Text
+$productMetadataAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-WindowsProductVersionMetadata'
+}, $true)
+Assert-True ($null -ne $productMetadataAst) 'Builder must verify product name and version metadata before signing.'
+Invoke-Expression $productMetadataAst.Extent.Text
 $jxlRootAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-JxlSdkRoot'
@@ -315,4 +321,37 @@ foreach ($dependencyLicense in @('LICENSE.libtiff', 'LICENSE.openjpeg')) {
     Assert-True ((Get-Item -LiteralPath $dependencyLicensePath).Length -gt 1000) "Static OpenCV dependency license is unexpectedly incomplete: $dependencyLicense"
 }
 
-Write-Host 'Windows builder plan, vendored core paths, release safety, and app icon tests passed.'
+$metadataTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-metadata-test-' + [guid]::NewGuid().ToString('N'))
+$metadataTestRoot = [IO.Path]::GetFullPath($metadataTestRoot)
+Assert-True ($metadataTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($metadataTestRoot) -match '^pocket-metadata-test-[0-9a-f]{32}$') 'Refusing unsafe metadata test fixture path.'
+New-Item -ItemType Directory -Force -Path $metadataTestRoot | Out-Null
+$metadataExe = Join-Path $metadataTestRoot 'PocketGigaScan.exe'
+$metadataCore = Join-Path $metadataTestRoot 'lumia_gigascan_core.dll'
+Set-Content -LiteralPath $metadataExe -Value 'EXE fixture' -Encoding ascii
+Set-Content -LiteralPath $metadataCore -Value 'DLL fixture' -Encoding ascii
+$script:VersionInfoByPath = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::OrdinalIgnoreCase)
+$script:VersionInfoByPath[$metadataExe] = [pscustomobject]@{ ProductName = 'PocketGigaScan'; FileVersion = '1.4.4+23'; ProductVersion = '1.4.4+23' }
+$script:VersionInfoByPath[$metadataCore] = [pscustomobject]@{ ProductName = 'PocketGigaScan'; FileVersion = '1.4.4+23'; ProductVersion = '1.4.4+23' }
+function Get-Item {
+    param([string]$LiteralPath)
+    return [pscustomobject]@{ VersionInfo = $script:VersionInfoByPath[$LiteralPath] }
+}
+try {
+    Assert-WindowsProductVersionMetadata @($metadataExe, $metadataCore) '1.4.4+23'
+    $wrongMetadataRejected = $false
+    $script:VersionInfoByPath[$metadataCore].ProductVersion = '1.4.3+22'
+    try { Assert-WindowsProductVersionMetadata @($metadataExe, $metadataCore) '1.4.4+23' } catch { $wrongMetadataRejected = $true }
+    Assert-True $wrongMetadataRejected 'Builder metadata check accepted mismatched EXE/core versions.'
+    $wrongProductRejected = $false
+    $script:VersionInfoByPath[$metadataCore].ProductVersion = '1.4.4+23'
+    $script:VersionInfoByPath[$metadataCore].ProductName = 'Other Product'
+    try { Assert-WindowsProductVersionMetadata @($metadataExe, $metadataCore) '1.4.4+23' } catch { $wrongProductRejected = $true }
+    Assert-True $wrongProductRejected 'Builder metadata check accepted a non-product-owned DLL.'
+}
+finally {
+    Remove-Item -LiteralPath Function:\Get-Item -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $metadataTestRoot) { Remove-Item -LiteralPath $metadataTestRoot -Recurse -Force }
+}
+
+Write-Host 'Windows builder plan, signing metadata, vendored core paths, release safety, and app icon tests passed.'

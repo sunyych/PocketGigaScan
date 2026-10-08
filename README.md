@@ -6,7 +6,11 @@ Independent DWARF panorama stitching on shared Flutter/Rust processing layers. W
 
 [Latest Windows download](https://github.com/sunyych/PocketGigaScan/releases/download/latest/PocketGigaScan-Windows-x64.zip) · [Releases](https://github.com/sunyych/PocketGigaScan/releases) · [Build status](https://github.com/sunyych/PocketGigaScan/actions)
 
-Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the included Flutter DLL, native core and data directory; do not copy it alone. Every push creates a build artifact; successful default-branch builds refresh the stable `latest` download. The executable is currently unsigned.
+Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the included Flutter DLL, native core and data directory; do not copy it alone. Every push creates a build artifact; successful default-branch builds refresh the stable `latest` download after signing is configured and verified. Current downloads remain unsigned while SignPath Foundation acceptance and repository configuration are pending.
+
+## Code signing policy
+
+Planned provider: Free code signing provided by SignPath.io, certificate by SignPath Foundation; the application was submitted on 2026-10-08 and is pending review. The project plans to sign only its own application EXE and Rust core DLL. Bundled upstream DLL bytes, including any vendor signatures already present, remain unchanged. The signing approver is the repository maintainer, and signing requires a protected-environment approval. Read the [Windows code signing policy](docs/WINDOWS-SIGNING.md) for team roles, privacy and current setup status. No signed Windows release is available yet.
 
 ## Stitching
 

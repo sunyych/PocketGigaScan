@@ -12,11 +12,16 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_SDK");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_LINK_PATHS");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_TEST_HELPERS");
+    println!("cargo:rerun-if-changed=windows/lumia_gigascan_core.rc");
     let root = std::env::var("OPENCV_DIR").expect(
         "OPENCV_DIR must point to an OpenCV install (include/ and a platform library directory)",
     );
     let root = std::path::PathBuf::from(root);
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
+    if target_os == "windows" && target_env == "msvc" {
+        add_windows_version_resource();
+    }
     let mut build = cc::Build::new();
     build
         .cpp(true)
@@ -215,4 +220,123 @@ fn main() {
             }
         }
     }
+}
+
+fn add_windows_version_resource() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by Cargo"),
+    );
+    let repository_root = manifest_dir
+        .parent()
+        .and_then(|parent| parent.parent())
+        .expect("native/core must be within the repository root");
+    let pubspec = repository_root.join("Apps/Flutter/stitch_app/pubspec.yaml");
+    println!("cargo:rerun-if-changed={}", pubspec.display());
+    let app_version = read_flutter_app_version(&pubspec);
+    let version_resource = manifest_dir.join("windows/lumia_gigascan_core.rc");
+    let template = std::fs::read_to_string(&version_resource)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", version_resource.display()));
+    let generated = template
+        .replace("@FILE_VERSION@", &app_version.file_version)
+        .replace("@STRING_VERSION@", &app_version.string_version);
+    if generated.contains('@') {
+        panic!("unexpanded placeholder in {}", version_resource.display());
+    }
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set by Cargo"));
+    let resource_input = out_dir.join("lumia_gigascan_core.version.rc");
+    let resource_output = out_dir.join("lumia_gigascan_core.version.res");
+    std::fs::write(&resource_input, generated)
+        .unwrap_or_else(|error| panic!("cannot write {}: {error}", resource_input.display()));
+
+    let resource_compiler = find_resource_compiler();
+    let output = Command::new(&resource_compiler)
+        .arg("/nologo")
+        .arg("/fo")
+        .arg(&resource_output)
+        .arg(&resource_input)
+        .output()
+        .unwrap_or_else(|error| panic!("could not run {}: {error}", resource_compiler.display()));
+    if !output.status.success() {
+        panic!(
+            "Windows resource compiler failed for {}:\n{}{}",
+            resource_input.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    println!("cargo:rustc-link-arg-cdylib={}", resource_output.display());
+}
+
+struct AppVersion {
+    file_version: String,
+    string_version: String,
+}
+
+fn read_flutter_app_version(pubspec: &std::path::Path) -> AppVersion {
+    let contents = std::fs::read_to_string(pubspec)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", pubspec.display()));
+    let version = contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("version:").map(str::trim))
+        .unwrap_or_else(|| panic!("version is missing from {}", pubspec.display()));
+    let (release, build) = version.split_once('+').unwrap_or((version, "0"));
+    let release_parts = release.split('.').collect::<Vec<_>>();
+    if release_parts.len() != 3 {
+        panic!("expected a three-part Flutter version, got '{version}'");
+    }
+    let mut numbers = Vec::with_capacity(4);
+    for part in release_parts.into_iter().chain(std::iter::once(build)) {
+        let number = part
+            .parse::<u16>()
+            .unwrap_or_else(|_| panic!("invalid numeric Flutter version component in '{version}'"));
+        numbers.push(number);
+    }
+    AppVersion {
+        file_version: format!(
+            "{},{},{},{}",
+            numbers[0], numbers[1], numbers[2], numbers[3]
+        ),
+        string_version: version.to_owned(),
+    }
+}
+
+fn find_resource_compiler() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    if let Some(sdk_dir) = std::env::var_os("WindowsSdkDir") {
+        let sdk_dir = PathBuf::from(sdk_dir);
+        if let Some(sdk_version) = std::env::var_os("WindowsSDKVersion") {
+            let candidate = sdk_dir
+                .join("bin")
+                .join(
+                    sdk_version
+                        .to_string_lossy()
+                        .trim_end_matches(|character| character == '\\' || character == '/'),
+                )
+                .join("x64/rc.exe");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+        let candidate = sdk_dir.join("bin/x64/rc.exe");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    if let Ok(output) = Command::new("where.exe").arg("rc.exe").output() {
+        if output.status.success() {
+            if let Some(path) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                let candidate = PathBuf::from(path.trim());
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
+        }
+    }
+    panic!("Windows SDK resource compiler rc.exe was not found on PATH or under WindowsSdkDir");
 }

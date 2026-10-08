@@ -59,6 +59,7 @@ __pycache__/
 !/docs/BUILD.md
 !/docs/RESTRUCTURE.md
 !/docs/PARITY.md
+!/docs/WINDOWS-SIGNING.md
 !/docs/gigascan/
 !/docs/superpowers/
 /docs/superpowers/*
@@ -85,6 +86,7 @@ __pycache__/
 !/docs/gigascan/LOOP-REGRESSION-PLAN.md
 !/docs/gigascan/DWARF-PERFORMANCE-DESIGN.md
 !/docs/gigascan/HOTPATH-SPEEDUP-DESIGN.md
+!/docs/gigascan/WINDOWS-SIGNING-PLAN.md
 !/docs/gigascan/evidence/
 /docs/gigascan/evidence/*
 !/docs/gigascan/evidence/CORNER-AUTO-EXPORT-2026-10-05.md
@@ -102,6 +104,8 @@ __pycache__/
 !/docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md
 /scripts/*
 !/scripts/build-dwarf-stitch-windows.ps1
+!/scripts/complete-dwarf-stitch-windows-signing.ps1
+!/scripts/test-complete-dwarf-stitch-windows-signing.Tests.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1
 !/scripts/build-stitch-android-core.ps1
 !/scripts/test-build-stitch-android-core.Tests.ps1
