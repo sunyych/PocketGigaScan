@@ -278,3 +278,5 @@ finally {
 }
 
 Write-Host 'Windows signing finalizer archive-path, PE preservation, and mocked Authenticode contract checks passed.'
+$global:LASTEXITCODE = 0
+exit 0
