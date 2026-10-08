@@ -1,15 +1,24 @@
 # PocketGigaScan roadmap
 
-PG-052 tracks the user-reported overlap/export translation gaps and left-aligned
-task/technical logs. Luna localization/UI coders implement disjoint patches;
-Codex independently reviewed the patch; Flutter analysis is clean, all 182 host
-tests pass, including 25 focused localization/presentation tests. Builds and
-commits are explicitly deferred until the user's remaining edits are complete.
+PG-066 completed the bilingual audit of every operator-visible service message
+and UI literal. Plan A shipped: complete EN/ZH dictionary coverage, colon-prefix
+keys, ~22 dynamic regex fallbacks, the completed-queue `publishFailed` retry
+state, SelectableText translation coverage, and no-CJK English assertions in
+both locales. Flutter analysis is clean, all 327 Flutter tests pass on the
+shared working tree (23/23 localization tests, including 6 new bilingual-audit
+tests), and an incremental Windows Release build produced
+`PocketGigaScan.exe`. Plan B (keying the remaining hardcoded Chinese literals
+that are currently translated only by prefix/regex fallbacks, plus moving the
+remaining `isChinese ? 中文 : English` ternaries into the dictionary) is
+recorded as the follow-up row below.
 
 Historical camera-app tasks are retired from this product. Their prior records remain in Git history and the local recovery archive. Processing IDs remain stable below.
 
 | ID | Goal | Dependencies | Status | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| PG-066 | Bilingual audit: eliminate English-mode CJK leaks in service messages and UI (Plan A), then key every remaining hardcoded literal (Plan B) | PG-062, PG-065 | Plan A complete 2026-10-08 on the shared working tree: full EN dictionary + prefix keys + ~22 regex fallbacks, `publishFailed` queue retry state, SelectableText translated at call sites, zh passthrough preserved; Flutter analysis clean, 327/327 Flutter tests (23 localization incl. 6 new audit tests) and an incremental Windows Release build pass; Plan B (keying all remaining hardcoded literals) is the follow-up | Codex coordinator (direct implementation; subagent dispatches abandoned after sandbox child-process denials) | [Handoff](COLLABORATION.md#pg-066-bilingual-audit) |
+| PG-066-F | Plan B: key every remaining hardcoded operator-visible literal (remove prefix/regex fallback dependence and `isChinese` ternaries) | PG-066 | follow-up recorded 2026-10-08; no code changes this pass | Codex coordinator | [Handoff](COLLABORATION.md#pg-066-bilingual-audit) |
+| PG-065 | Desktop/mobile adjustable neighboring registration-error limit | PG-063 | implemented 2026-10-08; native 224 pass / 2 optional ignored, Flutter 330 pass + clean analysis, Windows Release and Android ARM64 Release pass; 1.4.6+25 installed by wireless ADB; iOS native build and full 364-photo visual acceptance pending | Luna shared UI/native coder; Codex coordinator and independent reviewer | [Handoff](COLLABORATION.md#pg-065-adjustable-neighbor-registration-error-limit) |
 | PG-064 | SignPath Foundation Windows code signing | PG-048 | application submitted 2026-10-08 and pending review; normal isolated Windows Release passed (native 220, 2 optional fixtures ignored; Flutter analysis clean; 319 Flutter tests passed); product EXE/core DLL metadata verified as PocketGigaScan / 1.4.4+23; unsigned input correctly rejected by finalizer with no final ZIP; no authentic SignPath signing/chain verified; PR #7 CI running | Luna Windows build/signing coder and Luna workflow/docs coder; Codex independent review | [Policy](../WINDOWS-SIGNING.md), [Plan](WINDOWS-SIGNING-PLAN.md), [Handoff](COLLABORATION.md#pg-064-signpath-foundation-windows-code-signing) |
 | PG-063 | Continuous deghost ownership and polygonal export seam repair; red-prompt regression diagnosis | PG-051, PG-060, PG-062 | 1.4.4+23 prototype: native220/Flutter319/Android7 tests, normal Windows/Android packages and source520dd22 CI passed; APK installed/core loaded; exact scene and phone registration failure remain unqualified | Luna native/ROI/platform coders; Codex coordinator | [Plan](PATCH-SEAM-REPAIR-PLAN.md), [Handoff](COLLABORATION.md#pg-063-polygonal-export-seam-repair) |
 | PG-062 | Phone-only DWARF3 connection, resumable original downloads and Android/iOS queue import | PG-049, PG-061 | implemented and reviewed; Android wireless-ADB fixture and release install pass; real STA identity/album/source filtering and one original transfer pass; task-rail download status and first-task handoff implemented; automatic measured-overlap refinement repair passes three Android native regressions; queue-task direct opening and failed-task navigation pass English/Chinese phone tests; 1.4.3+22 native/319 Flutter tests and Windows/Android builds pass locally; repair install pending active phone task; full panorama/optical and macOS/iOS qualification pending | Luna protocol/UI/platform coders; Codex coordinator | [Research](DWARF-MOBILE-DEVICE-IMPORT-RESEARCH.md), [Plan](DWARF-MOBILE-IMPORT-PLAN.md), [Handoff](COLLABORATION.md#pg-062-mobile-dwarf3-import) |
