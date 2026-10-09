@@ -4,7 +4,7 @@ PG-067 tracks continuous quality weighting for exported panorama flakes. The sha
 
 | Task | Scope | Dependency | Status | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- |
-| PG-067 | Continuous deghost quality suppression, compatible render identity and memory accounting | PG-051 | implementation and build qualification in progress | Luna renderer coder and validation coder; Codex independent review/builds | [Plan](../superpowers/plans/2026-10-09-deghost-continuity.md), [Handoff](COLLABORATION.md#pg-067-continuous-deghost-quality-weighting) |
+| PG-067 | Continuous deghost quality suppression, compatible render identity and memory accounting | PG-051 | Windows/Android 1.4.8+27 builds qualified; 228 native + 330 Flutter tests pass; user full restitch acceptance pending | Luna renderer coder and validation coder; Codex independent review/builds | [Plan](../superpowers/plans/2026-10-09-deghost-continuity.md), [Evidence](evidence/DEGHOST-CONTINUITY-2026-10-09.md), [Handoff](COLLABORATION.md#pg-067-continuous-deghost-quality-weighting) |
 
 PG-066 completed the bilingual audit of every operator-visible service message
 and UI literal. Plan A shipped: complete EN/ZH dictionary coverage, colon-prefix
