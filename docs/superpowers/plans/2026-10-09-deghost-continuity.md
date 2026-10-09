@@ -41,3 +41,14 @@ Files: `docs/gigascan/COLLABORATION.md`, `docs/gigascan/ROADMAP.md`, new evidenc
 - [x] Build normal Windows Release using `scripts/build-dwarf-stitch-windows.ps1 -PrepareSigning` with verified cached dependencies.
 - [x] Build Android shared native engine and APK where local toolchains permit; report actual device-validation boundary.
 - [x] Commit only owned changes with a conventional commit on a `codex/` branch; record source identity and deliverables without committing private photos/caches/binaries.
+
+
+## Follow-up after user restitch
+
+The same-position 1.4.8+27 comparison retains hard truck/SUV triangles. Continue the approved repair with a full-layout selected-tile diagnostic, preserving original coordinates and all source photos. Baseline must reproduce the completed task before implementation. Disjoint ownership remains Luna renderer coder, Luna independent reviewer, Codex docs/build/qualification.
+
+1. Compare full saved layouts and extract the exact level-zero region.
+2. Render selected tiles with original global ownership lattice; ablate coarse owner, actual local source warps and deghost.
+3. Couple peer quality and support to a single best geometric other source, excluding self and continuously discounting near-edge evidence. Preserve conservative supported blur, flat/unique coverage, source-order stability and bounded memory. Advance deghost identity only.
+4. Verify targeted real-source tiles plus native regressions, formatting, Flutter checks and build contracts; build 1.4.9+28 Windows/Android using normal-user toolchain/output paths.
+5. Preserve old test builds and task data. Record exact artifact hashes and separate local real-crop acceptance from full panorama/device qualification.

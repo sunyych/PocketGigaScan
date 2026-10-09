@@ -106,7 +106,7 @@ impl BlendMode {
     fn model_name(self) -> &'static str {
         match self {
             Self::Feather => "source-edge-smoothstep-feather",
-            Self::Deghost => "sharpness-aware-global-coarse-ownership-v1",
+            Self::Deghost => "sharpness-aware-peer-coupled-coarse-ownership-v2",
         }
     }
 }
@@ -621,7 +621,7 @@ fn renderer_identity(blend_mode: BlendMode) -> Value {
     serde_json::json!({
         "schemaVersion": 1,
         "blendModel": blend_mode.model_name(),
-        "algorithmVersion": if blend_mode == BlendMode::Deghost { 2 } else { 1 }
+        "algorithmVersion": if blend_mode == BlendMode::Deghost { 3 } else { 1 }
     })
 }
 
@@ -1074,6 +1074,50 @@ impl TileGeometryCache {
     }
 }
 
+fn best_other_source_quality(
+    source_index: usize,
+    pixel_index: usize,
+    world: [f64; 3],
+    sources: &[Source],
+    quality_maps: &[Option<Arc<SourceQualityMap>>],
+    tile_geometry: &[(usize, TileGeometryCache)],
+    best_sources: &[usize],
+    second_sources: &[usize],
+    best_scores: &[f64],
+    second_scores: &[f64],
+) -> (f64, f64, f64) {
+    let peer_index = if best_sources[pixel_index] == source_index {
+        second_sources[pixel_index]
+    } else {
+        best_sources[pixel_index]
+    };
+    if peer_index >= sources.len() {
+        return (f64::NEG_INFINITY, 0.0, 0.0);
+    }
+    let peer = &sources[peer_index];
+    let peer_ownership = if peer_index == second_sources[pixel_index] {
+        second_scores[pixel_index]
+    } else {
+        best_scores[pixel_index]
+    };
+    let peer_geometry = tile_geometry
+        .iter()
+        .find(|(candidate_index, _)| *candidate_index == peer_index)
+        .and_then(|(_, cached)| cached.get(peer, pixel_index))
+        .or_else(|| sample_geometry(peer, world));
+    let (texture, sharpness) = peer_geometry
+        .and_then(|(x, y, edge_support, _)| {
+            let quality = quality_maps[peer_index].as_ref()?;
+            let (texture, _) = quality.sample(peer.width, peer.height, x, y);
+            Some((
+                texture * edge_support,
+                quality.sharpness(peer.width, peer.height, x, y) * edge_support,
+            ))
+        })
+        .unwrap_or((0.0, 0.0));
+    (peer_ownership, texture, sharpness)
+}
+
 fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32) -> f64 {
     if !ownership.is_finite() || !max_ownership.is_finite() {
         return 1.0;
@@ -1082,6 +1126,36 @@ fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32)
         DEGHOST_OWNERSHIP_TEMPERATURE_SOURCE_PIXELS / f64::from(source_min_dimension.max(1));
     let exponent = ((ownership - max_ownership) / temperature).clamp(-80.0, 0.0);
     exponent.exp()
+}
+
+fn insert_top_two_ownership(
+    score: f64,
+    source_index: usize,
+    stable_ranks: &[usize],
+    best_score: &mut f64,
+    best_source: &mut usize,
+    second_score: &mut f64,
+    second_source: &mut usize,
+) {
+    // Break equal-score ties by a stable path/camera rank so input iteration
+    // order cannot change which other source supplies quality evidence.
+    let outranks_best = score > *best_score
+        || (score == *best_score
+            && (*best_source == usize::MAX
+                || stable_ranks[source_index] < stable_ranks[*best_source]));
+    if outranks_best {
+        *second_score = *best_score;
+        *second_source = *best_source;
+        *best_score = score;
+        *best_source = source_index;
+    } else if score > *second_score
+        || (score == *second_score
+            && (*second_source == usize::MAX
+                || stable_ranks[source_index] < stable_ranks[*second_source]))
+    {
+        *second_score = score;
+        *second_source = source_index;
+    }
 }
 
 fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
@@ -1279,8 +1353,8 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     }
     let tile_bytes_per_pixel = if blend_mode == BlendMode::Deghost {
         // accum[4] (16 bytes), adjusted and top-two raw ownership scores
-        // (24 bytes), winning source index (8 bytes), and peer texture/sharpness
-        // maxima (16 bytes), plus Vec overhead.
+        // (24 bytes), and the winning plus runner-up source indices (16 bytes).
+        // The 64-byte reserve leaves 8 bytes for alignment and Vec overhead.
         64
     } else {
         24
@@ -1935,8 +2009,59 @@ fn render_one_tile(
     let mut second_ownership =
         (blend_mode == BlendMode::Deghost).then(|| vec![f64::NEG_INFINITY; count]);
     let mut max_owner_source = (blend_mode == BlendMode::Deghost).then(|| vec![usize::MAX; count]);
-    let mut max_peer_texture = (blend_mode == BlendMode::Deghost).then(|| vec![0.0f64; count]);
-    let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0.0f64; count]);
+    let mut second_owner_source =
+        (blend_mode == BlendMode::Deghost).then(|| vec![usize::MAX; count]);
+    let stable_source_ranks = if blend_mode == BlendMode::Deghost {
+        let mut source_order: Vec<usize> = (0..sources.len()).collect();
+        source_order.sort_by(|&left, &right| {
+            let left = &sources[left];
+            let right = &sources[right];
+            left.path
+                .cmp(&right.path)
+                .then_with(|| {
+                    left.camera_to_world
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .cmp(right.camera_to_world.iter().map(|value| value.to_bits()))
+                })
+                .then_with(|| {
+                    match (
+                        left.source_plane_warp.as_ref(),
+                        right.source_plane_warp.as_ref(),
+                    ) {
+                        (None, None) => std::cmp::Ordering::Equal,
+                        (None, Some(_)) => std::cmp::Ordering::Less,
+                        (Some(_), None) => std::cmp::Ordering::Greater,
+                        (Some(left), Some(right)) => left
+                            .columns
+                            .cmp(&right.columns)
+                            .then_with(|| left.rows.cmp(&right.rows))
+                            .then_with(|| {
+                                left.offsets
+                                    .iter()
+                                    .flatten()
+                                    .map(|value| value.to_bits())
+                                    .cmp(
+                                        right.offsets.iter().flatten().map(|value| value.to_bits()),
+                                    )
+                            }),
+                    }
+                })
+                .then_with(|| left.width.cmp(&right.width))
+                .then_with(|| left.height.cmp(&right.height))
+                .then_with(|| left.fx.to_bits().cmp(&right.fx.to_bits()))
+                .then_with(|| left.fy.to_bits().cmp(&right.fy.to_bits()))
+                .then_with(|| left.cx.to_bits().cmp(&right.cx.to_bits()))
+                .then_with(|| left.cy.to_bits().cmp(&right.cy.to_bits()))
+        });
+        let mut ranks = vec![0usize; sources.len()];
+        for (rank, source_index) in source_order.into_iter().enumerate() {
+            ranks[source_index] = rank;
+        }
+        Some(ranks)
+    } else {
+        None
+    };
     let mut source_quality_maps = vec![None; sources.len()];
     let candidate_sources = if candidate_list_enabled {
         let mut indices = Vec::new();
@@ -2031,27 +2156,15 @@ fn render_one_tile(
                         let scores = max_ownership.as_mut().unwrap();
                         let runner_up = second_ownership.as_mut().unwrap();
                         let owners = max_owner_source.as_mut().unwrap();
-                        let score = ownership;
-                        if score > scores[index] {
-                            runner_up[index] = scores[index];
-                            scores[index] = score;
-                            owners[index] = source_index;
-                        } else if score > runner_up[index] {
-                            runner_up[index] = score;
-                        }
-                        let (texture_energy, _) =
-                            quality.sample(source.width, source.height, source_x, source_y);
-                        let sharpness =
-                            quality.sharpness(source.width, source.height, source_x, source_y);
-                        let peer_texture = &mut max_peer_texture.as_mut().unwrap()[index];
-                        *peer_texture = (*peer_texture).max(texture_energy);
-                        let sharpness_support = smoothstep(
-                            SOURCE_QUALITY_BLUR_PEER_TEXTURE - 2.0,
-                            SOURCE_QUALITY_BLUR_PEER_TEXTURE + 2.0,
-                            texture_energy,
+                        insert_top_two_ownership(
+                            ownership,
+                            source_index,
+                            stable_source_ranks.as_ref().unwrap(),
+                            &mut scores[index],
+                            &mut owners[index],
+                            &mut runner_up[index],
+                            &mut second_owner_source.as_mut().unwrap()[index],
                         );
-                        let peer_sharpness = &mut max_peer_sharpness.as_mut().unwrap()[index];
-                        *peer_sharpness = (*peer_sharpness).max(sharpness * sharpness_support);
                     }
                 }
             }
@@ -2105,14 +2218,18 @@ fn render_one_tile(
                             quality.sample(source.width, source.height, source_x, source_y);
                         let sharpness =
                             quality.sharpness(source.width, source.height, source_x, source_y);
-                        let peer_texture = max_peer_texture.as_ref().unwrap()[index];
-                        let peer_sharp = max_peer_sharpness.as_ref().unwrap()[index];
-                        let peer_ownership =
-                            if max_owner_source.as_ref().unwrap()[index] == source_index {
-                                second_ownership.as_ref().unwrap()[index]
-                            } else {
-                                max_ownership.as_ref().unwrap()[index]
-                            };
+                        let (peer_ownership, peer_texture, peer_sharp) = best_other_source_quality(
+                            source_index,
+                            index,
+                            world,
+                            sources,
+                            &source_quality_maps,
+                            &tile_geometry,
+                            max_owner_source.as_ref().unwrap(),
+                            second_owner_source.as_ref().unwrap(),
+                            max_ownership.as_ref().unwrap(),
+                            second_ownership.as_ref().unwrap(),
+                        );
                         let adjusted = adjusted_ownership(
                             ownership,
                             peer_ownership,
@@ -2203,22 +2320,27 @@ fn render_one_tile(
                             let (texture_energy, obstruction_confidence) =
                                 quality.sample(source.width, source.height, x, y);
                             let sharpness = quality.sharpness(source.width, source.height, x, y);
+                            let (peer_ownership, peer_texture, peer_sharpness) =
+                                best_other_source_quality(
+                                    source_index,
+                                    index,
+                                    world,
+                                    sources,
+                                    &source_quality_maps,
+                                    &tile_geometry,
+                                    max_owner_source.as_ref().unwrap(),
+                                    second_owner_source.as_ref().unwrap(),
+                                    max_ownership.as_ref().unwrap(),
+                                    second_ownership.as_ref().unwrap(),
+                                );
                             let adjusted = adjusted_ownership(
                                 ownership,
-                                if max_owner_source.as_ref().unwrap()[index] == source_index {
-                                    second_ownership.as_ref().unwrap()[index]
-                                } else {
-                                    max_ownership.as_ref().unwrap()[index]
-                                },
-                                max_peer_texture.as_ref().unwrap()[index],
+                                peer_ownership,
+                                peer_texture,
                                 obstruction_confidence,
                                 texture_energy,
                                 sharpness,
-                                if sharpness_aware {
-                                    max_peer_sharpness.as_ref().unwrap()[index]
-                                } else {
-                                    0.0
-                                },
+                                if sharpness_aware { peer_sharpness } else { 0.0 },
                                 source.width.min(source.height),
                             );
                             deghost_weight(
@@ -3662,6 +3784,196 @@ mod tests {
     }
 
     #[test]
+    fn quality_peer_edge_support_fades_without_losing_interior_suppression() {
+        let peer_texture = 80.0;
+        let peer_sharpness = 100.0;
+        let blur_weights: Vec<f64> = (0..=100_000)
+            .map(|step| {
+                let edge_support = step as f64 / 100_000.0;
+                let adjusted = adjusted_ownership(
+                    0.30,
+                    0.30,
+                    peer_texture * edge_support,
+                    0.0,
+                    40.0,
+                    30.0,
+                    peer_sharpness * edge_support,
+                    2160,
+                );
+                deghost_weight(adjusted, 0.30, 2160)
+            })
+            .collect();
+        assert!(blur_weights[0] > 0.99);
+        assert!(blur_weights[100_000] < 0.01);
+        assert!(blur_weights.windows(2).all(|pair| pair[0] >= pair[1]));
+        let largest_blur_step = blur_weights
+            .windows(2)
+            .map(|pair| pair[0] - pair[1])
+            .fold(0.0, f64::max);
+        assert!(
+            largest_blur_step < 0.001,
+            "blur support jump={largest_blur_step}"
+        );
+
+        let obstruction_weights: Vec<f64> = (0..=100_000)
+            .map(|step| {
+                let edge_support = step as f64 / 100_000.0;
+                let adjusted = adjusted_ownership(
+                    0.30,
+                    0.30,
+                    peer_texture * edge_support,
+                    0.95,
+                    0.0,
+                    0.0,
+                    0.0,
+                    2160,
+                );
+                deghost_weight(adjusted, 0.30, 2160)
+            })
+            .collect();
+        assert!(obstruction_weights[0] > 0.99);
+        assert!(obstruction_weights[100_000] < 0.01);
+        assert!(obstruction_weights
+            .windows(2)
+            .all(|pair| pair[0] >= pair[1]));
+        let largest_obstruction_step = obstruction_weights
+            .windows(2)
+            .map(|pair| pair[0] - pair[1])
+            .fold(0.0, f64::max);
+        assert!(
+            largest_obstruction_step < 0.001,
+            "obstruction support jump={largest_obstruction_step}"
+        );
+    }
+
+    #[test]
+    fn top_two_ownership_ties_use_stable_source_rank() {
+        fn select(order: &[usize], stable_ranks: &[usize]) -> (usize, usize) {
+            let mut best_score = f64::NEG_INFINITY;
+            let mut best_source = usize::MAX;
+            let mut second_score = f64::NEG_INFINITY;
+            let mut second_source = usize::MAX;
+            for &source_index in order {
+                insert_top_two_ownership(
+                    0.25,
+                    source_index,
+                    stable_ranks,
+                    &mut best_score,
+                    &mut best_source,
+                    &mut second_score,
+                    &mut second_source,
+                );
+            }
+            (best_source, second_source)
+        }
+
+        let stable_ranks = [2, 0, 1];
+        assert_eq!(select(&[0, 1, 2], &stable_ranks), (1, 2));
+        assert_eq!(select(&[2, 1, 0], &stable_ranks), (1, 2));
+        assert_eq!(select(&[1, 0, 2], &stable_ranks), (1, 2));
+    }
+
+    #[test]
+    fn best_other_quality_uses_second_owner_and_tapers_source_edge() {
+        let make_source = |name: &str| Source {
+            path: PathBuf::from(name),
+            width: 640,
+            height: 360,
+            fx: 1.0,
+            fy: 1.0,
+            cx: 319.5,
+            cy: 179.5,
+            camera_to_world: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+            source_plane_warp: None,
+            quality_map: Arc::new(Mutex::new(None)),
+            center: [0.0, 0.0, 1.0],
+            cone_radius: 1.0,
+        };
+        let sources = vec![
+            make_source("third-crisp.jpg"),
+            make_source("owner.jpg"),
+            make_source("edge-peer.jpg"),
+        ];
+        let crisp_image = patterned_source(640, 360);
+        let blurred_image = image::imageops::blur(&crisp_image, 1.5);
+        let crisp_quality = Arc::new(SourceQualityMap::from_image(&crisp_image));
+        let blurred_quality = Arc::new(SourceQualityMap::from_image(&blurred_image));
+        let quality_maps = vec![
+            Some(crisp_quality.clone()),
+            Some(blurred_quality.clone()),
+            Some(blurred_quality),
+        ];
+        let mut peer_edge = TileGeometryCache::new(1);
+        peer_edge.store(0, 320.0, 4.0);
+        let mut tile_geometry = vec![(2, peer_edge)];
+        let best_sources = [1usize];
+        let second_sources = [2usize];
+        let best_scores = [0.30];
+        let second_scores = [0.29];
+        let edge_result = best_other_source_quality(
+            1,
+            0,
+            [0.0, 0.0, 1.0],
+            &sources,
+            &quality_maps,
+            &tile_geometry,
+            &best_sources,
+            &second_sources,
+            &best_scores,
+            &second_scores,
+        );
+        tile_geometry[0].1.store(0, 320.0, 180.0);
+        let interior_result = best_other_source_quality(
+            1,
+            0,
+            [0.0, 0.0, 1.0],
+            &sources,
+            &quality_maps,
+            &tile_geometry,
+            &best_sources,
+            &second_sources,
+            &best_scores,
+            &second_scores,
+        );
+        assert_eq!(edge_result.0, 0.29);
+        assert_eq!(interior_result.0, 0.29);
+        assert!(edge_result.1 > 0.0 && edge_result.1 < interior_result.1);
+        assert!(edge_result.2 > 0.0 && edge_result.2 < interior_result.2);
+
+        let no_peer = best_other_source_quality(
+            1,
+            0,
+            [0.0, 0.0, 1.0],
+            &sources,
+            &quality_maps,
+            &tile_geometry,
+            &[1],
+            &[usize::MAX],
+            &[0.30],
+            &[f64::NEG_INFINITY],
+        );
+        assert_eq!(no_peer, (f64::NEG_INFINITY, 0.0, 0.0));
+
+        // The sharp third source is not the geometric runner-up and cannot
+        // donate quality evidence to suppress the current owner.
+        let third_peer_excluded = best_other_source_quality(
+            1,
+            0,
+            [0.0, 0.0, 1.0],
+            &sources,
+            &quality_maps,
+            &tile_geometry,
+            &[1],
+            &[2],
+            &[0.30],
+            &[0.29],
+        );
+        assert!(crisp_quality.sharpness(640, 360, 320.0, 180.0) > interior_result.2);
+        assert_eq!(third_peer_excluded.1, interior_result.1);
+        assert_eq!(third_peer_excluded.2, interior_result.2);
+    }
+
+    #[test]
     fn quality_adjusted_softmax_is_order_invariant_and_keeps_flat_no_peer() {
         let candidates = [
             (0.31, 80.0, 0.0, 40.0, 48.0),
@@ -3880,6 +4192,245 @@ mod tests {
         );
         assert_eq!(smooth_sky_adjusted, obstructed_ownership);
         assert!(deghost_weight(f64::NEG_INFINITY, f64::NEG_INFINITY, 2160).is_finite());
+    }
+
+    #[test]
+    #[ignore = "manual full-lattice truck/SUV edge ablation; set LUMIA_TRIANGLE_TASK_DIR and LUMIA_TRIANGLE_OUTPUT_DIR"]
+    fn real_source_hard_triangle_full_lattice_ablation() {
+        let task = PathBuf::from(
+            std::env::var("LUMIA_TRIANGLE_TASK_DIR")
+                .expect("set LUMIA_TRIANGLE_TASK_DIR to the completed task directory"),
+        );
+        let output = PathBuf::from(std::env::var("LUMIA_TRIANGLE_OUTPUT_DIR").unwrap_or_else(
+            |_| {
+                std::env::temp_dir()
+                    .join(format!("lumia-triangle-ablation-{}", std::process::id()))
+                    .to_string_lossy()
+                    .into_owned()
+            },
+        ));
+        fs::create_dir_all(&output).unwrap();
+        let layout: Value = serde_json::from_slice(
+            &fs::read(task.join("output/layout.json")).expect("read full task layout"),
+        )
+        .unwrap();
+        let (width, height, bounds, sources, _) = dimensions(&layout).unwrap();
+        let no_warp_sources: Vec<Source> = sources
+            .iter()
+            .cloned()
+            .map(|mut source| {
+                source.source_plane_warp = None;
+                source
+            })
+            .collect();
+        let warp_checkpoint = || true;
+        let source_warp_count = sources
+            .iter()
+            .filter(|source| source.source_plane_warp.is_some())
+            .count();
+        let warped_map =
+            build_global_ownership_map(width, height, bounds, &sources, warp_checkpoint)
+                .expect("build full-resolution-coordinate ownership map");
+        let plain_map = if source_warp_count == 0 {
+            None
+        } else {
+            Some(
+                build_global_ownership_map(
+                    width,
+                    height,
+                    bounds,
+                    &no_warp_sources,
+                    warp_checkpoint,
+                )
+                .expect("build no-warp ownership map on the same full lattice"),
+            )
+        };
+
+        let target_points = [
+            (59_200u32, 15_875u32),
+            (59_621u32, 15_870u32),
+            (59_200u32, 15_920u32),
+            (59_621u32, 15_920u32),
+        ];
+        let source_ids = [
+            sources
+                .iter()
+                .position(|source| {
+                    source
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name == "0227.jpg")
+                })
+                .expect("source 0227 exists"),
+            sources
+                .iter()
+                .position(|source| {
+                    source
+                        .path
+                        .file_name()
+                        .is_some_and(|name| name == "0253.jpg")
+                })
+                .expect("source 0253 exists"),
+        ];
+        let map_report = |map: &CoarseOwnershipMap, x: u32, y: u32| {
+            let owner = map.owner_at(x, y);
+            serde_json::json!({
+                "stridePx": map.stride,
+                "owner": owner.map(|index| sources[index].path.file_name().unwrap().to_string_lossy().into_owned()),
+                "confidence": map.confidence_at(x,y),
+                "sourceProbabilities": source_ids.iter().map(|&index| serde_json::json!({
+                    "source": sources[index].path.file_name().unwrap().to_string_lossy().into_owned(),
+                    "probability": map.source_probability(index,x,y,4)
+                })).collect::<Vec<_>>()
+            })
+        };
+        let mut samples = Vec::new();
+        for (x, y) in target_points {
+            let yaw = bounds[0] + (f64::from(x) + 0.5) / f64::from(width) * (bounds[1] - bounds[0]);
+            let pitch =
+                bounds[3] - (f64::from(y) + 0.5) / f64::from(height) * (bounds[3] - bounds[2]);
+            let world = [
+                yaw.sin() * pitch.cos(),
+                pitch.sin(),
+                yaw.cos() * pitch.cos(),
+            ];
+            let source_metrics: Vec<Value> = source_ids
+                .iter()
+                .map(|&index| {
+                    let source = &sources[index];
+                    let image = image::open(&source.path).unwrap().into_rgba8();
+                    let quality = SourceQualityMap::from_image(&image);
+                    match sample_geometry(source, world) {
+                        Some((sx, sy, _, ownership)) => {
+                            let (texture, obstruction) =
+                                quality.sample(source.width, source.height, sx, sy);
+                            serde_json::json!({
+                                "source": source.path.file_name().unwrap().to_string_lossy(),
+                                "sourceXY": [sx,sy],
+                                "edgePx": (sx.min(sy).min(f64::from(source.width)-sx).min(f64::from(source.height)-sy)),
+                                "geometryOwnership": ownership,
+                                "texture": texture,
+                                "sharpness": quality.sharpness(source.width,source.height,sx,sy),
+                                "obstructionConfidence": obstruction,
+                                "sampledRgb": sample(source,&image,world).map(|value| value.0)
+                            })
+                        }
+                        None => serde_json::json!({
+                            "source": source.path.file_name().unwrap().to_string_lossy(),
+                            "covered": false
+                        }),
+                    }
+                })
+                .collect();
+            samples.push(serde_json::json!({
+                "pixel": [x,y],
+                "warpedOwnership": map_report(&warped_map,x,y),
+                "noWarpOwnership": plain_map.as_ref().map(|map| map_report(map,x,y)),
+                "edgeSourceMetrics": source_metrics
+            }));
+        }
+
+        let source_bytes: Vec<u64> = sources
+            .iter()
+            .map(|source| u64::from(source.width) * u64::from(source.height) * 4)
+            .collect();
+        let rows: std::collections::BTreeSet<u32> =
+            target_points.iter().map(|&(_, y)| y / TILE).collect();
+        let cols: std::collections::BTreeSet<u32> =
+            target_points.iter().map(|&(x, _)| x / TILE).collect();
+        let tiles: Vec<(u32, u32)> = rows
+            .iter()
+            .flat_map(|&row| cols.iter().map(move |&col| (row, col)))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let render_variant =
+            |name: &str,
+             mode: BlendMode,
+             variant_sources: &[Source],
+             ownership_map: Option<&CoarseOwnershipMap>| {
+                let dir = output.join(name);
+                fs::create_dir_all(&dir).unwrap();
+                let cache = DecodeCache::new(0, 1);
+                let counters: Vec<AtomicU64> = (0..16).map(|_| AtomicU64::new(0)).collect();
+                for (row, col) in &tiles {
+                    render_one_tile(
+                        *row,
+                        *col,
+                        width,
+                        height,
+                        bounds,
+                        variant_sources,
+                        &source_bytes,
+                        &dir,
+                        &cache,
+                        &counters[0],
+                        &counters[1],
+                        &counters[2],
+                        &counters[3],
+                        &counters[4],
+                        &counters[5],
+                        &counters[6],
+                        &counters[7],
+                        true,
+                        0,
+                        &counters[8],
+                        &counters[9],
+                        &counters[10],
+                        &counters[11],
+                        &counters[12],
+                        &counters[13],
+                        true,
+                        mode,
+                        true,
+                        ownership_map,
+                    )
+                    .expect("render selected full-layout output tile");
+                }
+            };
+        render_variant(
+            "deghost-warped-owner",
+            BlendMode::Deghost,
+            &sources,
+            Some(&warped_map),
+        );
+        render_variant(
+            "deghost-warped-no-owner",
+            BlendMode::Deghost,
+            &sources,
+            None,
+        );
+        render_variant(
+            "deghost-no-warp-owner",
+            BlendMode::Deghost,
+            &no_warp_sources,
+            Some(plain_map.as_ref().unwrap_or(&warped_map)),
+        );
+        render_variant("feather-warped", BlendMode::Feather, &sources, None);
+        render_variant(
+            "feather-no-warp",
+            BlendMode::Feather,
+            &no_warp_sources,
+            None,
+        );
+        fs::write(
+            output.join("diagnostic.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "task": task,
+                "layoutDimensions": [width,height],
+                "ownershipMapDimensions": [warped_map.width,warped_map.height],
+                "sourceWarpCount": source_warp_count,
+                "targetTiles": tiles,
+                "variants": [
+                    "deghost-warped-owner", "deghost-warped-no-owner",
+                    "deghost-no-warp-owner", "feather-warped", "feather-no-warp"
+                ],
+                "samples": samples
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        println!("triangle ablation outputs: {}", output.display());
     }
 
     #[test]
@@ -4423,10 +4974,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(feather_identity["algorithmVersion"], 1);
-        assert_eq!(deghost_identity["algorithmVersion"], 2);
+        assert_eq!(deghost_identity["algorithmVersion"], 3);
         assert_eq!(
             deghost_serial["blendModel"],
-            "sharpness-aware-global-coarse-ownership-v1"
+            "sharpness-aware-peer-coupled-coarse-ownership-v2"
         );
         assert_eq!(
             deghost_serial["completedTiles"],
@@ -4510,7 +5061,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             original["blendModel"],
-            "sharpness-aware-global-coarse-ownership-v1"
+            "sharpness-aware-peer-coupled-coarse-ownership-v2"
         );
         assert_eq!(original["geometryCacheEnabled"], true);
         assert!(original["geometryCachedSourceTileCount"].as_u64().unwrap() > 0);
