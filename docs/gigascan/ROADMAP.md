@@ -1,5 +1,11 @@
 # PocketGigaScan roadmap
 
+PG-067 tracks continuous quality weighting for exported panorama flakes. The shared Rust fix covers Windows and Android; user-owned full restitch comparison remains the visual acceptance gate.
+
+| Task | Scope | Dependency | Status | Owner | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| PG-067 | Continuous deghost quality suppression, compatible render identity and memory accounting | PG-051 | implementation and build qualification in progress | Luna renderer coder and validation coder; Codex independent review/builds | [Plan](../superpowers/plans/2026-10-09-deghost-continuity.md), [Handoff](COLLABORATION.md#pg-067-continuous-deghost-quality-weighting) |
+
 PG-066 completed the bilingual audit of every operator-visible service message
 and UI literal. Plan A shipped: complete EN/ZH dictionary coverage, colon-prefix
 keys, ~22 dynamic regex fallbacks, the completed-queue `publishFailed` retry

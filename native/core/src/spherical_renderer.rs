@@ -621,7 +621,7 @@ fn renderer_identity(blend_mode: BlendMode) -> Value {
     serde_json::json!({
         "schemaVersion": 1,
         "blendModel": blend_mode.model_name(),
-        "algorithmVersion": 1
+        "algorithmVersion": if blend_mode == BlendMode::Deghost { 2 } else { 1 }
     })
 }
 
@@ -1075,15 +1075,61 @@ impl TileGeometryCache {
 }
 
 fn deghost_weight(ownership: f64, max_ownership: f64, source_min_dimension: u32) -> f64 {
-    let temperature = DEGHOST_OWNERSHIP_TEMPERATURE_SOURCE_PIXELS / f64::from(source_min_dimension);
-    ((ownership - max_ownership) / temperature).exp()
+    if !ownership.is_finite() || !max_ownership.is_finite() {
+        return 1.0;
+    }
+    let temperature =
+        DEGHOST_OWNERSHIP_TEMPERATURE_SOURCE_PIXELS / f64::from(source_min_dimension.max(1));
+    let exponent = ((ownership - max_ownership) / temperature).clamp(-80.0, 0.0);
+    exponent.exp()
 }
 
-fn deghost_source_weight_with_sharpness(
+fn smoothstep(edge0: f64, edge1: f64, value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+    let t = ((value - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn quality_suppression_strength(
+    max_structured_peer_texture: f64,
+    obstruction_confidence: f64,
+    texture_energy: f64,
+    normalized_sharpness: f64,
+    max_peer_sharpness: f64,
+) -> f64 {
+    let blur_texture_support = smoothstep(
+        SOURCE_QUALITY_BLUR_PEER_TEXTURE - 2.0,
+        SOURCE_QUALITY_BLUR_PEER_TEXTURE + 2.0,
+        max_structured_peer_texture,
+    );
+    let obstruction_peer_support = smoothstep(
+        SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE - 2.0,
+        SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE + 2.0,
+        max_structured_peer_texture,
+    );
+    let blur_support = if max_peer_sharpness > 0.0 {
+        blur_texture_support
+            * smoothstep(15.0, 21.0, max_peer_sharpness)
+            * (1.0 - smoothstep(0.55, 0.85, normalized_sharpness / max_peer_sharpness))
+    } else {
+        0.0
+    };
+    let obstruction_support = smoothstep(0.50, 0.80, obstruction_confidence)
+        * (1.0
+            - smoothstep(
+                SOURCE_QUALITY_LOW_TEXTURE_MAX * 0.6,
+                SOURCE_QUALITY_LOW_TEXTURE_MAX * 1.4,
+                texture_energy,
+            ))
+        * obstruction_peer_support;
+    blur_support.max(obstruction_support).clamp(0.0, 1.0)
+}
+
+fn adjusted_ownership(
     ownership: f64,
-    max_ownership: f64,
-    max_uncapped_ownership: f64,
-    max_cap_eligible_ownership: f64,
+    best_peer_ownership: f64,
     max_structured_peer_texture: f64,
     obstruction_confidence: f64,
     texture_energy: f64,
@@ -1091,62 +1137,21 @@ fn deghost_source_weight_with_sharpness(
     max_peer_sharpness: f64,
     source_min_dimension: u32,
 ) -> f64 {
-    let local_blur = max_structured_peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
-        && max_peer_sharpness >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
-        && normalized_sharpness <= max_peer_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
-    let current_is_cap_eligible = local_blur
-        || (obstruction_confidence >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
-            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX);
-    let structured_overlap = max_structured_peer_texture >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE
-        && max_uncapped_ownership.is_finite()
-        && max_cap_eligible_ownership > max_uncapped_ownership;
-    if structured_overlap {
-        // Every source that cannot be capped participates in the same
-        // reference. A cap candidate must be either a high-confidence,
-        // low-texture obstruction or locally softer than a textured peer;
-        // interpolation across a quality boundary cannot switch the reference
-        // unless the source also satisfies the corresponding eligibility test.
-        let margin = SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX / f64::from(source_min_dimension);
-        let effective_ownership = if current_is_cap_eligible {
-            ownership.min(max_uncapped_ownership - margin)
-        } else {
-            ownership
-        };
-        deghost_weight(
-            effective_ownership,
-            max_uncapped_ownership,
-            source_min_dimension,
-        )
-    } else {
-        // Without a clean structured peer, preserve the exact old score so
-        // single-source or all-smooth regions never become holes.
-        deghost_weight(ownership, max_ownership, source_min_dimension)
+    if !ownership.is_finite() {
+        return ownership;
     }
-}
-
-#[cfg(test)]
-fn deghost_source_weight(
-    ownership: f64,
-    max_ownership: f64,
-    max_uncapped_ownership: f64,
-    max_cap_eligible_ownership: f64,
-    max_structured_peer_texture: f64,
-    obstruction_confidence: f64,
-    texture_energy: f64,
-    source_min_dimension: u32,
-) -> f64 {
-    deghost_source_weight_with_sharpness(
-        ownership,
-        max_ownership,
-        max_uncapped_ownership,
-        max_cap_eligible_ownership,
+    let strength = quality_suppression_strength(
         max_structured_peer_texture,
         obstruction_confidence,
         texture_energy,
-        0.0,
-        0.0,
-        source_min_dimension,
-    )
+        normalized_sharpness,
+        max_peer_sharpness,
+    );
+    if !best_peer_ownership.is_finite() || strength <= 0.0 {
+        return ownership;
+    }
+    let margin = SOURCE_QUALITY_OVERRIDE_MARGIN_SOURCE_PX / f64::from(source_min_dimension.max(1));
+    ownership - strength * (ownership - best_peer_ownership + margin).max(0.0)
 }
 
 fn accumulate_weighted(cell: &mut [f32; 4], rgb: [f64; 3], weight: f64) {
@@ -1273,9 +1278,10 @@ fn render_layout_tiles_with_options_internal_and_ownership(
         max_decode = max_decode.max(bytes.saturating_mul(2));
     }
     let tile_bytes_per_pixel = if blend_mode == BlendMode::Deghost {
-        // accum[4] (16 bytes) + global, uncapped, and cap-eligible ownership
-        // (12 bytes) + local peer texture and sharpness (2 bytes), plus Vec overhead.
-        34
+        // accum[4] (16 bytes), adjusted and top-two raw ownership scores
+        // (24 bytes), winning source index (8 bytes), and peer texture/sharpness
+        // maxima (16 bytes), plus Vec overhead.
+        64
     } else {
         24
     };
@@ -1922,15 +1928,15 @@ fn render_one_tile(
             (pitch.sin(), pitch.cos())
         })
         .collect();
+    let mut max_adjusted_ownership =
+        (blend_mode == BlendMode::Deghost).then(|| vec![f64::NEG_INFINITY; count]);
     let mut max_ownership =
-        (blend_mode == BlendMode::Deghost).then(|| vec![f32::NEG_INFINITY; count]);
-    let mut max_unflagged_ownership =
-        (blend_mode == BlendMode::Deghost).then(|| vec![f32::NEG_INFINITY; count]);
-    let mut max_cap_eligible_ownership =
-        (blend_mode == BlendMode::Deghost).then(|| vec![f32::NEG_INFINITY; count]);
-    let mut max_structured_peer_texture =
-        (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
-    let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0u8; count]);
+        (blend_mode == BlendMode::Deghost).then(|| vec![f64::NEG_INFINITY; count]);
+    let mut second_ownership =
+        (blend_mode == BlendMode::Deghost).then(|| vec![f64::NEG_INFINITY; count]);
+    let mut max_owner_source = (blend_mode == BlendMode::Deghost).then(|| vec![usize::MAX; count]);
+    let mut max_peer_texture = (blend_mode == BlendMode::Deghost).then(|| vec![0.0f64; count]);
+    let mut max_peer_sharpness = (blend_mode == BlendMode::Deghost).then(|| vec![0.0f64; count]);
     let mut source_quality_maps = vec![None; sources.len()];
     let candidate_sources = if candidate_list_enabled {
         let mut indices = Vec::new();
@@ -1976,7 +1982,7 @@ fn render_one_tile(
     }
     let mut tile_cached_source_count = 0u64;
     let mut tile_projection_reuses = 0u64;
-    if let Some(scores) = max_ownership.as_mut() {
+    if blend_mode == BlendMode::Deghost {
         let ownership_started = Instant::now();
         for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
         {
@@ -2022,20 +2028,30 @@ fn render_one_tile(
                         if let Some(geometry) = cached_geometry.as_mut() {
                             geometry.store(index, source_x, source_y);
                         }
-                        scores[index] = scores[index].max(ownership as f32);
+                        let scores = max_ownership.as_mut().unwrap();
+                        let runner_up = second_ownership.as_mut().unwrap();
+                        let owners = max_owner_source.as_mut().unwrap();
+                        let score = ownership;
+                        if score > scores[index] {
+                            runner_up[index] = scores[index];
+                            scores[index] = score;
+                            owners[index] = source_index;
+                        } else if score > runner_up[index] {
+                            runner_up[index] = score;
+                        }
                         let (texture_energy, _) =
                             quality.sample(source.width, source.height, source_x, source_y);
                         let sharpness =
                             quality.sharpness(source.width, source.height, source_x, source_y);
-                        if texture_energy >= SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE {
-                            let peer_texture =
-                                &mut max_structured_peer_texture.as_mut().unwrap()[index];
-                            *peer_texture =
-                                (*peer_texture).max(texture_energy.round().clamp(0.0, 255.0) as u8);
-                            let peer_sharpness = &mut max_peer_sharpness.as_mut().unwrap()[index];
-                            *peer_sharpness =
-                                (*peer_sharpness).max(sharpness.round().clamp(0.0, 255.0) as u8);
-                        }
+                        let peer_texture = &mut max_peer_texture.as_mut().unwrap()[index];
+                        *peer_texture = (*peer_texture).max(texture_energy);
+                        let sharpness_support = smoothstep(
+                            SOURCE_QUALITY_BLUR_PEER_TEXTURE - 2.0,
+                            SOURCE_QUALITY_BLUR_PEER_TEXTURE + 2.0,
+                            texture_energy,
+                        );
+                        let peer_sharpness = &mut max_peer_sharpness.as_mut().unwrap()[index];
+                        *peer_sharpness = (*peer_sharpness).max(sharpness * sharpness_support);
                     }
                 }
             }
@@ -2044,10 +2060,10 @@ fn render_one_tile(
             ownership_started.elapsed().as_micros() as u64,
             Ordering::Relaxed,
         );
-        // Classify sources only after the per-pixel peer sharpness is known.
-        // This makes the decision independent of source order and compares
-        // local texture at the same projected scene point, rather than a
-        // whole-image sharpness score.
+        // Apply continuous quality suppression only after peer sharpness is
+        // known, then use the same adjusted score as the softmax reference.
+        // This keeps source ordering irrelevant and removes gate-dependent
+        // changes to the reference score.
         let classification_started = Instant::now();
         for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
         {
@@ -2089,23 +2105,26 @@ fn render_one_tile(
                             quality.sample(source.width, source.height, source_x, source_y);
                         let sharpness =
                             quality.sharpness(source.width, source.height, source_x, source_y);
-                        let peer_texture =
-                            f64::from(max_structured_peer_texture.as_ref().unwrap()[index]);
-                        let peer_sharp = f64::from(max_peer_sharpness.as_ref().unwrap()[index]);
-                        let blurred_against_peer = sharpness_aware
-                            && peer_texture >= SOURCE_QUALITY_BLUR_PEER_TEXTURE
-                            && peer_sharp >= SOURCE_QUALITY_BLUR_PEER_SHARPNESS
-                            && sharpness <= peer_sharp * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
-                        let obstructed = obstruction_confidence
-                            >= SOURCE_QUALITY_SUSPECT_CONFIDENCE
-                            && texture_energy <= SOURCE_QUALITY_LOW_TEXTURE_MAX;
-                        if blurred_against_peer || obstructed {
-                            let eligible_scores = max_cap_eligible_ownership.as_mut().unwrap();
-                            eligible_scores[index] = eligible_scores[index].max(ownership as f32);
-                        } else {
-                            let clean_scores = max_unflagged_ownership.as_mut().unwrap();
-                            clean_scores[index] = clean_scores[index].max(ownership as f32);
-                        }
+                        let peer_texture = max_peer_texture.as_ref().unwrap()[index];
+                        let peer_sharp = max_peer_sharpness.as_ref().unwrap()[index];
+                        let peer_ownership =
+                            if max_owner_source.as_ref().unwrap()[index] == source_index {
+                                second_ownership.as_ref().unwrap()[index]
+                            } else {
+                                max_ownership.as_ref().unwrap()[index]
+                            };
+                        let adjusted = adjusted_ownership(
+                            ownership,
+                            peer_ownership,
+                            peer_texture,
+                            obstruction_confidence,
+                            texture_energy,
+                            sharpness,
+                            if sharpness_aware { peer_sharp } else { 0.0 },
+                            source.width.min(source.height),
+                        );
+                        let scores = max_adjusted_ownership.as_mut().unwrap();
+                        scores[index] = scores[index].max(adjusted);
                     }
                 }
             }
@@ -2184,20 +2203,27 @@ fn render_one_tile(
                             let (texture_energy, obstruction_confidence) =
                                 quality.sample(source.width, source.height, x, y);
                             let sharpness = quality.sharpness(source.width, source.height, x, y);
-                            deghost_source_weight_with_sharpness(
+                            let adjusted = adjusted_ownership(
                                 ownership,
-                                f64::from(max_ownership.as_ref().unwrap()[index]),
-                                f64::from(max_unflagged_ownership.as_ref().unwrap()[index]),
-                                f64::from(max_cap_eligible_ownership.as_ref().unwrap()[index]),
-                                f64::from(max_structured_peer_texture.as_ref().unwrap()[index]),
+                                if max_owner_source.as_ref().unwrap()[index] == source_index {
+                                    second_ownership.as_ref().unwrap()[index]
+                                } else {
+                                    max_ownership.as_ref().unwrap()[index]
+                                },
+                                max_peer_texture.as_ref().unwrap()[index],
                                 obstruction_confidence,
                                 texture_energy,
                                 sharpness,
                                 if sharpness_aware {
-                                    f64::from(max_peer_sharpness.as_ref().unwrap()[index])
+                                    max_peer_sharpness.as_ref().unwrap()[index]
                                 } else {
                                     0.0
                                 },
+                                source.width.min(source.height),
+                            );
+                            deghost_weight(
+                                adjusted,
+                                max_adjusted_ownership.as_ref().unwrap()[index],
                                 source.width.min(source.height),
                             )
                         }
@@ -3371,18 +3397,9 @@ mod tests {
         let (moderate_texture, moderate_confidence) = moderate_map.sample(640, 360, 580., 180.);
         assert!(moderate_texture <= SOURCE_QUALITY_LOW_TEXTURE_MAX);
         assert!(moderate_confidence < SOURCE_QUALITY_SUSPECT_CONFIDENCE);
-        let legacy_weight = deghost_weight(550. / 2160., 550. / 2160., 2160);
-        let weak_evidence_weight = deghost_source_weight(
-            550. / 2160.,
-            550. / 2160.,
-            550. / 2160.,
-            f64::NEG_INFINITY,
-            10.,
-            moderate_confidence,
-            moderate_texture,
-            2160,
-        );
-        assert_eq!(weak_evidence_weight, legacy_weight);
+        let weak_strength =
+            quality_suppression_strength(10., moderate_confidence, moderate_texture, 0., 0.);
+        assert!(weak_strength < 0.01);
 
         // Keep a textured, bright scene outside the flat border so the
         // detector sees strong peer/boundary evidence even after 64x36
@@ -3524,58 +3541,35 @@ mod tests {
             single_blur_sharpness < single_crisp_sharpness,
             "single-scale blur should lower sharpness even when it may not meet suppression cutoff: crisp={single_crisp_sharpness}, blurred={single_blur_sharpness}"
         );
-        let single_blur_is_cap_eligible =
-            single_blur_sharpness <= single_crisp_sharpness * SOURCE_QUALITY_BLUR_RELATIVE_MAX;
-        let single_blur_weight = deghost_source_weight_with_sharpness(
-            0.35,
-            0.35,
-            if single_blur_is_cap_eligible {
-                0.25
-            } else {
-                0.35
-            },
-            if single_blur_is_cap_eligible {
-                0.35
-            } else {
-                f64::NEG_INFINITY
-            },
+        let single_blur_strength = quality_suppression_strength(
             single_crisp_texture,
             0.0,
             single_blur_texture,
             single_blur_sharpness,
             single_crisp_sharpness,
-            2160,
         );
-        if !single_blur_is_cap_eligible {
-            assert_eq!(single_blur_weight, 1.0);
-        } else {
-            assert!(single_blur_weight < 1.0);
-        }
+        assert!(single_blur_strength > 0.0);
 
         let flat = RgbaImage::from_pixel(WIDTH, HEIGHT, Rgba([128, 128, 128, 255]));
         let flat_map = SourceQualityMap::from_image(&flat);
         let (flat_texture, _) = flat_map.sample(WIDTH, HEIGHT, 1024.0, 576.0);
         let flat_sharpness = flat_map.sharpness(WIDTH, HEIGHT, 1024.0, 576.0);
         assert!(flat_texture < SOURCE_QUALITY_BLUR_PEER_TEXTURE);
-        let flat_weight = deghost_source_weight_with_sharpness(
+        let flat_adjusted = adjusted_ownership(
             0.3,
-            0.35,
-            0.25,
-            0.3,
+            f64::NEG_INFINITY,
             flat_texture,
-            0.0,
+            0.95,
             flat_texture,
             flat_sharpness,
             crisp_sharpness,
             2160,
         );
-        assert_eq!(flat_weight, deghost_weight(0.3, 0.35, 2160));
+        assert_eq!(flat_adjusted, 0.3);
 
-        let blurred_weight = deghost_source_weight_with_sharpness(
-            0.35,
+        let blurred_adjusted = adjusted_ownership(
             0.35,
             0.25,
-            0.35,
             crisp_texture,
             0.0,
             blurred_texture,
@@ -3583,9 +3577,7 @@ mod tests {
             crisp_sharpness,
             2160,
         );
-        let crisp_weight = deghost_source_weight_with_sharpness(
-            0.25,
-            0.35,
+        let crisp_adjusted = adjusted_ownership(
             0.25,
             0.35,
             crisp_texture,
@@ -3595,8 +3587,134 @@ mod tests {
             crisp_sharpness,
             2160,
         );
-        assert!(blurred_weight < 0.001);
-        assert_eq!(crisp_weight, 1.0);
+        assert!(blurred_adjusted < 0.35);
+        assert_eq!(crisp_adjusted, 0.25);
+    }
+
+    #[test]
+    fn blur_suppression_changes_continuously_across_former_cutoff() {
+        let peer_ownership = 0.30;
+        let source_ownership = 0.30;
+        let peer_texture = 80.0;
+        let peer_sharpness = 100.0;
+        let weights: Vec<f64> = (0..=10)
+            .map(|step| {
+                let ratio = 0.69 + step as f64 * 0.002;
+                let adjusted = adjusted_ownership(
+                    source_ownership,
+                    peer_ownership,
+                    peer_texture,
+                    0.0,
+                    40.0,
+                    ratio * peer_sharpness,
+                    peer_sharpness,
+                    2160,
+                );
+                let peer_adjusted = adjusted_ownership(
+                    peer_ownership,
+                    source_ownership,
+                    peer_texture,
+                    0.0,
+                    40.0,
+                    peer_sharpness,
+                    peer_sharpness,
+                    2160,
+                );
+                deghost_weight(adjusted, adjusted.max(peer_adjusted), 2160)
+            })
+            .collect();
+        let largest_step = weights
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            largest_step < 0.05,
+            "softmax weight jumped near former 0.70 cutoff: {largest_step}, weights={weights:?}"
+        );
+
+        let peer_ownership = 0.30;
+        let obstruction_weights: Vec<f64> = (0..=150)
+            .map(|step| {
+                let confidence = 0.50 + step as f64 * 0.002;
+                let adjusted = adjusted_ownership(
+                    peer_ownership,
+                    peer_ownership,
+                    40.0,
+                    confidence,
+                    0.0,
+                    0.0,
+                    0.0,
+                    2160,
+                );
+                deghost_weight(adjusted, adjusted.max(peer_ownership), 2160)
+            })
+            .collect();
+        let largest_obstruction_step = obstruction_weights
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .fold(0.0, f64::max);
+        assert!(
+            largest_obstruction_step < 0.05,
+            "softmax weight jumped near former obstruction cutoff: {largest_obstruction_step}, weights={obstruction_weights:?}"
+        );
+        assert!(obstruction_weights[0] > 0.99);
+        assert!(obstruction_weights[150] < 0.001);
+    }
+
+    #[test]
+    fn quality_adjusted_softmax_is_order_invariant_and_keeps_flat_no_peer() {
+        let candidates = [
+            (0.31, 80.0, 0.0, 40.0, 48.0),
+            (0.29, 72.0, 0.0, 40.0, 100.0),
+            (0.28, 64.0, 0.0, 40.0, 85.0),
+        ];
+        let render_order = |order: [usize; 3]| {
+            let peer_texture = candidates
+                .iter()
+                .map(|candidate| candidate.1)
+                .fold(0.0, f64::max);
+            let peer_sharpness = candidates
+                .iter()
+                .map(|candidate| candidate.4)
+                .fold(0.0, f64::max);
+            let adjusted: Vec<f64> = order
+                .iter()
+                .map(|&index| {
+                    let (ownership, _, obstruction, texture, sharpness) = candidates[index];
+                    let best_peer = candidates
+                        .iter()
+                        .enumerate()
+                        .filter(|(other, _)| *other != index)
+                        .map(|(_, candidate)| candidate.0)
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    adjusted_ownership(
+                        ownership,
+                        best_peer,
+                        peer_texture,
+                        obstruction,
+                        texture,
+                        sharpness,
+                        peer_sharpness,
+                        2160,
+                    )
+                })
+                .collect();
+            let maximum = adjusted.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            order
+                .iter()
+                .enumerate()
+                .map(|(position, &index)| {
+                    (index, deghost_weight(adjusted[position], maximum, 2160))
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        assert_eq!(render_order([0, 1, 2]), render_order([2, 0, 1]));
+
+        let flat_adjusted =
+            adjusted_ownership(0.25, f64::NEG_INFINITY, 0.0, 0.95, 0.0, 0.0, 0.0, 2160);
+        assert_eq!(flat_adjusted, 0.25);
+        assert_eq!(deghost_weight(flat_adjusted, flat_adjusted, 2160), 1.0);
+        assert_eq!(deghost_weight(0.25, f64::NEG_INFINITY, 2160), 1.0);
     }
 
     #[test]
@@ -3648,7 +3766,7 @@ mod tests {
         render_layout_tiles_with_options_internal(
             &layout,
             &legacy_dir,
-            32,
+            40,
             1,
             true,
             checkpoint,
@@ -3656,7 +3774,7 @@ mod tests {
         )
         .unwrap();
         render_layout_tiles_with_options_internal_and_ownership(
-            &layout, &sharp_dir, 32, 1, true, checkpoint, true, false,
+            &layout, &sharp_dir, 40, 1, true, checkpoint, true, false,
         )
         .unwrap();
         let legacy = collect_level_zero(&legacy_dir, WIDTH, HEIGHT);
@@ -3705,26 +3823,29 @@ mod tests {
             deghost_weight(obstructed_ownership, obstructed_ownership, 2160);
         assert_eq!(old_obstruction_weight, 1.0);
 
-        let corrected_obstruction_weight = deghost_source_weight(
-            obstructed_ownership,
+        let adjusted_obstruction = adjusted_ownership(
             obstructed_ownership,
             clean_ownership,
-            obstructed_ownership,
-            10.,
+            40.,
             0.9,
             0.0,
+            0.0,
+            0.0,
             2160,
         );
-        let clean_peer_weight = deghost_source_weight(
+        let adjusted_clean = adjusted_ownership(
             clean_ownership,
             obstructed_ownership,
-            clean_ownership,
-            obstructed_ownership,
-            10.,
+            40.,
             0.0,
             10.0,
+            0.0,
+            0.0,
             2160,
         );
+        let max_adjusted = adjusted_obstruction.max(adjusted_clean);
+        let corrected_obstruction_weight = deghost_weight(adjusted_obstruction, max_adjusted, 2160);
+        let clean_peer_weight = deghost_weight(adjusted_clean, max_adjusted, 2160);
         assert!(corrected_obstruction_weight < 0.001);
         assert_eq!(clean_peer_weight, 1.0);
         let mut overlap = [0.0f32; 4];
@@ -3736,45 +3857,29 @@ mod tests {
             "obstruction still dominated blend: {blended}"
         );
 
-        let no_peer_weight = deghost_source_weight(
-            obstructed_ownership,
+        let no_peer_adjusted = adjusted_ownership(
             obstructed_ownership,
             f64::NEG_INFINITY,
-            obstructed_ownership,
-            0.,
+            0.0,
             0.9,
+            0.0,
+            0.0,
             0.0,
             2160,
         );
-        assert_eq!(no_peer_weight, old_obstruction_weight);
-        let smooth_sky_peer_weight = deghost_source_weight(
-            obstructed_ownership,
+        assert_eq!(no_peer_adjusted, obstructed_ownership);
+        let smooth_sky_adjusted = adjusted_ownership(
             obstructed_ownership,
             clean_ownership,
-            obstructed_ownership,
-            SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE - 1.,
+            SOURCE_QUALITY_STRUCTURED_PEER_TEXTURE - 4.,
             0.9,
+            0.0,
+            0.0,
             0.0,
             2160,
         );
-        assert_eq!(smooth_sky_peer_weight, old_obstruction_weight);
-
-        // A high-confidence sample interpolated across a textured boundary
-        // is not eligible for capping and must be included in the common
-        // reference. This guards against an invalid negative denominator
-        // exponent becoming an overflow or NaN.
-        let uncapped_boundary_weight = deghost_source_weight(
-            0.30,
-            0.35,
-            0.30,
-            0.35,
-            10.,
-            0.9,
-            SOURCE_QUALITY_LOW_TEXTURE_MAX + 0.1,
-            2160,
-        );
-        assert!(uncapped_boundary_weight.is_finite());
-        assert_eq!(uncapped_boundary_weight, 1.0);
+        assert_eq!(smooth_sky_adjusted, obstructed_ownership);
+        assert!(deghost_weight(f64::NEG_INFINITY, f64::NEG_INFINITY, 2160).is_finite());
     }
 
     #[test]
@@ -3839,26 +3944,49 @@ mod tests {
         let bad_before = deghost_weight(bad_geometry.3, max_ownership, 2160);
         let good_before = deghost_weight(good_geometry.3, max_ownership, 2160);
         assert!(bad_before > good_before * 1.0e20);
-        let bad_weight = deghost_source_weight(
+        let bad_adjusted = adjusted_ownership(
             bad_geometry.3,
-            max_ownership,
             good_geometry.3,
-            bad_geometry.3,
             good_texture,
             confidence,
             bad_texture,
+            obstruction_map.sharpness(
+                obstruction_source.width,
+                obstruction_source.height,
+                bad_geometry.0,
+                bad_geometry.1,
+            ),
+            clean_map.sharpness(
+                clean_source.width,
+                clean_source.height,
+                good_geometry.0,
+                good_geometry.1,
+            ),
             2160,
         );
-        let good_weight = deghost_source_weight(
-            good_geometry.3,
-            max_ownership,
+        let good_adjusted = adjusted_ownership(
             good_geometry.3,
             bad_geometry.3,
             good_texture,
             good_confidence,
             good_texture,
+            clean_map.sharpness(
+                clean_source.width,
+                clean_source.height,
+                good_geometry.0,
+                good_geometry.1,
+            ),
+            clean_map.sharpness(
+                clean_source.width,
+                clean_source.height,
+                good_geometry.0,
+                good_geometry.1,
+            ),
             2160,
         );
+        let max_adjusted = bad_adjusted.max(good_adjusted);
+        let bad_weight = deghost_weight(bad_adjusted, max_adjusted, 2160);
+        let good_weight = deghost_weight(good_adjusted, max_adjusted, 2160);
         let bad_rgb = sample(obstruction_source, &obstruction, world).unwrap().0;
         let good_rgb = sample(clean_source, &clean, world).unwrap().0;
         let mut blend = [0.0; 4];
@@ -3910,8 +4038,7 @@ mod tests {
                 only_source.path.file_name().unwrap().to_string_lossy(),
                 expected_name
             );
-            let only_source_weight =
-                deghost_source_weight(0.25, 0.25, f64::NEG_INFINITY, 0.25, 0.0, 0.95, 0.0, 2160);
+            let only_source_weight = deghost_weight(0.25, f64::NEG_INFINITY, 2160);
             assert_eq!(only_source_weight, 1.0);
         }
     }
@@ -4213,7 +4340,7 @@ mod tests {
         let shifted_deghost_fallback = render_layout_tiles_with_options(
             &shifted_deghost_layout,
             &shifted_deghost_fallback_dir,
-            92,
+            102,
             1,
             true,
             |_, _| true,
@@ -4277,7 +4404,7 @@ mod tests {
         let deghost_fallback = render_layout_tiles_with_options(
             &deghost_layout,
             &deghost_fallback_dir,
-            92,
+            102,
             1,
             true,
             |_, _| true,
@@ -4288,6 +4415,15 @@ mod tests {
         assert_eq!(deghost_serial["workersEffective"].as_u64(), Some(1));
         assert_eq!(deghost_fallback["workersEffective"].as_u64(), Some(1));
         assert_eq!(serial["blendModel"], "source-edge-smoothstep-feather");
+        let feather_identity: Value =
+            serde_json::from_slice(&fs::read(serial_dir.join("renderer-identity.json")).unwrap())
+                .unwrap();
+        let deghost_identity: Value = serde_json::from_slice(
+            &fs::read(deghost_serial_dir.join("renderer-identity.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(feather_identity["algorithmVersion"], 1);
+        assert_eq!(deghost_identity["algorithmVersion"], 2);
         assert_eq!(
             deghost_serial["blendModel"],
             "sharpness-aware-global-coarse-ownership-v1"
