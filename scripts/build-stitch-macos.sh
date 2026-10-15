@@ -201,5 +201,5 @@ PY
 python3 "$repo/scripts/verify-macos-package.py" --bundle "$package/PocketGigaScan.app" --smoke
 python3 "$repo/scripts/verify-macos-package.py" --write-manifest "$package" --lock "$repo/scripts/macos-dependencies.lock.json"
 ditto -c -k --sequesterRsrc --keepParent "$package" "$output_dir/PocketGigaScan-macos-arm64.zip"
-shasum -a 256 "$output_dir/PocketGigaScan-macos-arm64.zip" > "$output_dir/PocketGigaScan-macos-arm64.zip.sha256"
+(cd "$output_dir" && shasum -a 256 PocketGigaScan-macos-arm64.zip > PocketGigaScan-macos-arm64.zip.sha256)
 echo "Package ready: $output_dir/PocketGigaScan-macos-arm64.zip"

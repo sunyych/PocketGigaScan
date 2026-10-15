@@ -180,7 +180,13 @@ fn spherical_abi_registers_a_true_nine_view_textured_sphere() {
     assert_eq!(layout["report"]["neighborMode"], "eight");
     assert_eq!(layout["report"]["totalEdges"], 20);
     assert_eq!(layout["report"]["effectiveWorkers"], 1);
-    assert_eq!(parallel["layout"]["report"]["effectiveWorkers"], 4);
+    let available_workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    assert_eq!(
+        parallel["layout"]["report"]["effectiveWorkers"],
+        4.min(available_workers)
+    );
     assert_eq!(
         layout["report"]["featureCount"],
         parallel["layout"]["report"]["featureCount"]

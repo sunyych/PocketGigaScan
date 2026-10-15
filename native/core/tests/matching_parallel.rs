@@ -105,7 +105,13 @@ fn serial_and_parallel_edge_matching_are_equivalent() {
     );
     assert_eq!(serial["layout"]["report"]["requestedMatchingWorkers"], 4);
     assert_eq!(serial["layout"]["report"]["effectiveMatchingWorkers"], 1);
-    assert_eq!(parallel["layout"]["report"]["effectiveMatchingWorkers"], 4);
+    let available_workers = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    assert_eq!(
+        parallel["layout"]["report"]["effectiveMatchingWorkers"],
+        4.min(available_workers)
+    );
 }
 
 #[test]

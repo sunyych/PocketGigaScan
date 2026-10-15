@@ -209,7 +209,7 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
         data = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 3)) + chunk(b"IEND", b"")
         path.write_bytes(data)
 
-    with tempfile.TemporaryDirectory(prefix="pocketgigascan-macos-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="PocketGigaScan-场景-🧩-macOS-smoke-") as temporary:
         capabilities = call({"command": "capabilities"}).get("capabilities", {})
         memory = capabilities.get("systemMemory") or {}
         if not capabilities.get("sceneAnalysisAvailable") or not capabilities.get("jpegXlAvailable"):

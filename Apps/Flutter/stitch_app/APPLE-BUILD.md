@@ -113,13 +113,19 @@ described for connecting to a DWARF3 camera.
 This is an ad-hoc-signed developer-test package. It is not notarized and is not
 an App Store release. On first launch, macOS may require opening the app through
 Finder. If Gatekeeper blocks it, first verify the ZIP SHA-256, then use
-**System Settings > Privacy & Security > Open Anyway** for this app. The archive
-SHA-256 is written next to the ZIP.
+**System Settings > Privacy & Security > Open Anyway** for this app. The build
+writes a relative ZIP filename in the adjacent SHA-256 file; copy both files to
+the Mac and verify the copied ZIP before extraction:
+
+```sh
+shasum -a 256 -c PocketGigaScan-macos-arm64.zip.sha256
+```
 
 ### Manual Mac acceptance
 
-Use a Mac running macOS 14 or later with Apple Silicon. Verify the adjacent ZIP
-digest, extract the archive, and open `PocketGigaScan.app`. Check that the app
+Use a Mac running macOS 14 or later with Apple Silicon. Copy the ZIP and its
+`.sha256` file together, verify the ZIP with the command above, extract the
+archive, and open `PocketGigaScan.app`. Check that the app
 starts without a native runtime or model error, import the original photos for
 a small panorama, inspect its preview and final export, and export PNG, TIFF,
 and JPEG XL. Close and reopen the app to confirm the task can resume and the
