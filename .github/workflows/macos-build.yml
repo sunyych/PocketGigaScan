@@ -111,6 +111,43 @@ jobs:
         with:
           name: PocketGigaScan-scene-model-${{ github.sha }}
           path: ${{ runner.temp }}/PocketGigaScan-scene-model
+      - name: Non-qualifying cached package preflight
+        id: cached-package-preflight
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+          log="$RUNNER_TEMP/macos-cached-package-preflight.log"
+          {
+            candidate="$(python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path(".build/macos/package-staging")
+          candidates = [p for p in root.rglob("PocketGigaScan.app") if p.is_dir()] if root.exists() else []
+          if candidates:
+              latest = max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.as_posix()))
+              print(latest)
+          PY
+          )"
+            if [[ -z "$candidate" ]]; then
+              echo 'No cached app candidate is available for preflight.'
+            else
+              echo "Running non-qualifying smoke preflight on newest cached app: $candidate"
+              python3 scripts/verify-macos-package.py --bundle "$candidate" --smoke
+            fi
+          } >"$log" 2>&1
+          result=$?
+          cat "$log"
+          echo "Preflight exit code: $result"
+          exit "$result"
+      - name: Upload cached package preflight log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-cached-package-preflight-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/macos-cached-package-preflight.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Run macOS packaging contracts
         run: python3 -m unittest scripts.tests.test_macos_build -v
       - name: Build, infer, and export the portable client

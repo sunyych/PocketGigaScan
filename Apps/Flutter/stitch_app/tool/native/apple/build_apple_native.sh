@@ -127,15 +127,15 @@ if [[ "$platform" == ios ]]; then
   require_static_opencv "$simulator_arm_root"
   require_static_opencv "$simulator_x86_root"
   for name in $link_libs; do
-    lipo -verify_arch arm64 "$simulator_arm_root/lib/lib${name}.a" >/dev/null || {
+    lipo "$simulator_arm_root/lib/lib${name}.a" -verify_arch arm64 >/dev/null || {
       echo "Simulator arm64 archive lib${name}.a has no arm64 slice: $simulator_arm_root/lib/lib${name}.a" >&2
       exit 66
     }
-    lipo -verify_arch x86_64 "$simulator_x86_root/lib/lib${name}.a" >/dev/null || {
+    lipo "$simulator_x86_root/lib/lib${name}.a" -verify_arch x86_64 >/dev/null || {
       echo "Simulator x86_64 archive lib${name}.a has no x86_64 slice: $simulator_x86_root/lib/lib${name}.a" >&2
       exit 66
     }
-    lipo -verify_arch arm64 "$device_root/lib/lib${name}.a" >/dev/null || {
+    lipo "$device_root/lib/lib${name}.a" -verify_arch arm64 >/dev/null || {
       echo "Device archive lib${name}.a must contain arm64: $device_root/lib/lib${name}.a" >&2
       exit 66
     }
@@ -192,11 +192,11 @@ else
       echo "macOS requires the OpenCV runtime dylib lib${name}.dylib under $macos_x86_root/lib." >&2
       exit 66
     }
-    lipo -verify_arch arm64 "$macos_arm_root/lib/lib${name}.dylib" >/dev/null || {
+    lipo "$macos_arm_root/lib/lib${name}.dylib" -verify_arch arm64 >/dev/null || {
       echo "OpenCV module lib${name}.dylib has no arm64 slice." >&2
       exit 66
     }
-    lipo -verify_arch x86_64 "$macos_x86_root/lib/lib${name}.dylib" >/dev/null || {
+    lipo "$macos_x86_root/lib/lib${name}.dylib" -verify_arch x86_64 >/dev/null || {
       echo "OpenCV module lib${name}.dylib has no x86_64 slice." >&2
       exit 66
     }
@@ -232,11 +232,11 @@ else
       echo "macOS OpenCV runtime filenames differ by architecture: $arm_lib and $x86_lib" >&2
       exit 66
     }
-    lipo -verify_arch arm64 "$arm_lib" >/dev/null || {
+    lipo "$arm_lib" -verify_arch arm64 >/dev/null || {
       echo "OpenCV runtime $(basename "$arm_lib") has no arm64 slice." >&2
       exit 66
     }
-    lipo -verify_arch x86_64 "$x86_lib" >/dev/null || {
+    lipo "$x86_lib" -verify_arch x86_64 >/dev/null || {
       echo "OpenCV runtime $(basename "$x86_lib") has no x86_64 slice." >&2
       exit 66
     }

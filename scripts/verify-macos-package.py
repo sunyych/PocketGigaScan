@@ -93,8 +93,16 @@ def run(command: list[str]) -> str:
     return completed.stdout.strip()
 
 
+def verify_arm64(binary: Path) -> None:
+    run(["lipo", str(binary), "-verify_arch", "arm64"])
+
+
+def macho_dependencies(binary: Path) -> list[str]:
+    return run(["otool", "-arch", "arm64", "-L", str(binary)]).splitlines()[1:]
+
+
 def verify_macho_minimum(binary: Path, expected: str) -> None:
-    load_commands = run(["otool", "-l", str(binary)])
+    load_commands = run(["otool", "-arch", "arm64", "-l", str(binary)])
     for block in re.split(r"(?m)^Load command \d+\s*$", load_commands):
         if "LC_BUILD_VERSION" not in block and "LC_VERSION_MIN_MACOSX" not in block:
             continue
@@ -161,9 +169,9 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
             framework_binaries.append(path)
     mach_o_binaries = sorted(set(dylibs + framework_binaries + [executable]))
     for binary in mach_o_binaries:
-        run(["lipo", "-verify_arch", "arm64", str(binary)])
+        verify_arm64(binary)
         verify_macho_minimum(binary, "14.0")
-        dependencies = run(["otool", "-L", str(binary)]).splitlines()[1:]
+        dependencies = macho_dependencies(binary)
         for dependency in dependencies:
             name = dependency.strip().split(" ", 1)[0]
             if name.startswith(("/opt/homebrew/", "/usr/local/", "/Users/")):

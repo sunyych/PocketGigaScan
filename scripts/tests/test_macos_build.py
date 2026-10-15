@@ -97,6 +97,16 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("-iname 'README*'", self.builder)
         self.assertIn('OpenCV-$codec-$(basename "$source")', self.builder)
 
+    def test_apple_helper_uses_lipo_input_before_architecture_operation(self) -> None:
+        verify_lines = [
+            line for line in (ROOT / "Apps/Flutter/stitch_app/tool/native/apple/build_apple_native.sh")
+            .read_text(encoding="utf-8").splitlines()
+            if "lipo " in line and "-verify_arch" in line
+        ]
+        self.assertEqual(len(verify_lines), 7)
+        self.assertTrue(all(re.search(r'lipo "[^\"]+" -verify_arch (?:arm64|x86_64)', line) for line in verify_lines))
+        self.assertNotRegex("\n".join(verify_lines), r"lipo\s+-verify_arch")
+
     def test_distribution_is_public_runner_artifact_without_signing_credentials(self) -> None:
         for trigger in ("push:", "pull_request:", "workflow_dispatch:"):
             self.assertIn(trigger, self.workflow)
@@ -116,6 +126,19 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("failure()", self.workflow)
         self.assertIn("test/failures/**/*.png", self.workflow)
         self.assertIn("Inspect restored App.framework architecture candidate", self.workflow)
+        self.assertLess(
+            self.workflow.index("Non-qualifying cached package preflight"),
+            self.workflow.index("Build, infer, and export the portable client"),
+        )
+        self.assertIn('--bundle "$candidate" --smoke', self.workflow)
+        self.assertIn('max(candidates, key=lambda p: (p.stat().st_mtime_ns, p.as_posix()))', self.workflow)
+        self.assertIn('name: macos-cached-package-preflight-${{ github.sha }}-${{ github.run_attempt }}', self.workflow)
+        self.assertIn('"otool", "-arch", "arm64", "-l", str(binary)', self.verifier)
+        self.assertIn('"otool", "-arch", "arm64", "-L", str(binary)', self.verifier)
+        self.assertLess(
+            self.workflow.index("Upload cached package preflight log"),
+            self.workflow.index("Run macOS packaging contracts"),
+        )
         self.assertIn("lipo -info", self.workflow)
         self.assertIn("file -L", self.workflow)
         self.assertIn("retention-days: 7", self.workflow)
@@ -154,13 +177,27 @@ class MacBuildContractTests(unittest.TestCase):
     def test_verifier_command_errors_include_tool_diagnostics(self) -> None:
         failure = subprocess.CalledProcessError(
             1,
-            ["lipo", "-verify_arch", "arm64", "App"],
+            ["lipo", "App", "-verify_arch", "arm64"],
             output="input file is not a Mach-O",
             stderr="Non-fat file: App is architecture: x86_64",
         )
         with patch.object(VERIFIER.subprocess, "run", side_effect=failure):
             with self.assertRaisesRegex(RuntimeError, "stderr:\\nNon-fat file: App is architecture: x86_64"):
-                VERIFIER.run(["lipo", "-verify_arch", "arm64", "App"])
+                VERIFIER.run(["lipo", "App", "-verify_arch", "arm64"])
+
+    def test_verifier_passes_input_before_lipo_architecture_operation(self) -> None:
+        with patch.object(VERIFIER.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as mocked:
+            VERIFIER.verify_arm64(Path("App"))
+        self.assertEqual(mocked.call_args.args[0], ["lipo", "App", "-verify_arch", "arm64"])
+
+    def test_bundle_macho_checks_target_arm64_slice_minimum_and_dependencies(self) -> None:
+        with patch.object(VERIFIER, "run", return_value="Load command 1\n      cmd LC_BUILD_VERSION\n   minos 14.1\n") as mocked:
+            with self.assertRaisesRegex(ValueError, "requires macOS 14.1"):
+                VERIFIER.verify_macho_minimum(Path("App"), "14.0")
+        self.assertEqual(mocked.call_args.args[0], ["otool", "-arch", "arm64", "-l", "App"])
+        with patch.object(VERIFIER, "run", return_value="App:\n\t@rpath/libx.dylib\n") as mocked:
+            self.assertEqual(VERIFIER.macho_dependencies(Path("App")), ["\t@rpath/libx.dylib"])
+        self.assertEqual(mocked.call_args.args[0], ["otool", "-arch", "arm64", "-L", "App"])
 
     def test_macos_runner_localizes_permission_and_native_menus(self) -> None:
         runner = ROOT / "Apps/Flutter/stitch_app/macos/Runner"
