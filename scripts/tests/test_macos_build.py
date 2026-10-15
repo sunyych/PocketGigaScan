@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import importlib.util
 import re
+import subprocess
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
@@ -114,10 +115,14 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("Upload Flutter golden failure images", self.workflow)
         self.assertIn("failure()", self.workflow)
         self.assertIn("test/failures/**/*.png", self.workflow)
+        self.assertIn("Inspect restored App.framework architecture candidate", self.workflow)
+        self.assertIn("lipo -info", self.workflow)
+        self.assertIn("file -L", self.workflow)
         self.assertIn("retention-days: 7", self.workflow)
         self.assertIn("Collect non-qualifying macOS golden snapshots for diagnosis", self.workflow)
         self.assertIn("continue-on-error: true", self.workflow)
         self.assertIn("--update-goldens", self.workflow)
+        self.assertIn("original Flutter test produced no failure PNGs", self.workflow)
         self.assertIn("macos-golden-diagnostic-snapshots-${{ github.sha }}", self.workflow)
         self.assertIn("test/goldens/**/*.png", self.workflow)
         for golden_test in (
@@ -145,6 +150,17 @@ class MacBuildContractTests(unittest.TestCase):
             manifest.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Pinned scene model size/SHA mismatch"):
                 VERIFIER.verify_model(model, manifest)
+
+    def test_verifier_command_errors_include_tool_diagnostics(self) -> None:
+        failure = subprocess.CalledProcessError(
+            1,
+            ["lipo", "-verify_arch", "arm64", "App"],
+            output="input file is not a Mach-O",
+            stderr="Non-fat file: App is architecture: x86_64",
+        )
+        with patch.object(VERIFIER.subprocess, "run", side_effect=failure):
+            with self.assertRaisesRegex(RuntimeError, "stderr:\\nNon-fat file: App is architecture: x86_64"):
+                VERIFIER.run(["lipo", "-verify_arch", "arm64", "App"])
 
     def test_macos_runner_localizes_permission_and_native_menus(self) -> None:
         runner = ROOT / "Apps/Flutter/stitch_app/macos/Runner"

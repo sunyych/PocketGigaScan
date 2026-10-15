@@ -79,7 +79,17 @@ def verify_model(model_path: Path, manifest_path: Path) -> dict:
 
 
 def run(command: list[str]) -> str:
-    completed = subprocess.run(command, check=True, text=True, capture_output=True)
+    try:
+        completed = subprocess.run(command, check=True, text=True, capture_output=True)
+    except subprocess.CalledProcessError as error:
+        details = [f"Command failed with exit status {error.returncode}: {command!r}"]
+        stdout = (error.stdout or "").strip()
+        stderr = (error.stderr or "").strip()
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        raise RuntimeError("\n".join(details)) from error
     return completed.stdout.strip()
 
 

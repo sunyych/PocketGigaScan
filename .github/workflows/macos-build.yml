@@ -83,6 +83,20 @@ jobs:
           key: pocketgigascan-macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/macos-dependencies.lock.json') }}-READY
           restore-keys: |
             pocketgigascan-macos-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/macos-dependencies.lock.json') }}-PARTIAL-
+      - name: Inspect restored App.framework architecture candidate
+        shell: bash
+        run: |
+          if [[ ! -d .build/macos/package-staging ]]; then
+            echo 'No previous package-staging candidate was restored.'
+            exit 0
+          fi
+          while IFS= read -r -d '' binary; do
+            echo "--- restored candidate: $binary"
+            ls -ld "$binary" || true
+            echo "symlink target: $(readlink "$binary" || true)"
+            file -L "$binary" || true
+            lipo -info "$binary" || true
+          done < <(find .build/macos/package-staging -path '*/Contents/Frameworks/App.framework/App' -print0 2>/dev/null)
       - name: Confirm native runner architecture and toolchain
         run: |
           test "$(uname -m)" = arm64
@@ -120,6 +134,10 @@ jobs:
           flutter="$PWD/.build/macos/flutter-3.44.2/bin/flutter"
           if [[ ! -x "$flutter" ]]; then
             echo 'Diagnostic-only snapshot collection skipped: pinned Flutter SDK is unavailable.'
+            exit 0
+          fi
+          if ! find Apps/Flutter/stitch_app/test/failures -type f -name '*.png' -print -quit 2>/dev/null | grep -q .; then
+            echo 'Diagnostic-only snapshot collection skipped: original Flutter test produced no failure PNGs.'
             exit 0
           fi
           cd Apps/Flutter/stitch_app
