@@ -32,10 +32,23 @@ jobs:
       - name: Set up Android SDK and pinned NDK
         uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4.0.4
         with:
-          packages: |
+          packages: >-
             platforms;android-36
             build-tools;36.0.0
             ndk;28.2.13676358
+
+      - name: Validate pinned Android NDK installation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ndkProperties = Join-Path $env:ANDROID_SDK_ROOT 'ndk/28.2.13676358/source.properties'
+          if (-not (Test-Path -LiteralPath $ndkProperties -PathType Leaf)) {
+            throw "Pinned Android NDK was not installed: $ndkProperties"
+          }
+          $properties = Get-Content -LiteralPath $ndkProperties -Raw
+          if ($properties -notmatch '(?m)^Pkg\.Revision\s*=\s*28\.2\.13676358\s*$') {
+            throw "Installed Android NDK has an unexpected revision: $ndkProperties"
+          }
 
       - name: Set up pinned Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0

@@ -38,6 +38,12 @@ $productMetadataAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $productMetadataAst) 'Builder must verify product name and version metadata before signing.'
 Invoke-Expression $productMetadataAst.Extent.Text
+$verifiedCoreCopyAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Copy-VerifiedNativeCoreDll'
+}, $true)
+Assert-True ($null -ne $verifiedCoreCopyAst) 'Builder must verify and safely stage the freshly built native core DLL.'
+Invoke-Expression $verifiedCoreCopyAst.Extent.Text
 $jxlRootAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-JxlSdkRoot'
@@ -352,6 +358,28 @@ try {
 finally {
     Remove-Item -LiteralPath Function:\Get-Item -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $metadataTestRoot) { Remove-Item -LiteralPath $metadataTestRoot -Recurse -Force }
+}
+
+$coreCopyTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-core-copy-test-' + [guid]::NewGuid().ToString('N'))
+$coreCopyTestRoot = [IO.Path]::GetFullPath($coreCopyTestRoot)
+Assert-True ($coreCopyTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($coreCopyTestRoot) -match '^pocket-core-copy-test-[0-9a-f]{32}$') 'Refusing unsafe native core copy test fixture path.'
+try {
+    $samePathCore = Join-Path $coreCopyTestRoot 'default-target/release/lumia_gigascan_core.dll'
+    New-Item -ItemType Directory -Force -Path (Split-Path $samePathCore -Parent) | Out-Null
+    [IO.File]::WriteAllText($samePathCore, 'fresh native core fixture')
+    $samePathHash = (Get-FileHash -LiteralPath $samePathCore -Algorithm SHA256).Hash.ToLowerInvariant()
+    $normalizedSamePath = Join-Path (Split-Path $samePathCore -Parent) '.\lumia_gigascan_core.dll'
+    Copy-VerifiedNativeCoreDll $samePathCore $normalizedSamePath
+    Assert-True ((Get-FileHash -LiteralPath $samePathCore -Algorithm SHA256).Hash.ToLowerInvariant() -eq $samePathHash) 'Default Cargo target same-path staging changed the freshly built DLL.'
+
+    $externalTargetCore = Join-Path $coreCopyTestRoot 'external-target/release/lumia_gigascan_core.dll'
+    Copy-VerifiedNativeCoreDll $samePathCore $externalTargetCore
+    Assert-True (Test-Path -LiteralPath $externalTargetCore -PathType Leaf) 'External Cargo target DLL was not copied to the stable staging path.'
+    Assert-True ((Get-FileHash -LiteralPath $externalTargetCore -Algorithm SHA256).Hash.ToLowerInvariant() -eq $samePathHash) 'External Cargo target copy does not match the freshly built DLL.'
+}
+finally {
+    if (Test-Path -LiteralPath $coreCopyTestRoot) { Remove-Item -LiteralPath $coreCopyTestRoot -Recurse -Force }
 }
 
 Assert-True ($plan.onnxRuntimeVersion -eq '1.31.0' -and $plan.onnxRuntimeSha256 -eq '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195') 'ONNX Runtime SDK pin or checksum changed unexpectedly.'

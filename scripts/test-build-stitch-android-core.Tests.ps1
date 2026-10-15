@@ -97,6 +97,9 @@ Assert-True ($buildRs.Contains('target_os == "android"')) 'JPEG XL static suppor
 Assert-True ($buildRs.Contains('LUMIA_JXL_LINK_PATHS')) 'Android JPEG XL must support per-ABI static-library paths.'
 $androidWorkflow = Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) '.github\workflows\android-build.yml') -Raw
 Assert-True ($androidWorkflow.Contains('pub-cache-path: ${{ github.workspace }}/.local/pub-cache')) 'Android CI Pub cache must stay on the workspace volume so Kotlin can relativize plugin sources.'
+Assert-True ($androidWorkflow -match '(?ms)^\s+packages:\s*>-\s*platforms;android-36\s+build-tools;36\.0\.0\s+ndk;28\.2\.13676358\s*$') 'Android SDK package list must use a folded YAML scalar so setup-android splits the package IDs on spaces.'
+Assert-True ($androidWorkflow -match 'Validate pinned Android NDK installation[\s\S]+?ndk/28\.2\.13676358/source\.properties') 'Android CI must validate that the pinned NDK revision was installed before native build setup.'
+Assert-True ($androidWorkflow.Contains("Pkg\.Revision\s*=\s*28\.2\.13676358")) 'Android CI must validate the pinned NDK package revision.'
 
 $validHeader = "Machine: AArch64"
 $validSegments = @'

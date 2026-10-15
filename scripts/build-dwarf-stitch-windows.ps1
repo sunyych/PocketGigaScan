@@ -139,6 +139,26 @@ function Assert-WindowsProductVersionMetadata([string[]]$Paths, [string]$Expecte
     }
 }
 
+function Copy-VerifiedNativeCoreDll([string]$Source, [string]$Destination) {
+    $sourcePath = [IO.Path]::GetFullPath($Source)
+    $destinationPath = [IO.Path]::GetFullPath($Destination)
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        throw "The freshly built native core DLL is missing: $sourcePath"
+    }
+
+    if (-not [string]::Equals($sourcePath, $destinationPath, [StringComparison]::OrdinalIgnoreCase)) {
+        $destinationDirectory = Split-Path -Parent $destinationPath
+        New-Item -ItemType Directory -Force -Path $destinationDirectory | Out-Null
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force
+    }
+
+    $sourceSha = (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $destinationSha = (Get-FileHash -LiteralPath $destinationPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($destinationSha -ne $sourceSha) {
+        throw 'Staged native core DLL differs from the freshly built release artifact.'
+    }
+}
+
 function Find-JxlSdkRoot([string]$Root) {
     $directories = @()
     if (Test-Path -LiteralPath $Root -PathType Container) {
@@ -674,10 +694,7 @@ if (-not (Test-Path -LiteralPath $freshCoreDll -PathType Leaf)) {
 # Cargo may target an isolated directory on Windows low-integrity workspaces.
 $nativeRelease = Join-Path $native 'target/release'
 New-Item -ItemType Directory -Force -Path $nativeRelease | Out-Null
-Copy-Item -LiteralPath $freshCoreDll -Destination (Join-Path $nativeRelease 'lumia_gigascan_core.dll') -Force
-$freshCoreSha = (Get-FileHash -LiteralPath $freshCoreDll -Algorithm SHA256).Hash.ToLowerInvariant()
-$stagedCoreSha = (Get-FileHash -LiteralPath (Join-Path $nativeRelease 'lumia_gigascan_core.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($stagedCoreSha -ne $freshCoreSha) { throw 'Staged native core DLL differs from the freshly built release artifact.' }
+Copy-VerifiedNativeCoreDll $freshCoreDll (Join-Path $nativeRelease 'lumia_gigascan_core.dll')
 Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime.dll') -Destination (Join-Path $nativeRelease 'onnxruntime.dll') -Force
 Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime_providers_shared.dll') -Destination (Join-Path $nativeRelease 'onnxruntime_providers_shared.dll') -Force
 Copy-Item -LiteralPath $sceneModelInfo.path -Destination (Join-Path $nativeRelease 'scene-model-v1.onnx') -Force
