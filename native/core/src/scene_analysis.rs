@@ -1,6 +1,6 @@
-//! Optional Windows CPU semantic segmentation for people protection and water smoothing.
+//! Optional Windows/macOS CPU semantic segmentation for people protection and water smoothing.
 //!
-//! The runtime is loaded only on Windows and only when either semantic option is
+//! The runtime is loaded only on desktop Windows/macOS and only when either semantic option is
 //! enabled. Cached masks are two-channel PNGs: luminance stores person confidence
 //! and the PNG alpha sample stores water confidence.
 use crate::fingerprint;
@@ -29,16 +29,19 @@ pub struct SourceMask {
     pub mask_sha256: String,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 mod ort {
-    use std::{ffi::c_void, path::Path};
+    use std::{
+        ffi::{c_void, CString},
+        path::Path,
+    };
     #[link(name = "lumia_scene_bridge", kind = "static")]
     unsafe extern "C" {
         fn lumia_scene_open(
-            model: *const u16,
+            model: *const std::ffi::c_char,
             intra_op_threads: u32,
             session: *mut *mut c_void,
-            error: *mut u16,
+            error: *mut std::ffi::c_char,
             error_cap: usize,
         ) -> i32;
         fn lumia_scene_infer(
@@ -46,27 +49,35 @@ mod ort {
             input: *const f32,
             output: *mut f32,
             output_len: usize,
-            error: *mut u16,
+            error: *mut std::ffi::c_char,
             error_cap: usize,
         ) -> i32;
         fn lumia_scene_close(session: *mut c_void);
     }
-    fn wide(path: &Path) -> Vec<u16> {
-        use std::os::windows::ffi::OsStrExt;
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
+    fn utf8_path(path: &Path) -> Result<CString, String> {
+        let path = path
+            .to_str()
+            .ok_or_else(|| "scene model path is not valid UTF-8".to_owned())?;
+        CString::new(path).map_err(|_| "scene model path contains an embedded NUL byte".to_owned())
     }
-    fn error_text(buffer: &[u16]) -> String {
-        String::from_utf16_lossy(
-            &buffer[..buffer.iter().position(|c| *c == 0).unwrap_or(buffer.len())],
-        )
+    fn error_text(buffer: &[std::ffi::c_char]) -> String {
+        let length = buffer
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(buffer.len());
+        let bytes = buffer[..length]
+            .iter()
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        String::from_utf8_lossy(&bytes).into_owned()
     }
     pub struct Session(*mut c_void);
     unsafe impl Send for Session {}
     impl Session {
         pub fn open(model: &Path, intra_op_threads: u32) -> Result<Self, String> {
-            let model = wide(model);
+            let model = utf8_path(model)?;
             let mut session = std::ptr::null_mut();
-            let mut error = [0u16; 1024];
+            let mut error = [std::ffi::c_char::default(); 1024];
             let code = unsafe {
                 lumia_scene_open(
                     model.as_ptr(),
@@ -82,7 +93,7 @@ mod ort {
             Ok(Self(session))
         }
         pub fn infer(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
-            let mut error = [0u16; 1024];
+            let mut error = [std::ffi::c_char::default(); 1024];
             let code = unsafe {
                 lumia_scene_infer(
                     self.0,
@@ -106,6 +117,54 @@ mod ort {
             }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn model_path_keeps_unicode_as_utf8() {
+            let path = Path::new("/tmp/场景模型.onnx");
+            assert_eq!(
+                utf8_path(path).unwrap().as_bytes(),
+                path.to_str().unwrap().as_bytes()
+            );
+        }
+
+        #[test]
+        fn model_path_rejects_embedded_nul() {
+            assert!(utf8_path(Path::new("model\0unsafe.onnx"))
+                .unwrap_err()
+                .contains("embedded NUL"));
+        }
+
+        #[test]
+        fn error_text_is_bounded_when_buffer_has_no_terminator() {
+            let buffer = [b'e' as std::ffi::c_char, b'r' as std::ffi::c_char];
+            assert_eq!(error_text(&buffer), "er");
+        }
+
+        #[cfg(not(lumia_scene_ort))]
+        #[test]
+        fn missing_sdk_stub_returns_a_terminated_bounded_error() {
+            let model = CString::new("model.onnx").unwrap();
+            let mut session = std::ptr::null_mut();
+            let mut error = [std::ffi::c_char::default(); 5];
+            let status = unsafe {
+                lumia_scene_open(
+                    model.as_ptr(),
+                    1,
+                    &mut session,
+                    error.as_mut_ptr(),
+                    error.len(),
+                )
+            };
+            assert_ne!(status, 0);
+            assert!(session.is_null());
+            assert_eq!(error[error.len() - 1], 0);
+            assert_eq!(error_text(&error).len(), error.len() - 1);
+        }
+    }
 }
 
 /// Validate and run analysis in source order. A completed mask is persisted
@@ -119,7 +178,7 @@ pub fn analyze(
     cpu_workers: usize,
     mut checkpoint: impl FnMut(usize, usize) -> bool,
 ) -> Result<Value, String> {
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (
             sources,
@@ -130,9 +189,11 @@ pub fn analyze(
             cpu_workers,
             &mut checkpoint,
         );
-        return Err("scene semantic analysis is supported only on Windows".into());
+        return Err(
+            "scene semantic analysis is supported only on desktop Windows and macOS".into(),
+        );
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         if !model_path.is_absolute() {
             return Err("sceneModelPath must be absolute".into());
@@ -650,7 +711,7 @@ mod tests {
         .contains("hash mismatch"));
         let _ = fs::remove_dir_all(dir);
     }
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn cancellation_before_runtime_initialization_is_cooperative() {
         let dir = std::env::temp_dir().join(format!("scene-cancel-test-{}", std::process::id()));
@@ -676,9 +737,9 @@ mod tests {
         assert_eq!(result.unwrap_err(), "cancelled");
         let _ = fs::remove_dir_all(dir);
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
-    fn non_windows_analysis_is_explicitly_unsupported() {
+    fn non_desktop_analysis_is_explicitly_unsupported() {
         let result = analyze(
             &[],
             Path::new("model.onnx"),
@@ -688,6 +749,8 @@ mod tests {
             1,
             |_, _| true,
         );
-        assert!(result.unwrap_err().contains("supported only on Windows"));
+        assert!(result
+            .unwrap_err()
+            .contains("supported only on desktop Windows and macOS"));
     }
 }

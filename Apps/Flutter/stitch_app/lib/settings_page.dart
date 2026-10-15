@@ -18,6 +18,7 @@ class SettingsPage extends StatefulWidget {
     this.memoryReading,
     this.mobileStorageService,
     this.sceneModelService,
+    this.supportsSceneOptions = false,
     this.activeTasks = false,
   });
   final SettingsController controller;
@@ -26,6 +27,7 @@ class SettingsPage extends StatefulWidget {
   final MemoryResourceReading? memoryReading;
   final MobileStorageService? mobileStorageService;
   final Future<SceneModelService>? sceneModelService;
+  final bool supportsSceneOptions;
   final bool activeTasks;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
@@ -176,7 +178,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       s.copyWith(localTextureWarp: v),
                     ),
                   ),
-                  if (!widget.mobile) ...[
+                  if (widget.supportsSceneOptions) ...[
                     SwitchListTile(
                       key: const Key('protect-people-default'),
                       title: Text(l.protectPeople),
@@ -269,7 +271,8 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ],
               ),
-              if (!widget.mobile && widget.sceneModelService != null)
+              if (widget.supportsSceneOptions &&
+                  widget.sceneModelService != null)
                 SceneModelManagerTile(
                   service: widget.sceneModelService!,
                   activeTasks: widget.activeTasks,

@@ -208,7 +208,9 @@ class _StitchHomePageState extends State<StitchHomePage>
         requireLargeJobApproval: _mobile,
         runtimeService: _runtime,
         storageService: _mobile ? _storage : null,
-        sceneModelService: _sceneModelService,
+        sceneModelService: supportsSceneInferenceOnCurrentPlatform
+            ? _sceneModelService
+            : null,
       );
   late final PowerGate _power = widget.powerGate ?? PlatformPowerGate();
   late final ForegroundWorkLock _lock =
@@ -1953,7 +1955,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           return;
         }
         SceneModelMetadata? sceneModel;
-        if (Platform.isWindows &&
+        if (supportsSceneInferenceOnCurrentPlatform &&
             (active.protectPeople || active.smoothWater)) {
           final service = await _sceneModelService;
           sceneModel = await service.cachedMetadata();
@@ -1969,7 +1971,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           buildSphericalRequest(
             active,
             sceneModel: sceneModel,
-            supportsSceneModel: Platform.isWindows,
+            supportsSceneModel: supportsSceneInferenceOnCurrentPlatform,
           ),
           out.path,
           memoryBudgetMiB: effectiveMemory,
@@ -2316,10 +2318,13 @@ class _StitchHomePageState extends State<StitchHomePage>
           exportDirectory.path,
           '${task.id}-${DateTime.now().toUtc().microsecondsSinceEpoch}.${task.exportFormat.extension}',
         );
-    final destination = Platform.isWindows && exportTask.exportDirectory != null
+    final destination =
+        (Platform.isWindows || Platform.isMacOS) &&
+            exportTask.exportDirectory != null
         ? p.join(exportTask.exportDirectory!, p.basename(privateDestination))
         : privateDestination;
-    if (Platform.isWindows && exportTask.exportDirectory != null) {
+    if ((Platform.isWindows || Platform.isMacOS) &&
+        exportTask.exportDirectory != null) {
       await Directory(exportTask.exportDirectory!).create(recursive: true);
     }
     final exportIntentTask = exportTask.autoExportOnCompletion
@@ -2990,7 +2995,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       final directory = Directory(destination);
       await directory.create(recursive: true);
-      if (Platform.isWindows &&
+      if ((Platform.isWindows || Platform.isMacOS) &&
           p.equals(
             p.normalize(p.absolute(p.dirname(source))),
             p.normalize(p.absolute(destination)),
@@ -3483,7 +3488,10 @@ class _StitchHomePageState extends State<StitchHomePage>
           mobile: _mobile,
           memoryReading: _appMemoryReading,
           mobileStorageService: _storage,
-          sceneModelService: _sceneModelService,
+          sceneModelService: supportsSceneInferenceOnCurrentPlatform
+              ? _sceneModelService
+              : null,
+          supportsSceneOptions: supportsSceneInferenceOnCurrentPlatform,
           activeTasks:
               _hasActiveJob ||
               _tasks.any(
@@ -4527,7 +4535,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                     value: _localTextureWarp,
                     onChanged: enabled ? _updateLocalTextureWarp : null,
                   ),
-                  if (Platform.isWindows) ...[
+                  if (supportsSceneInferenceOnCurrentPlatform) ...[
                     CheckboxListTile(
                       key: const Key('protect-people-option'),
                       contentPadding: EdgeInsets.zero,

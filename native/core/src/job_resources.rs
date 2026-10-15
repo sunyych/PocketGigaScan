@@ -85,9 +85,195 @@ pub fn system_memory_mib() -> Option<(usize, usize)> {
             kibibytes_to_mib(available_kib?)?,
         ));
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
+    {
+        return macos_memory::system_memory_mib();
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos_memory {
+    use std::{
+        ffi::{c_char, c_void},
+        mem::size_of,
+        sync::OnceLock,
+    };
+
+    const HOST_VM_INFO64: i32 = 4;
+    const KERN_SUCCESS: i32 = 0;
+    const MIB: u64 = 1024 * 1024;
+    static HOST_PORT: OnceLock<u32> = OnceLock::new();
+
+    // Matches Apple's public vm_statistics64_data_t through speculative_count.
+    // That is the stable rev0 prefix accepted by host_statistics64; its count
+    // is measured in integer_t (i32) words. natural_t is u32 on Darwin.
+    #[repr(C, align(8))]
+    #[derive(Default)]
+    #[allow(dead_code)]
+    struct VmStatistics64Rev0 {
+        free_count: u32,
+        active_count: u32,
+        inactive_count: u32,
+        wire_count: u32,
+        zero_fill_count: u64,
+        reactivations: u64,
+        pageins: u64,
+        pageouts: u64,
+        faults: u64,
+        cow_faults: u64,
+        lookups: u64,
+        hits: u64,
+        purges: u64,
+        purgeable_count: u32,
+        speculative_count: u32,
+    }
+
+    #[link(name = "System")]
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            old_value: *mut c_void,
+            old_length: *mut usize,
+            new_value: *mut c_void,
+            new_length: usize,
+        ) -> i32;
+        fn mach_host_self() -> u32;
+        fn host_statistics64(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    fn read_sysctl_u64(name: &'static [u8]) -> Option<u64> {
+        let mut value = 0_u64;
+        let mut length = size_of::<u64>();
+        // SAFETY: `name` is a NUL-terminated static selector and the output
+        // pointer and length describe a writable u64.
+        let result = unsafe {
+            sysctlbyname(
+                name.as_ptr().cast(),
+                (&mut value as *mut u64).cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (result == 0 && length == size_of::<u64>()).then_some(value)
+    }
+
+    fn read_sysctl_u32(name: &'static [u8]) -> Option<u32> {
+        let mut value = 0_u32;
+        let mut length = size_of::<u32>();
+        // SAFETY: `name` is a NUL-terminated static selector and the output
+        // pointer and length describe a writable u32.
+        let result = unsafe {
+            sysctlbyname(
+                name.as_ptr().cast(),
+                (&mut value as *mut u32).cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        (result == 0 && length == size_of::<u32>()).then_some(value)
+    }
+
+    fn memory_mib_from_pages(
+        total_bytes: u64,
+        free_pages: u32,
+        inactive_pages: u32,
+        page_size: u32,
+    ) -> Option<(usize, usize)> {
+        if total_bytes == 0 || page_size == 0 {
+            return None;
+        }
+        let reclaimable_pages = u64::from(free_pages).checked_add(u64::from(inactive_pages))?;
+        let available_bytes = reclaimable_pages
+            .checked_mul(u64::from(page_size))?
+            .min(total_bytes);
+        Some((
+            usize::try_from(total_bytes / MIB).ok()?,
+            usize::try_from(available_bytes / MIB).ok()?,
+        ))
+    }
+
+    pub(super) fn system_memory_mib() -> Option<(usize, usize)> {
+        let total_bytes = read_sysctl_u64(b"hw.memsize\0")?;
+        let page_size = read_sysctl_u32(b"hw.pagesize\0")?;
+        if total_bytes == 0 || page_size == 0 {
+            return None;
+        }
+
+        let host = *HOST_PORT.get_or_init(|| {
+            // Retain this one process-wide Mach send right for later readings.
+            unsafe { mach_host_self() }
+        });
+        if host == 0 {
+            return None;
+        }
+        let mut stats = VmStatistics64Rev0::default();
+        let mut count = u32::try_from(size_of::<VmStatistics64Rev0>() / size_of::<i32>()).ok()?;
+        // SAFETY: `stats` matches Apple's public vm_statistics64_data_t rev0
+        // prefix, is 8-byte aligned, and `count` is its size in integer_t words.
+        let result = unsafe {
+            host_statistics64(
+                host,
+                HOST_VM_INFO64,
+                (&mut stats as *mut VmStatistics64Rev0).cast(),
+                &mut count,
+            )
+        };
+        if result != KERN_SUCCESS || count < 4 {
+            return None;
+        }
+
+        // free_count already includes speculative pages. inactive pages are
+        // reclaimable; purgeable_count is an overlapping statistic, so adding
+        // it separately would count some pages twice.
+        memory_mib_from_pages(
+            total_bytes,
+            stats.free_count,
+            stats.inactive_count,
+            page_size,
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn page_counts_convert_and_cap_to_physical_memory() {
+            assert_eq!(
+                memory_mib_from_pages(64 * MIB, 1024, 1024, 16 * 1024),
+                Some((64, 32))
+            );
+            assert_eq!(
+                memory_mib_from_pages(8 * MIB, u32::MAX, u32::MAX, 16 * 1024),
+                Some((8, 8))
+            );
+            assert_eq!(memory_mib_from_pages(0, 1, 1, 4096), None);
+            assert_eq!(memory_mib_from_pages(8 * MIB, 1, 1, 0), None);
+        }
+
+        #[test]
+        fn mach_statistics_buffer_matches_the_public_rev0_count() {
+            // Apple defines HOST_VM_INFO64_REV0_COUNT as the offset of
+            // `decompressions` divided by sizeof(integer_t). That offset is
+            // immediately after `speculative_count` in this prefix.
+            assert_eq!(size_of::<VmStatistics64Rev0>(), 96);
+            assert_eq!(size_of::<VmStatistics64Rev0>() / size_of::<i32>(), 24);
+        }
+
+        #[test]
+        fn macos_reports_physical_and_reclaimable_memory() {
+            let (total_mib, available_mib) =
+                system_memory_mib().expect("macOS memory APIs should return a reading");
+            assert!(total_mib >= 128);
+            assert!(available_mib > 0);
+            assert!(available_mib <= total_mib);
+        }
     }
 }
 

@@ -536,9 +536,12 @@ fn normalize_scene_request(request: &mut Value) -> Result<(), String> {
         }
         return Ok(());
     }
-    #[cfg(not(windows))]
-    return Err("people protection and water smoothing are supported only on Windows".into());
-    #[cfg(windows)]
+    #[cfg(not(any(windows, target_os = "macos")))]
+    return Err(
+        "people protection and water smoothing are supported only on desktop Windows and macOS"
+            .into(),
+    );
+    #[cfg(any(windows, target_os = "macos"))]
     {
         for key in ["sceneModelPath", "sceneCacheDir"] {
             let text = request[key]
@@ -2063,16 +2066,16 @@ mod tests {
         assert!(defaults.get("sceneModelPath").is_none());
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     #[test]
     fn enabled_scene_options_are_explicitly_unsupported_off_windows() {
         let mut request = json!({"protectPeople":true,"smoothWater":false});
         assert!(normalize_scene_request(&mut request)
             .unwrap_err()
-            .contains("supported only on Windows"));
+            .contains("supported only on desktop Windows and macOS"));
     }
 
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn enabled_scene_options_require_absolute_model_and_cache_paths() {
         let mut request = json!({"protectPeople":true,"smoothWater":false,"sceneModelPath":"relative.onnx","sceneModelSha256":"a".repeat(64),"sceneCacheDir":"C:\\cache"});

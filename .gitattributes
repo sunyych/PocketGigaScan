@@ -4,6 +4,9 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.ps1 text eol=lf
+*.sh text eol=lf
+*.xcconfig text eol=lf
+*.plist text eol=lf
 *.png binary
 *.ico binary
 *.jar binary

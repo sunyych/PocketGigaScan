@@ -141,7 +141,7 @@ class StitchLocalizations {
       text('平滑水面接缝可能会柔化局部细节；同时启用时优先保护人物。场景分析需要更多内存，处理时间也更长。');
   String get sceneModel => text('场景模型');
   String get sceneModelPrepare => text('重新准备模型缓存');
-  String get sceneModelBundleHelp => text('模型随 Windows 程序附带，可离线使用。');
+  String get sceneModelBundleHelp => text('模型随 Windows 和 macOS 程序附带，可离线使用。');
   String get sceneModelDelete => text('清除模型使用副本');
   String get sceneModelReady => text('场景模型已验证并可离线使用。');
   String get sceneModelPreparing => text('正在准备并验证场景模型');
@@ -1514,8 +1514,8 @@ class StitchLocalizations {
         'Smooth water seams may soften local detail. People protection takes priority when both are enabled. Scene analysis uses more memory and takes longer.',
     '场景模型': 'Scene model',
     '重新准备模型缓存': 'Prepare model cache again',
-    '模型随 Windows 程序附带，可离线使用。':
-        'The model is included with the Windows app and works offline.',
+    '模型随 Windows 和 macOS 程序附带，可离线使用。':
+        'The model is included with the Windows and macOS apps and works offline.',
     '清除模型使用副本': 'Clear cached model copy',
     '场景模型已验证并可离线使用。': 'The scene model is verified and available offline.',
     '正在准备并验证场景模型': 'Preparing and verifying the scene model',
@@ -1728,6 +1728,12 @@ class StitchLocalizations {
     '正在准备场景模型：': '正在准备场景模型：',
     'people protection and water smoothing are supported only on Windows':
         '人物保护和水面平滑仅支持 Windows。',
+    'people protection and water smoothing are supported only on Windows and macOS':
+        '人物保护和水面平滑仅支持 Windows 和 macOS。',
+    'people protection and water smoothing are supported only on desktop Windows and macOS':
+        '人物保护和水面平滑仅支持 Windows 和 macOS 桌面版。',
+    'scene semantic analysis is supported only on desktop Windows and macOS':
+        '场景语义分析仅支持 Windows 和 macOS 桌面版。',
     'ONNX Runtime is missing beside the application': '应用目录旁缺少 ONNX Runtime。',
     'scene model SHA-256 mismatch': '场景模型 SHA-256 校验不匹配。',
     'scene mask cache identity mismatch': '场景掩码缓存身份不匹配。',

@@ -3055,7 +3055,7 @@ class BatchQueueController extends ChangeNotifier {
           }
           final configuredTask = task.copyWith(workers: workers);
           final sceneModel =
-              Platform.isWindows &&
+              supportsSceneInferenceOnCurrentPlatform &&
                   (configuredTask.protectPeople || configuredTask.smoothWater)
               ? await _prepareSceneModel(
                   queue.id,
@@ -3068,7 +3068,7 @@ class BatchQueueController extends ChangeNotifier {
             buildSphericalRequest(
               configuredTask,
               sceneModel: sceneModel,
-              supportsSceneModel: Platform.isWindows,
+              supportsSceneModel: supportsSceneInferenceOnCurrentPlatform,
             ),
             output.path,
             memoryBudgetMiB: memory,

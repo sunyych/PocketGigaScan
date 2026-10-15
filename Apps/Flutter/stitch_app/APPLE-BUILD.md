@@ -2,9 +2,8 @@
 
 The Flutter project can still build without the Rust panorama core. In that
 mode the app reports native processing as unavailable. Apple native processing
-is opt-in and requires macOS, Xcode command-line tools, Rust Apple targets, and
-OpenCV libraries built for each Apple SDK. The Windows build host cannot build
-or qualify iOS/macOS artifacts.
+is opt-in for iOS. The standalone macOS client builder and its pinned
+dependencies are documented below.
 
 The default core is this repository's `native/core`; no sibling checkout is
 required. The script uses Rust 1.88.0 and locked Cargo dependencies. Install that
@@ -52,34 +51,60 @@ used by Dart FFI retains the core C ABI symbols. `Debug.xcconfig` and
 `Release.xcconfig` include it only when present, preserving the native-free
 Flutter build when staging has not been run.
 
-## macOS
+## Standalone macOS client
 
-Provide matching per-architecture OpenCV installations, with the required
-module dylibs and same runtime dylib filenames under each `lib/` directory.
-The script checks each input
-architecture and combines the Rust core and OpenCV runtime dylibs with `lipo`.
-OpenCV module dependencies and their runtime dylibs are copied into the app
-bundle's `Frameworks` directory by the Runner build phase, their load paths are
-rewritten to `@rpath`, and each copied library is signed before Xcode signs the
-app:
+The first macOS package targets native Apple Silicon (`arm64`) and requires
+macOS 14.0 or later. The ONNX Runtime 1.31.0 Apple Silicon release dylib has
+`LC_BUILD_VERSION minos 14.0.0`; the app and every bundled native library are
+checked against that actual Mach-O minimum. Intel Macs are not included in this
+first package.
+
+On macOS with Xcode command-line tools, CMake, Python 3, and Rust 1.88.0, build
+with the exact ONNX model and exporter manifest produced by the pinned model
+exporter:
 
 ```sh
-export OPENCV_MACOS_ARM64_ROOT=/opt/homebrew/opt/opencv-arm64
-export OPENCV_MACOS_X86_64_ROOT=/opt/homebrew/opt/opencv-x86_64
-export LUMIA_APPLE_EXTRA_LIBS='jpeg png tiff webp'
-bash tool/native/apple/build_apple_native.sh macos
-flutter build macos
+bash scripts/build-stitch-macos.sh \
+  --scene-model /path/to/scene-model-v1.onnx \
+  --output-dir .build/stitch-macos
 ```
 
-The script produces an arm64/x86_64 `liblumia_gigascan_core.dylib`, stages all
-OpenCV runtime dylibs, and writes an optional
-`macos/Flutter/NativeCore.generated.xcconfig` to enable embedding. A missing
-non-system runtime dependency stops staging with its name so it can be added to
-the OpenCV runtime directory.
+Keep the export's adjacent `scene-model-v1.manifest.json` and
+`scene-model-LICENSE.txt` beside the ONNX file; the builder validates and
+packages all three.
 
-## Validation boundary
+The script installs Flutter 3.44.2 from its checksum-pinned official archive if
+Flutter is not already available, then builds OpenCV 4.13.0 and libjxl 0.12.0
+from SHA-256-pinned sources. It downloads ONNX Runtime 1.31.0 from Microsoft's
+official Apple Silicon release asset and verifies its archive digest. The build
+rejects a different model size or digest than
+`scripts/scene-model-export.lock.json`.
 
-This is a build recipe, not evidence that Apple targets compiled here. Run the
-commands on a Mac with the matching Xcode SDKs, inspect the resulting app
-bundle's architectures and signatures, then smoke-test FFI on an iPhone and a
-macOS host. Keep those results separate from Windows/Android checks.
+The resulting `PocketGigaScan-macos-arm64.zip` contains the app bundle, the
+CPU-only ONNX model, build manifest, and project, runtime, model, and native
+dependency license notices. No GitHub or Hugging Face login is needed to run the
+app. The app is non-sandboxed so macOS file open/save panels can access the
+photos and export destinations the operator selects. Local-network access is
+described for connecting to a DWARF3 camera.
+
+This is an ad-hoc-signed developer-test package. It is not notarized and is not
+an App Store release. On first launch, macOS may require opening the app through
+Finder. If Gatekeeper blocks it, first verify the ZIP SHA-256, then use
+**System Settings > Privacy & Security > Open Anyway** for this app. The archive
+SHA-256 is written next to the ZIP.
+
+### Manual Mac acceptance
+
+Use a Mac running macOS 14 or later with Apple Silicon. Verify the adjacent ZIP
+digest, extract the archive, and open `PocketGigaScan.app`. Check that the app
+starts without a native runtime or model error, import the original photos for
+a small panorama, inspect its preview and final export, and export PNG, TIFF,
+and JPEG XL. Close and reopen the app to confirm the task can resume and the
+original photos remain available. This manual check is separate from the Mac
+CI inference and package checks.
+
+The macOS CI runs on GitHub's `macos-15` Apple Silicon runner. It prepares the
+canonical model on Windows using the existing pinned exporter, then builds the
+arm64 app and runs the packaged core FFI, 512x512 ONNX CPU inference, Mach-O
+architecture/minimum-version, signature, and dependency-closure checks on Mac.
+Those checks do not replace visual review of a real panorama on a user's Mac.

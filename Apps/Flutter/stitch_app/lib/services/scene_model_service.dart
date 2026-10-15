@@ -10,6 +10,37 @@ import 'package:path_provider/path_provider.dart';
 const sceneModelId = 'upernet-convnext-tiny-ade20k-v1';
 const sceneModelManifestAsset = 'assets/scene_model_manifest.json';
 
+/// Whether scene inference can run on the supplied target platform.
+bool supportsSceneInference({required bool isWindows, required bool isMacOS}) =>
+    isWindows || isMacOS;
+
+/// Resolve the bundled model location for the desktop application layout.
+/// Windows stores data beside the executable. macOS stores resources inside
+/// the app bundle at Contents/Resources.
+String resolveSceneModelBundlePath({
+  required String resolvedExecutable,
+  required bool isMacOS,
+  required String fileName,
+}) {
+  final path = isMacOS ? p.posix : p.windows;
+  final executableDirectory = path.dirname(resolvedExecutable);
+  return isMacOS
+      ? path.normalize(
+          path.join(
+            path.dirname(executableDirectory),
+            'Resources',
+            'models',
+            fileName,
+          ),
+        )
+      : path.join(executableDirectory, 'data', 'models', fileName);
+}
+
+bool get supportsSceneInferenceOnCurrentPlatform => supportsSceneInference(
+  isWindows: Platform.isWindows,
+  isMacOS: Platform.isMacOS,
+);
+
 class SceneModelManifest {
   const SceneModelManifest({
     required this.schemaVersion,
@@ -47,7 +78,10 @@ class SceneModelManifest {
     if (sizeBytes == null || sizeBytes! <= 0) {
       return 'Scene model is unavailable: its verified file size is not configured.';
     }
-    if (bundlePath != 'data/models/scene-model-v1.onnx' ||
+    if (!const {
+          'data/models/scene-model-v1.onnx',
+          '../Resources/models/scene-model-v1.onnx',
+        }.contains(bundlePath) ||
         fileName != 'scene-model-v1.onnx') {
       return 'Scene model manifest has an invalid bundled model path.';
     }
@@ -165,11 +199,10 @@ class SceneModelService {
   }) : _bundleSource =
            bundleSource ??
            FileSceneModelBundleSource(
-             p.join(
-               p.dirname(Platform.resolvedExecutable),
-               'data',
-               'models',
-               manifest.fileName,
+             resolveSceneModelBundlePath(
+               resolvedExecutable: Platform.resolvedExecutable,
+               isMacOS: Platform.isMacOS,
+               fileName: manifest.fileName,
              ),
            ),
        _fileSystem = fileSystem ?? IoSceneModelFileSystem();
@@ -340,11 +373,10 @@ Future<SceneModelService> createDefaultSceneModelService() async {
   return SceneModelService(
     manifest: manifest,
     bundleSource: FileSceneModelBundleSource(
-      p.join(
-        p.dirname(Platform.resolvedExecutable),
-        'data',
-        'models',
-        manifest.fileName,
+      resolveSceneModelBundlePath(
+        resolvedExecutable: Platform.resolvedExecutable,
+        isMacOS: Platform.isMacOS,
+        fileName: manifest.fileName,
       ),
     ),
     cacheRootPath: () async => (await getApplicationSupportDirectory()).path,

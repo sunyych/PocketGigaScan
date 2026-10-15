@@ -126,7 +126,6 @@ __pycache__/
 !/scripts/tests/test_benchmark_dwarf_render.py
 /Apps/Flutter/stitch_app/ios/Native/
 /Apps/Flutter/stitch_app/ios/Flutter/NativeCore.generated.xcconfig
-/Apps/Flutter/stitch_app/macos/
 /Apps/Flutter/stitch_app/tool/native/apple/
 !/Apps/Flutter/stitch_app/tool/native/apple/
 /Apps/Flutter/stitch_app/tool/native/apple/*
@@ -134,3 +133,16 @@ __pycache__/
 **/test/failures/
 **/*.iml
 **/local.properties
+
+!/.github/workflows/macos-build.yml
+!/scripts/build-stitch-macos.sh
+!/scripts/macos-dependencies.lock.json
+!/scripts/verify-macos-package.py
+!/scripts/tests/test_macos_build.py
+!/Apps/Flutter/stitch_app/tool/native/apple/embed_macos_runtime.sh
+!/docs/superpowers/plans/2026-10-15-macos-desktop.md
+!/docs/gigascan/evidence/MACOS-DESKTOP-2026-10-15.md
+/Apps/Flutter/stitch_app/macos/Pods/
+**/xcuserdata/
+
+!/Apps/Flutter/stitch_app/tool/native/apple/build_macos_native.sh

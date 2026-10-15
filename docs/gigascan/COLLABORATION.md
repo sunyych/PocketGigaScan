@@ -1,5 +1,13 @@
 # PocketGigaScan collaboration ledger
 
+## PG-069 macOS desktop client and desktop-only semantic blending
+
+User requested Windows/macOS-only people-aware stitching and a Mac client on 2026-10-15; mobile semantic inference is out of scope. Work proceeds in a clean `codex/macos-desktop` worktree, preserving all dirty original-checkout changes. Luna native owns the portable ONNX bridge and native gates; Luna Flutter owns desktop capability, model paths and bilingual tests; Luna package owns the tracked Mac runner, verified dependency build, bundle/signature verification and hosted Mac workflow. Codex owns contracts, independent review, qualification, commits and push.
+
+Initial target is Apple silicon while the optional user architecture answer is pending. macOS runtime/model packaging must be offline for app users. Windows is the development host; Windows/static checks are not Mac build or device evidence. Hosted Mac build and user physical/visual testing remain separate gates. See [plan](../superpowers/plans/2026-10-15-macos-desktop.md).
+
+Coordinator review identified and corrected the missing macOS memory budget reading, UTF-8 bridge and ONNX view lifetimes, Mac direct-export path, runtime deployment floor (14.0), source dependency closure and CI action/model handoff. Windows normal source Release, 243 native and 337 Flutter tests, real Unicode-path semantic inference/export, and build contracts pass locally. Existing Windows self-copy and Android NDK package-list CI failures have narrow regression fixes. Hosted Mac build and user on-device/visual evidence remain pending. See [qualification](evidence/MACOS-DESKTOP-2026-10-15.md).
+
 ## PG-068 Windows person protection and water smoothing
 
 User approved implementation on 2026-10-15: independent default-off flags, local automatic recognition, completeness-first overlapping crops, smooth-water blending, first-use model download and Windows-only UI. Luna native coder owns inference/cache/job/build/export tooling; Luna renderer coder owns sparse person protection, mask projection and water weights; Luna Flutter coder owns settings/tasks/queues/model management and bilingual UI. Codex coordinates contracts, reviews independently and owns qualification/documentation. See [implementation plan](../superpowers/plans/2026-10-15-scene-blending.md).

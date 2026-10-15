@@ -25,13 +25,17 @@ fn main() {
     if target_os == "windows" && target_env == "msvc" {
         add_windows_version_resource();
     }
-    if target_os == "windows" {
+    if target_os == "windows" || target_os == "macos" {
         let mut scene = cc::Build::new();
         scene.cpp(true).file("src/native/scene_bridge.cpp");
-        scene
-            .flag_if_supported("/EHsc")
-            .flag_if_supported("/std:c++17")
-            .static_crt(true);
+        if target_os == "windows" {
+            scene
+                .flag_if_supported("/EHsc")
+                .flag_if_supported("/std:c++17")
+                .static_crt(true);
+        } else {
+            scene.flag_if_supported("-std=c++17");
+        }
         if let Some(sdk) = std::env::var_os("LUMIA_ORT_SDK").map(std::path::PathBuf::from) {
             let include = sdk.join("include");
             if !include.join("onnxruntime_cxx_api.h").is_file() {
@@ -69,7 +73,11 @@ fn main() {
     build.compile("lumia_sift_bridge");
 
     let jxl_sdk = std::env::var_os("LUMIA_JXL_SDK").map(std::path::PathBuf::from);
-    if target_os == "windows" || target_os == "android" || target_os == "ios" {
+    if target_os == "windows"
+        || target_os == "android"
+        || target_os == "ios"
+        || target_os == "macos"
+    {
         if let Some(sdk) = jxl_sdk {
             let include = sdk.join("include");
             let lib = std::env::var_os("LUMIA_JXL_LINK_PATHS")
@@ -244,6 +252,9 @@ fn main() {
                 println!("cargo:rustc-link-lib=framework={framework}");
             }
         }
+    }
+    if target_os == "macos" {
+        println!("cargo:rustc-link-lib=dylib=c++");
     }
 }
 

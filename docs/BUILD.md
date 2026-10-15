@@ -35,6 +35,31 @@ development directory's Windows ACL or mandatory label.
 
 Current Windows application binaries remain unsigned while SignPath Foundation review and repository setup are pending. `-PrepareSigning` output is development material and must not be presented as a signed release. Third-party DLL bytes and any vendor signatures they already carry are preserved unchanged. SmartScreen's unknown-publisher warning is a distribution/signing concern, distinct from task-storage access and import-dialog failures. See Microsoft's [SmartScreen documentation](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
 
+## macOS (Apple silicon test client)
+
+The macOS client uses the same Flutter UI and vendored Rust/OpenCV engine.
+The initial package targets Apple silicon (M1 or later) running macOS 14 or later. Intel packaging is not
+qualified by this build. See [Apple build instructions](../Apps/Flutter/stitch_app/APPLE-BUILD.md)
+for the source build, package paths, and the on-device test checklist.
+
+Run `scripts/build-stitch-macos.sh` on a Mac with Xcode, Flutter 3.44.2,
+Rust 1.88.0, CMake, Ninja, and Python installed. The builder prepares pinned
+native dependencies from verified downloads and builds the normal Release
+application. `.github/workflows/macos-build.yml` performs the same build on an
+Apple silicon runner and uploads a test ZIP. The CI model preparation job
+exports the pinned model on Windows before transferring it to the Mac job.
+
+People protection and water smoothing are available only on Windows and macOS.
+The model and ONNX Runtime are included in desktop test packages; using them
+requires no account, Python installation, or model download. Android and iOS
+hide these controls and disable the flags in native requests, including old
+saved tasks. Ordinary mobile stitching remains available.
+
+The Mac test app uses ad-hoc signing for local testing and is not notarized.
+Dependency hashes, licenses, architecture, bundled dylib paths, signatures,
+and native smoke checks are validated during packaging. A successful build
+is separate from running the app and inspecting real final exports on a Mac.
+
 ## Android
 
 The Android application shares Flutter and the vendored native processing engine.

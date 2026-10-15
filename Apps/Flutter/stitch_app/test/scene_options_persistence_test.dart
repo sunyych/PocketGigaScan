@@ -8,6 +8,7 @@ import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/services/spherical_request.dart';
 import 'package:stitch_app/services/scene_model_service.dart';
+import 'package:path/path.dart' as p;
 
 void main() {
   test(
@@ -61,7 +62,7 @@ void main() {
   );
 
   test(
-    'native request sends four independent flag combinations and Windows metadata',
+    'native request sends four independent flag combinations and desktop metadata',
     () {
       final photo = _photo();
       for (final people in [false, true]) {
@@ -97,6 +98,81 @@ void main() {
       }
     },
   );
+
+  test('scene inference is limited to Windows and macOS targets', () {
+    expect(supportsSceneInference(isWindows: true, isMacOS: false), isTrue);
+    expect(supportsSceneInference(isWindows: false, isMacOS: true), isTrue);
+    for (final target in [
+      (name: 'Android', isWindows: false, isMacOS: false),
+      (name: 'iOS', isWindows: false, isMacOS: false),
+      (name: 'Linux', isWindows: false, isMacOS: false),
+    ]) {
+      expect(
+        supportsSceneInference(
+          isWindows: target.isWindows,
+          isMacOS: target.isMacOS,
+        ),
+        isFalse,
+        reason: '${target.name} does not support scene inference',
+      );
+      final request = buildSphericalRequest(
+        _task(_photo(), true, true),
+        supportsSceneModel: supportsSceneInference(
+          isWindows: target.isWindows,
+          isMacOS: target.isMacOS,
+        ),
+      );
+      expect(request['protectPeople'], isFalse);
+      expect(request['smoothWater'], isFalse);
+      expect(request.containsKey('sceneModelPath'), isFalse);
+    }
+  });
+
+  test('model bundle resolver follows Windows and macOS layouts', () {
+    expect(
+      resolveSceneModelBundlePath(
+        resolvedExecutable: p.windows.join(
+          r'C:\Program Files\PocketGigaScan',
+          'PocketGigaScan.exe',
+        ),
+        isMacOS: false,
+        fileName: 'scene-model-v1.onnx',
+      ),
+      p.windows.join(
+        r'C:\Program Files\PocketGigaScan',
+        'data',
+        'models',
+        'scene-model-v1.onnx',
+      ),
+    );
+    expect(
+      resolveSceneModelBundlePath(
+        resolvedExecutable: p.posix.join(
+          r'/Applications/PocketGigaScan.app/Contents/MacOS',
+          'PocketGigaScan',
+        ),
+        isMacOS: true,
+        fileName: 'scene-model-v1.onnx',
+      ),
+      p.posix.join(
+        r'/Applications/PocketGigaScan.app/Contents/Resources',
+        'models',
+        'scene-model-v1.onnx',
+      ),
+    );
+  });
+
+  test('manifest validation accepts the macOS bundle relative path', () {
+    final macManifest = SceneModelManifest(
+      schemaVersion: 1,
+      modelId: sceneModelId,
+      sha256: 'a' * 64,
+      sizeBytes: 237503947,
+      bundlePath: '../Resources/models/scene-model-v1.onnx',
+      fileName: 'scene-model-v1.onnx',
+    );
+    expect(macManifest.unavailableReason, isNull);
+  });
 }
 
 StitchTask _task(ImportedPhoto photo, bool people, bool water) => StitchTask(

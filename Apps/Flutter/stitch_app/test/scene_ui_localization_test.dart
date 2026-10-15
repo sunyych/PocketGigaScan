@@ -34,6 +34,31 @@ void main() {
       l.text('Bad state: Scene model SHA-256 verification failed.'),
       '场景模型 SHA-256 校验失败。',
     );
+    expect(
+      l.text(
+        'people protection and water smoothing are supported only on desktop Windows and macOS',
+      ),
+      '人物保护和水面平滑仅支持 Windows 和 macOS 桌面版。',
+    );
+    expect(
+      l.text(
+        'scene semantic analysis is supported only on desktop Windows and macOS',
+      ),
+      '场景语义分析仅支持 Windows 和 macOS 桌面版。',
+    );
+    const english = StitchLocalizations(Locale('en'));
+    expect(
+      english.text(
+        'people protection and water smoothing are supported only on desktop Windows and macOS',
+      ),
+      'people protection and water smoothing are supported only on desktop Windows and macOS',
+    );
+    expect(
+      english.text(
+        'scene semantic analysis is supported only on desktop Windows and macOS',
+      ),
+      'scene semantic analysis is supported only on desktop Windows and macOS',
+    );
     expect(l.text('正在准备场景模型：37%'), '正在准备场景模型：37%');
     expect(
       l.text(
@@ -168,7 +193,7 @@ Widget _settingsApp(
     GlobalWidgetsLocalizations.delegate,
     GlobalCupertinoLocalizations.delegate,
   ],
-  home: SettingsPage(controller: controller, mobile: mobile),
+  home: SettingsPage(controller: controller, mobile: mobile, supportsSceneOptions: !mobile),
 );
 
 class _ControlledSceneModelSource implements SceneModelBundleSource {
