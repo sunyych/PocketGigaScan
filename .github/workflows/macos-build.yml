@@ -36,15 +36,20 @@ jobs:
           python-version: '3.12'
       - name: Export and verify the public pinned model
         if: steps.scene-model-cache.outputs.cache-hit != 'true'
+        id: export-model
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $modelDir = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-scene-model'
           $cacheDir = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-model-cache'
-          python -m pip install --disable-pip-version-check -r scripts/scene-model-export.requirements.txt
+          $venv = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-scene-export-venv'
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw 'Creating the isolated scene exporter environment failed.' }
+          $exportPython = Join-Path $venv 'Scripts/python.exe'
+          & $exportPython -m pip install --disable-pip-version-check -r scripts/scene-model-export.requirements.txt
           if ($LASTEXITCODE -ne 0) { throw 'Installing the pinned scene model exporter failed.' }
-          python scripts/export-scene-model.py --output-dir $modelDir --cache-dir $cacheDir
+          & $exportPython scripts/export-scene-model.py --output-dir $modelDir --cache-dir $cacheDir
           if ($LASTEXITCODE -ne 0) { throw 'The pinned scene model export or digest check failed.' }
       - name: Verify the cached or freshly exported model
         shell: pwsh
@@ -64,6 +69,14 @@ jobs:
           path: ${{ runner.temp }}/PocketGigaScan-scene-model/
           if-no-files-found: error
           retention-days: 7
+      - name: Upload unvalidated export diagnostics after a hash mismatch
+        if: failure() && steps.export-model.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: UNVALIDATED-PocketGigaScan-scene-model-debug-${{ github.sha }}
+          path: ${{ runner.temp }}/PocketGigaScan-scene-model/
+          if-no-files-found: ignore
+          retention-days: 1
 
   macos-arm64:
     name: macOS 14+ Apple Silicon package

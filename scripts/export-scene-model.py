@@ -9,6 +9,8 @@ import math
 from pathlib import Path
 import importlib.metadata
 import copy
+import os
+import platform
 
 import torch
 import torch.nn.functional as F
@@ -107,6 +109,15 @@ def main() -> None:
                 raise RuntimeError(f"Missing pinned export dependency {package}=={expected}") from error
             if actual != expected:
                 raise RuntimeError(f"Export dependency mismatch: expected {package}=={expected}, found {actual}")
+    print(json.dumps({
+        "exportHost": platform.platform(),
+        "machine": platform.machine(),
+        "torchVersion": torch.__version__,
+        "torchCpuCapability": torch.backends.cpu.get_cpu_capability(),
+        "atenCpuCapabilityOverride": os.environ.get("ATEN_CPU_CAPABILITY"),
+        "torchIntraopThreads": torch.get_num_threads(),
+        "torchInterOpThreads": torch.get_num_interop_threads(),
+    }, sort_keys=True))
     output_dir = args.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     snapshot = snapshot_download(
@@ -143,17 +154,48 @@ def main() -> None:
         "preprocessing": LOCK["preprocessing"], "opset": LOCK["opset"],
         "adaptivePoolsReplaced": replaced,
     }
-    if manifest["sizeBytes"] != LOCK["expectedSizeBytes"] or manifest["sha256"] != LOCK["expectedSha256"]:
-        raise RuntimeError(
-            "Exported model differs from the validated pinned artifact: "
-            f"size={manifest['sizeBytes']} sha256={manifest['sha256']}"
-        )
     (output_dir / "scene-model-v1.manifest.json").write_text(
         json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
     )
     source_license = Path(snapshot) / "LICENSE"
     if source_license.is_file():
         (output_dir / "scene-model-LICENSE.txt").write_bytes(source_license.read_bytes())
+    if manifest["sizeBytes"] != LOCK["expectedSizeBytes"] or manifest["sha256"] != LOCK["expectedSha256"]:
+        import onnx
+
+        exported = onnx.load(str(onnx_path), load_external_data=False)
+        initializers = []
+        for tensor in exported.graph.initializer:
+            serialized = tensor.SerializeToString(deterministic=True)
+            initializers.append({
+                "name": tensor.name,
+                "dataType": tensor.data_type,
+                "dimensions": list(tensor.dims),
+                "serializedBytes": len(serialized),
+                "serializedSha256": hashlib.sha256(serialized).hexdigest(),
+            })
+        (output_dir / "scene-model-v1.initializer-digests.json").write_text(
+            json.dumps({
+                "validatedExpectedSha256": LOCK["expectedSha256"],
+                "exportedSha256": manifest["sha256"],
+                "exportedSizeBytes": manifest["sizeBytes"],
+                "cpu": {
+                    "machine": platform.machine(),
+                    "torchCpuCapability": torch.backends.cpu.get_cpu_capability(),
+                    "atenCpuCapabilityOverride": os.environ.get("ATEN_CPU_CAPABILITY"),
+                    "torchIntraopThreads": torch.get_num_threads(),
+                    "torchInterOpThreads": torch.get_num_interop_threads(),
+                },
+                "initializers": initializers,
+            }, indent=2) + "\n", encoding="utf-8"
+        )
+        raise RuntimeError(
+            "Exported model differs from the validated pinned artifact: "
+            f"size={manifest['sizeBytes']} sha256={manifest['sha256']}; "
+            f"CPU capability={torch.backends.cpu.get_cpu_capability()}, "
+            f"ATEN_CPU_CAPABILITY={os.environ.get('ATEN_CPU_CAPABILITY')!r}; "
+            f"initializer digests written to {output_dir / 'scene-model-v1.initializer-digests.json'}"
+        )
     print(json.dumps(manifest, indent=2))
 
 
