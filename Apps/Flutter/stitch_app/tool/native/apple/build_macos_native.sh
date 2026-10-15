@@ -68,7 +68,7 @@ opencv_source="$cache/sources/opencv-4.13.0"
 opencv_build="$cache/build/opencv-4.13.0"
 opencv_sdk="$cache/sdk/opencv"
 download 'https://github.com/opencv/opencv/archive/refs/tags/4.13.0.tar.gz' "$opencv_archive" '1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d'
-extract_source "$opencv_archive" "$opencv_source" include/opencv2/core/version.hpp
+extract_source "$opencv_archive" "$opencv_source" modules/core/include/opencv2/core/version.hpp
 cmake -S "$opencv_source" -B "$opencv_build" \
   -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$opencv_sdk" \
   -DCMAKE_OSX_ARCHITECTURES="$arch" -DCMAKE_OSX_DEPLOYMENT_TARGET="$minimum" \
@@ -88,7 +88,8 @@ dependency_name=(libjxl brotli highway skcms)
 for index in 0 1 2 3; do
   download "${source_url[$index]}" "${source_archive[$index]}" "${source_sha[$index]}"
   marker=CMakeLists.txt
-  [[ "$index" == 3 ]] && marker=src/skcms.cc
+  [[ "$index" == 1 ]] && marker=c/include/brotli/decode.h
+  [[ "$index" == 3 ]] && marker=skcms.cc
   extract_source "${source_archive[$index]}" "${source_dir[$index]}" "$marker"
 done
 for dependency in brotli highway skcms; do
@@ -99,8 +100,8 @@ for dependency in brotli highway skcms; do
   esac
   destination="${source_dir[0]}/third_party/$dependency"
   marker="$destination/CMakeLists.txt"
-  [[ "$dependency" == brotli ]] && marker="$destination/c/CMakeLists.txt"
-  [[ "$dependency" == skcms ]] && marker="$destination/src/skcms.cc"
+  [[ "$dependency" == brotli ]] && marker="$destination/c/include/brotli/decode.h"
+  [[ "$dependency" == skcms ]] && marker="$destination/skcms.cc"
   if [[ ! -f "$marker" ]]; then
     mkdir -p "$destination"
     cp -R "${source_dir[$dependency_index]}/." "$destination/"
