@@ -9,7 +9,7 @@
 - [x] Luna native coder: reproducible UPerNet ConvNeXt Tiny ONNX export, pinned CPU ONNX Runtime, Windows dependency packaging, source-coordinate confidence masks, separate validated mask cache, cancellable job phase and semantic request identity. Owns scene_analysis, native bridge, job, build plumbing and export script.
 - [x] Luna renderer coder: immutable, sparse global person groups and stable source ranking; source-mask windows with budget accounting; person-union protection copies selected source background too; water-only linear-light feather override. Owns scene_render, spherical_renderer and seam_ownership.
 - [x] Luna Flutter coder: both flags through settings/tasks/queues/retry/requests/reports, Windows EN/ZH controls, verified bundled-model preparation/cache/delete/retry flow, execution gating and focused regressions. Owns Flutter source and tests.
-- [ ] Codex coordinator: agree interfaces, independently review all three changes, run model export/inference and final tests/build, record evidence and residual limitations. Preserve unrelated dirty shared-tree work; no broad reset or cleanup.
+- [x] Codex coordinator: agree interfaces, independently review all three changes, run model export/inference and final tests/build, record evidence and residual limitations. Preserve unrelated dirty shared-tree work; no broad reset or cleanup.
 
 ## Interface contract
 
@@ -24,9 +24,10 @@ The Windows builder exports the pinned model (or validates an exported override)
 ## Acceptance
 
 - [x] Bundled preparation cancellation/retry/hash rejection, verified offline reuse/deletion; old records/defaults; queue/copy/retry propagation; both locales and locked controls.
-- [ ] Four option combinations with feather/deghost/local warp; both-off byte parity; people at input/crop/tile edges, adjacent people, crowd coverage fallback; water boundaries and people-over-water; source-order/worker/resume determinism.
-- [ ] Source-native formatting/tests, Flutter analysis/tests, both existing builder contracts and normal Windows Release source build with runtime/licenses.
-- [ ] Real-image inference and same-coordinate final tiles/export crops; record bounded evidence separately from complete-panorama user acceptance.
+- [x] Automated four-option matrix with feather/deghost/local warp; both-off byte parity; sparse people at input/crop/tile edges, adjacent outlines and coverage fallback; water boundaries and people-over-water; source-order/worker/resume determinism.
+- [x] Source-native formatting/tests, Flutter analysis/tests, both existing builder contracts and normal Windows Release source build with runtime/licenses; independently repeat on the isolated feature commit.
+- [x] Real-image inference and same-coordinate final tiles/export crops; record bounded evidence separately from complete-panorama user acceptance.
+- [ ] Full user panorama and dense moving-crowd visual acceptance; this remains a separate real-scene qualification, not inferred from synthetic or resized reference fixtures.
 
 ## Execution boundary
 
