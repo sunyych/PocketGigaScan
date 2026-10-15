@@ -1,20 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
-  <title>PocketGigaScan — DWARF Stitch</title>
-  <defs>
-    <linearGradient id="lens" x1="0" x2="1" y1="1" y2="0">
-      <stop offset="0" stop-color="#f7b955"/>
-      <stop offset="1" stop-color="#ffe5a1"/>
-    </linearGradient>
-  </defs>
-  <rect width="256" height="256" rx="52" fill="#10283b"/>
-  <g fill="none" stroke="#3c7180" stroke-width="3" opacity=".72">
-    <path d="M28 68h200M28 128h200M28 188h200M68 28v200M128 28v200M188 28v200"/>
-    <circle cx="128" cy="128" r="93"/>
-  </g>
-  <path d="M56 190 183 63" stroke="#0a1724" stroke-width="30" stroke-linecap="round"/>
-  <path d="M58 188 181 65" stroke="url(#lens)" stroke-width="20" stroke-linecap="round"/>
-  <path d="m166 49 31 31-24 24-31-31z" fill="#f7b955" stroke="#fff0cb" stroke-width="5"/>
-  <path d="m183 65 18-18 24 24-18 18z" fill="#83d3df" stroke="#d9f7fb" stroke-width="5"/>
-  <path d="m89 163 18 18-28 28-18-18z" fill="#d8943e" stroke="#ffe5a1" stroke-width="4"/>
-  <circle cx="209" cy="47" r="8" fill="#fff0cb"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img">
+  <title>PocketGigaScan panorama mark</title>
+  <desc>Teal panoramic ribbons form a G around an amber alignment point.</desc>
+  <rect width="256" height="256" rx="52" fill="#0B1B2B"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#123A50" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#123A50" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#12677D" stroke-width="25" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#12677D" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#30C9CB" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#30C9CB" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#82F1E6" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.72"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#82F1E6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.72"/>
+  <circle cx="189.0" cy="76.0" r="8.7" fill="#0B1B2B"/>
+  <circle cx="189.0" cy="76.0" r="6.5" fill="#FFBB62"/>
+  <circle cx="187.5" cy="74.5" r="1.5" fill="#FFE4B6"/>
 </svg>
