@@ -186,6 +186,20 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
         path.write_bytes(data)
 
     with tempfile.TemporaryDirectory(prefix="pocketgigascan-macos-smoke-") as temporary:
+        capabilities = call({"command": "capabilities"}).get("capabilities", {})
+        memory = capabilities.get("systemMemory") or {}
+        if not capabilities.get("sceneAnalysisAvailable") or not capabilities.get("jpegXlAvailable"):
+            raise RuntimeError("Packaged core lacks scene-analysis or JPEG XL capability")
+        if not isinstance(memory.get("totalMemoryMiB"), int) or not isinstance(memory.get("availableMemoryMiB"), int):
+            raise RuntimeError("Packaged core did not report valid macOS system memory")
+        configured = call({
+            "command": "configureResources",
+            "totalCpuWorkers": 2,
+            "totalMemoryBudgetMiB": 2048,
+            "maxConcurrentJobs": 1,
+        })
+        if configured.get("ok") is not True:
+            raise RuntimeError(f"Could not configure resources for the packaged smoke job: {configured}")
         root = Path(temporary)
         source_dir = root / "sources"
         source_dir.mkdir()

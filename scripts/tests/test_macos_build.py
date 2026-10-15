@@ -38,6 +38,10 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertEqual(model["sha256"], manifest["expectedSha256"])
         self.assertEqual(model["sizeBytes"], manifest["expectedSizeBytes"])
         self.assertIn("export-scene-model.py", self.workflow)
+        self.assertIn("scene-model-cache", self.workflow)
+        self.assertIn("scripts/scene-model-export.requirements.txt", self.workflow)
+        self.assertIn("Verify the cached or freshly exported model", self.workflow)
+        self.assertIn("verify-macos-package.py --model", self.workflow)
         self.assertIn("scene-model-LICENSE.txt", self.builder)
 
     def test_release_build_embeds_native_runtime_and_scene_model(self) -> None:
@@ -48,6 +52,10 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("libonnxruntime.dylib", self.embed)
         self.assertIn("Contents/Resources/models/scene-model-v1.onnx", self.verifier)
         self.assertIn("lumia_gigascan_job_json", self.verifier)
+        self.assertIn('"command": "capabilities"', self.verifier)
+        self.assertIn('"command": "configureResources"', self.verifier)
+        self.assertLess(self.verifier.index('"command": "configureResources"'), self.verifier.index('"command": "start"'))
+        self.assertIn('"totalMemoryBudgetMiB": 2048', self.verifier)
         self.assertIn('"jxl"', self.verifier)
         self.assertNotIn("lumia_scene_open", self.verifier)
 

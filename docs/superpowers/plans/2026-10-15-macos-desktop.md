@@ -18,7 +18,7 @@
 - Model path: Windows `data/models/scene-model-v1.onnx`; macOS `Contents/Resources/models/scene-model-v1.onnx`.
 - Runtime path: absolute sibling of the core module in `Contents/Frameworks`; no system/PATH fallback.
 - Minimum macOS is 14.0, verified from the actual ORT 1.31 arm64 Mach-O load command.
-- Initial package defaults to Apple silicon while the optional user architecture answer is pending. Official ORT 1.31 has an arm64 Mac asset; do not silently downgrade the runtime for Intel.
+- User confirmed Apple silicon; the initial package targets arm64. Official ORT 1.31 has an arm64 Mac asset; do not silently downgrade the runtime for Intel.
 - No Apple ID, notarization or runtime account is required for this developer test package. Record ad-hoc signing separately from public notarized distribution.
 - Work only in the clean `codex/macos-desktop` worktree; preserve the original checkout's unrelated changes. Commit and push completed work.
 

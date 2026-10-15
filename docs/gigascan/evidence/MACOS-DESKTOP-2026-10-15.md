@@ -22,9 +22,9 @@ Review of existing hosted failures also found two independent build issues: the 
 | Check | Result |
 | --- | --- |
 | Rust formatting | Passed |
-| Native core tests with pinned OpenCV/JXL/ORT | 243 passed, 3 ignored (first full build) |
+| Native core tests with pinned OpenCV/JXL/ORT | 243 passed, 3 ignored (both full Windows builds) |
 | Flutter analysis | No issues |
-| Flutter full suite | 337 passed (first full build) |
+| Flutter full suite | 337 passed (both full Windows builds) |
 | Normal Windows source Release builder | Passed, 1.5.1+30 signing input; not a signed distribution |
 | Windows and Android build contracts | Passed; Windows contract executes both same-path and external-target DLL staging |
 | Mac shell syntax and package contracts on Windows | Passed; these do not constitute a Mac build |
@@ -38,3 +38,5 @@ The Unicode-path run used the freshly source-built Windows DLL, preserved both i
 The new workflow exports the canonical model on Windows and transfers its verified model, manifest and license to the Mac arm64 job. The Mac build is required to run core tests, Flutter analysis/tests, source Release build, architecture/minimum-OS/dependency/signature checks, and scene-enabled public-job rendering plus PNG/TIFF/JXL export against the packaged core. Actual hosted results will be recorded after the branch is pushed.
 
 A Windows host cannot establish that Xcode builds or launches the app. Mac build success, Mac application launch/import/resume behavior, and real-photograph visual quality are separate evidence. The user will test final tiles and exported same-coordinate crops on their Mac, especially small people, crowded areas, source/tile boundaries, shoreline people and water ripples. Original missing body parts are not reconstructed.
+
+The final Windows regression rerun after direct-export and CI staging fixes also passes all 243 native / 337 Flutter tests, analysis and normal Release packaging. The Mac public-job smoke logic was additionally executed on Windows with explicitly mocked Mach-O/signature checks: this found and fixed missing global resource configuration before a 2048 MiB scene job. That script regression now passes render, mask-manifest and PNG/TIFF/JXL checks; it is not Mac binary qualification. The model-preparation job caches only the canonical export and verifies size, digest, manifest and license on every use.
