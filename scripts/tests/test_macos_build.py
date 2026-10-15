@@ -88,6 +88,8 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("for artifact in include/onnxruntime_c_api.h lib/libonnxruntime.dylib LICENSE ThirdPartyNotices.txt", self.native)
         self.assertIn('rustup component add rustfmt --toolchain "$rust_version"', self.native)
         self.assertIn('export MACOSX_DEPLOYMENT_TARGET="$minimum"', self.native)
+        self.assertIn('export CARGO_TARGET_DIR="$repo/.build/macos/cargo-target"', self.native)
+        self.assertIn('core_dylib="$CARGO_TARGET_DIR/$target/release/liblumia_gigascan_core.dylib"', self.native)
         self.assertNotIn("c/CMakeLists.txt", self.native)
         self.assertNotIn("src/skcms.cc", self.native)
         self.assertIn("-iname 'PATENTS*'", self.builder)
@@ -109,6 +111,29 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("github.run_attempt", self.workflow)
         self.assertNotIn("hashFiles('scripts/macos-dependencies.lock.json', 'Apps/Flutter/stitch_app/tool/native/apple/build_macos_native.sh')", self.workflow)
         self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", self.workflow)
+        self.assertIn("Upload Flutter golden failure images", self.workflow)
+        self.assertIn("failure()", self.workflow)
+        self.assertIn("test/failures/**/*.png", self.workflow)
+        self.assertIn("retention-days: 7", self.workflow)
+        self.assertIn("Collect non-qualifying macOS golden snapshots for diagnosis", self.workflow)
+        self.assertIn("continue-on-error: true", self.workflow)
+        self.assertIn("--update-goldens", self.workflow)
+        self.assertIn("macos-golden-diagnostic-snapshots-${{ github.sha }}", self.workflow)
+        self.assertIn("test/goldens/*.png", self.workflow)
+        for golden_test in (
+            "test/batch_queue_screenshot_test.dart",
+            "test/force_grid_options_screenshot_test.dart",
+            "test/exported_image_viewer_test.dart",
+            "test/grid_screenshot_test.dart",
+            "test/scene_ui_localization_test.dart",
+            "test/tiff_quality_screenshot_test.dart",
+        ):
+            self.assertIn(golden_test, self.workflow)
+        self.assertLess(
+            self.workflow.index("Upload Flutter golden failure images"),
+            self.workflow.index("Collect non-qualifying macOS golden snapshots for diagnosis"),
+        )
+        self.assertLess(self.builder.index('"$flutter" test --no-pub'), self.builder.index('build_macos_native.sh'))
         self.assertIn("ad-hoc", (ROOT / "Apps/Flutter/stitch_app/APPLE-BUILD.md").read_text(encoding="utf-8"))
         self.assertNotIn("secrets.", self.workflow)
 

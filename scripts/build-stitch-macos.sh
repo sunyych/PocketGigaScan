@@ -74,13 +74,15 @@ dart_binary="$(cd "$(dirname "$flutter")/cache/dart-sdk/bin" && pwd)/dart"
 file "$dart_binary" | grep -q 'arm64' || { echo 'Flutter Dart SDK must be native arm64; Rosetta-based SDKs are unsupported.' >&2; exit 65; }
 
 python3 "$repo/scripts/verify-macos-package.py" --model "$scene_model" --manifest "$scene_manifest"
-bash "$repo/Apps/Flutter/stitch_app/tool/native/apple/build_macos_native.sh" "$repo" "$cache/dependencies"
 export LUMIA_NATIVE_APPLE_ENABLED=YES
 
 cd "$app"
 "$flutter" pub get
 "$flutter" analyze --no-pub
 "$flutter" test --no-pub --reporter expanded
+cd "$repo"
+bash "$repo/Apps/Flutter/stitch_app/tool/native/apple/build_macos_native.sh" "$repo" "$cache/dependencies"
+cd "$app"
 "$flutter" build macos --release
 
 bundle="$app/build/macos/Build/Products/Release/PocketGigaScan.app"

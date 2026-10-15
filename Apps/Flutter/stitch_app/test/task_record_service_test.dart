@@ -14,7 +14,7 @@ import 'package:stitch_app/services/task_record_service.dart';
 import 'package:stitch_app/services/task_repository.dart';
 
 String nativePath(String path) {
-  if (!p.windows.isAbsolute(path)) return path;
+  if (!Platform.isWindows || !p.windows.isAbsolute(path)) return path;
   if (path.startsWith('\\\\')) {
     return '\\\\?\\UNC\\${path.substring(2).toUpperCase()}';
   }

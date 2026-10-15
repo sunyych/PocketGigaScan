@@ -105,6 +105,40 @@ jobs:
           bash scripts/build-stitch-macos.sh \
             --scene-model "$RUNNER_TEMP/PocketGigaScan-scene-model/scene-model-v1.onnx" \
             --output-dir "$RUNNER_TEMP/PocketGigaScan-macos"
+      - name: Upload Flutter golden failure images
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-flutter-test-failures-${{ github.sha }}-${{ github.run_attempt }}
+          path: Apps/Flutter/stitch_app/test/failures/**/*.png
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Collect non-qualifying macOS golden snapshots for diagnosis
+        if: failure()
+        continue-on-error: true
+        run: |
+          flutter="$PWD/.build/macos/flutter-3.44.2/bin/flutter"
+          if [[ ! -x "$flutter" ]]; then
+            echo 'Diagnostic-only snapshot collection skipped: pinned Flutter SDK is unavailable.'
+            exit 0
+          fi
+          cd Apps/Flutter/stitch_app
+          # These snapshots only diagnose this runner's rendering. They are never qualification baselines.
+          "$flutter" test --no-pub --update-goldens --reporter expanded \
+            test/batch_queue_screenshot_test.dart \
+            test/force_grid_options_screenshot_test.dart \
+            test/exported_image_viewer_test.dart \
+            test/grid_screenshot_test.dart \
+            test/scene_ui_localization_test.dart \
+            test/tiff_quality_screenshot_test.dart
+      - name: Upload non-qualifying macOS golden diagnostic snapshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-golden-diagnostic-snapshots-${{ github.sha }}
+          path: Apps/Flutter/stitch_app/test/goldens/*.png
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Save native dependency cache after build attempt
         if: always() && steps.macos-native-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0

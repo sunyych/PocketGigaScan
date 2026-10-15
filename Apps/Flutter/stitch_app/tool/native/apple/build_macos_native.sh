@@ -25,6 +25,7 @@ minimum="14.0"
 rust_version="1.88.0"
 target="aarch64-apple-darwin"
 export MACOSX_DEPLOYMENT_TARGET="$minimum"
+export CARGO_TARGET_DIR="$repo/.build/macos/cargo-target"
 
 for command in cargo rustc rustup cmake tar curl shasum otool install_name_tool; do
   command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 69; }
@@ -147,7 +148,7 @@ export LUMIA_NATIVE_APPLE_ENABLED=YES
 (cd "$core" && cargo "+$rust_version" fmt --all -- --check)
 (cd "$core" && DYLD_LIBRARY_PATH="$opencv_sdk/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" cargo "+$rust_version" test --locked --target "$target")
 (cd "$core" && cargo "+$rust_version" build --locked --release --target "$target" --lib)
-core_dylib="$core/target/$target/release/liblumia_gigascan_core.dylib"
+core_dylib="$CARGO_TARGET_DIR/$target/release/liblumia_gigascan_core.dylib"
 [[ -f "$core_dylib" ]] || { echo "Cargo did not produce the macOS core dylib: $core_dylib" >&2; exit 66; }
 cp "$core_dylib" "$native_dir/liblumia_gigascan_core.dylib"
 cp -L "$ort_root/lib/libonnxruntime.dylib" "$runtime_dir/libonnxruntime.dylib"
