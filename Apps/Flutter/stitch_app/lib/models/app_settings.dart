@@ -20,6 +20,8 @@ class AppSettings {
     this.refineGridNeighbors = true,
     this.seamBlendMode = SeamBlendMode.deghost,
     this.localTextureWarp = true,
+    this.protectPeople = false,
+    this.smoothWater = false,
     this.memoryBudgetMode = MemoryBudgetMode.automatic,
     this.totalMemoryBudgetMiB = 512,
     this.performance = const PerformanceOptions(),
@@ -33,6 +35,8 @@ class AppSettings {
   final bool refineGridNeighbors;
   final SeamBlendMode seamBlendMode;
   final bool localTextureWarp;
+  final bool protectPeople;
+  final bool smoothWater;
   final MemoryBudgetMode memoryBudgetMode;
   final int totalMemoryBudgetMiB;
   final PerformanceOptions performance;
@@ -57,6 +61,8 @@ class AppSettings {
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
     bool? localTextureWarp,
+    bool? protectPeople,
+    bool? smoothWater,
     MemoryBudgetMode? memoryBudgetMode,
     int? totalMemoryBudgetMiB,
     PerformanceOptions? performance,
@@ -70,6 +76,8 @@ class AppSettings {
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
+    protectPeople: protectPeople ?? this.protectPeople,
+    smoothWater: smoothWater ?? this.smoothWater,
     memoryBudgetMode: memoryBudgetMode ?? this.memoryBudgetMode,
     totalMemoryBudgetMiB: totalMemoryBudgetMiB ?? this.totalMemoryBudgetMiB,
     performance: performance ?? this.performance,
@@ -87,6 +95,8 @@ class AppSettings {
     'refineGridNeighbors': refineGridNeighbors,
     'seamBlendMode': seamBlendMode.name,
     'localTextureWarp': localTextureWarp,
+    'protectPeople': protectPeople,
+    'smoothWater': smoothWater,
     'memoryBudgetMode': memoryBudgetMode.name,
     'totalMemoryBudgetMiB': totalMemoryBudgetMiB,
     'performance': performance.toJson(),
@@ -123,6 +133,8 @@ class AppSettings {
           ? SeamBlendMode.fromSavedValue(json['seamBlendMode'])
           : SeamBlendMode.deghost,
       localTextureWarp: json['localTextureWarp'] as bool? ?? true,
+      protectPeople: json['protectPeople'] as bool? ?? false,
+      smoothWater: json['smoothWater'] as bool? ?? false,
       memoryBudgetMode: enumValue(
         MemoryBudgetMode.values,
         json['memoryBudgetMode'],

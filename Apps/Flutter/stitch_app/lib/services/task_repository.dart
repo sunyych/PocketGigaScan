@@ -312,6 +312,8 @@ class TaskRepository {
       refineGridNeighbors: old.refineGridNeighbors,
       seamBlendMode: old.seamBlendMode,
       localTextureWarp: old.localTextureWarp,
+      protectPeople: old.protectPeople,
+      smoothWater: old.smoothWater,
     );
     await save(task);
     return task;

@@ -16,6 +16,7 @@ pub mod pipeline;
 pub mod projection;
 pub mod pyramid;
 pub mod scan;
+pub mod scene_analysis;
 mod seam_ownership;
 pub mod spherical;
 pub(crate) mod spherical_export;

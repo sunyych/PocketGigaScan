@@ -1,6 +1,6 @@
 //! Asynchronous, persistent spherical rendering jobs exposed through the JSON ABI.
 use crate::job_resources::{self, Limits};
-use crate::{fingerprint, spherical, spherical_renderer};
+use crate::{fingerprint, scene_analysis, spherical, spherical_renderer};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -438,7 +438,7 @@ pub fn handle(input: &str) -> Value {
 fn capabilities_value(limits: Limits) -> Value {
     let (active_jobs, reserved_workers, reserved_memory_mib) = job_resources::usage();
     let pending = job_resources::pending_limits();
-    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
+    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"sceneAnalysisAvailable":cfg!(lumia_scene_ort),"sceneModelId":scene_analysis::MODEL_ID,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
 }
 fn capabilities() -> Value {
     json!({"ok":true,"capabilities":capabilities_value(job_resources::limits())})
@@ -511,6 +511,63 @@ fn disjoint(root: &Path, src: &[PathBuf]) -> Result<(), String> {
     }
     Ok(())
 }
+fn normalize_scene_request(request: &mut Value) -> Result<(), String> {
+    for key in ["protectPeople", "smoothWater"] {
+        if request.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(format!("request.{key} must be a boolean"));
+        }
+    }
+    let people = request["protectPeople"].as_bool().unwrap_or(false);
+    let water = request["smoothWater"].as_bool().unwrap_or(false);
+    if !people && !water {
+        // Keep the historical request fingerprint byte-for-byte stable when the
+        // optional feature is off, including when Flutter sends false defaults.
+        let Some(object) = request.as_object_mut() else {
+            return Err("request must be an object".into());
+        };
+        for key in [
+            "protectPeople",
+            "smoothWater",
+            "sceneModelPath",
+            "sceneModelSha256",
+            "sceneCacheDir",
+        ] {
+            object.remove(key);
+        }
+        return Ok(());
+    }
+    #[cfg(not(windows))]
+    return Err("people protection and water smoothing are supported only on Windows".into());
+    #[cfg(windows)]
+    {
+        for key in ["sceneModelPath", "sceneCacheDir"] {
+            let text = request[key]
+                .as_str()
+                .filter(|text| !text.trim().is_empty())
+                .ok_or_else(|| {
+                    format!("request.{key} is required when scene analysis is enabled")
+                })?;
+            if !Path::new(text).is_absolute() {
+                return Err(format!("request.{key} must be an absolute path"));
+            }
+        }
+        let sha = request["sceneModelSha256"]
+            .as_str()
+            .ok_or("request.sceneModelSha256 is required when scene analysis is enabled")?
+            .to_owned();
+        if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("request.sceneModelSha256 must be a 64-digit SHA-256 hex string".into());
+        }
+        let Some(object) = request.as_object_mut() else {
+            return Err("request must be an object".into());
+        };
+        object.insert("protectPeople".into(), json!(people));
+        object.insert("smoothWater".into(), json!(water));
+        object.insert("sceneModelSha256".into(), json!(sha.to_ascii_lowercase()));
+        Ok(())
+    }
+}
+
 fn validate_request_shape(r: &Value) -> Result<(), String> {
     let rows = r["rows"].as_u64().ok_or("rows must be an integer")?;
     let cols = r["columns"].as_u64().ok_or("columns must be an integer")?;
@@ -570,6 +627,9 @@ fn start(c: Command) -> Value {
     };
     if let Err(e) = validate_request_shape(&request) {
         return fail("INVALID_REQUEST", e);
+    }
+    if let Err(error) = normalize_scene_request(&mut request) {
+        return fail("INVALID_REQUEST", error);
     }
     let photo_count = request["tiles"].as_array().map_or(0, Vec::len);
     let workers_effective = c
@@ -687,6 +747,50 @@ fn start(c: Command) -> Value {
             "INVALID_REQUEST",
             "request.alignmentCacheDir must be a path string",
         );
+    }
+    if request["protectPeople"].as_bool() == Some(true)
+        || request["smoothWater"].as_bool() == Some(true)
+    {
+        let cache_dir = PathBuf::from(request["sceneCacheDir"].as_str().unwrap_or_default());
+        let cache_target = match canonical_job(cache_dir.to_string_lossy().as_ref()) {
+            Ok(path) => path,
+            Err(error) => return fail("INVALID_PATH", format!("sceneCacheDir: {error}")),
+        };
+        if cache_target.starts_with(&root)
+            || root.starts_with(&cache_target)
+            || src
+                .iter()
+                .any(|source| source.starts_with(&cache_target) || source == &cache_target)
+        {
+            return fail(
+                "PATH_OVERLAP",
+                "sceneCacheDir cannot overlap outputDir or contain a source",
+            );
+        }
+        if let Err(error) = fs::create_dir_all(&cache_target) {
+            return fail(
+                "INVALID_PATH",
+                format!("sceneCacheDir cannot be created: {error}"),
+            );
+        }
+        let cache = match cache_target.canonicalize() {
+            Ok(path) => path,
+            Err(e) => return fail("INVALID_PATH", format!("sceneCacheDir: {e}")),
+        };
+        if cache.starts_with(&root)
+            || root.starts_with(&cache)
+            || src
+                .iter()
+                .any(|source| source.starts_with(&cache) || source == &cache)
+        {
+            return fail(
+                "PATH_OVERLAP",
+                "sceneCacheDir resolves through a conflicting path",
+            );
+        }
+        if let Some(obj) = request.as_object_mut() {
+            obj.insert("sceneCacheDir".into(), json!(cache.to_string_lossy()));
+        }
     }
     if let Err(e) = job_resources::reserve(&root, &root, workers_effective, c.memory_budget_mib) {
         return fail("RESOURCE_BUSY", e);
@@ -1189,6 +1293,80 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     let registration_ms = registration_started.elapsed().as_secs_f64() * 1000.0;
     let width = layout["width"].as_u64().unwrap_or(0) as u32;
     let height = layout["height"].as_u64().unwrap_or(0) as u32;
+    let protect_people = j.snapshot().request["protectPeople"]
+        .as_bool()
+        .unwrap_or(false);
+    let smooth_water = j.snapshot().request["smoothWater"]
+        .as_bool()
+        .unwrap_or(false);
+    let hashes = source_paths
+        .iter()
+        .map(|path| {
+            let key = path.to_string_lossy().into_owned();
+            let hash = source_hashes.get(&key).cloned().unwrap_or_default();
+            (path.clone(), hash)
+        })
+        .collect::<Vec<_>>();
+    let semantic_analysis = if protect_people || smooth_water {
+        j.update(|s| {
+            s.stage = "semantic-analysis".into();
+            s.progress = s.progress.max(0.19);
+        });
+        let model_path = PathBuf::from(
+            j.snapshot().request["sceneModelPath"]
+                .as_str()
+                .unwrap_or_default(),
+        );
+        let model_sha = j.snapshot().request["sceneModelSha256"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let cache_dir = PathBuf::from(
+            j.snapshot().request["sceneCacheDir"]
+                .as_str()
+                .unwrap_or_default(),
+        );
+        let analysis = scene_analysis::analyze(
+            &hashes,
+            &model_path,
+            &model_sha,
+            &cache_dir,
+            j.snapshot().memory_budget_mib,
+            j.snapshot().workers_effective,
+            |done, total| {
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f64 / total as f64
+                };
+                j.checkpoint(
+                    "semantic-analysis",
+                    Some(0.19 + fraction.clamp(0.0, 1.0) * 0.01),
+                )
+            },
+        )
+        .map_err(|error| {
+            if error == "cancelled" {
+                RunFailure::CooperativeCancellation
+            } else {
+                RunFailure::Failed(error)
+            }
+        })?;
+        Some(analysis)
+    } else {
+        None
+    };
+    let mut render_layout = layout.clone();
+    if let Some(analysis) = &semantic_analysis {
+        render_layout["protectPeople"] = json!(protect_people);
+        render_layout["smoothWater"] = json!(smooth_water);
+        render_layout["semanticAnalysis"] = analysis.clone();
+        // Keep the geometry alignment cache clean; the job's layout is the
+        // renderer input and carries the validated, reproducible mask identity.
+        write_json_replace_atomic(&layout_path, &render_layout)?;
+        let hash = fingerprint::sha256_file(&layout_path).map_err(|e| e.to_string())?;
+        j.update(|s| s.layout_hash = Some(hash));
+    }
     j.update(|s| {
         s.layout_path = Some("layout.json".into());
         s.width = Some(width);
@@ -1206,6 +1384,35 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
             && m["requestHash"].as_str() == Some(&current.request_hash)
             && m["sourceHashes"] == json!(current.source_hashes)
         {
+            if let Some(analysis) = &semantic_analysis {
+                let model_path = PathBuf::from(
+                    current.request["sceneModelPath"]
+                        .as_str()
+                        .unwrap_or_default(),
+                );
+                scene_analysis::validate_manifest(
+                    &m["semanticAnalysis"],
+                    &model_path,
+                    analysis["modelSha256"].as_str().unwrap_or_default(),
+                    &hashes,
+                )?;
+                if m["semanticAnalysis"] != *analysis
+                    || m["protectPeople"].as_bool() != Some(protect_people)
+                    || m["smoothWater"].as_bool() != Some(smooth_water)
+                {
+                    return Err(
+                        "persisted scene-analysis selection or masks do not match this resume"
+                            .into(),
+                    );
+                }
+            } else if m.get("semanticAnalysis").is_some()
+                || m["protectPeople"].as_bool() == Some(true)
+                || m["smoothWater"].as_bool() == Some(true)
+            {
+                return Err(
+                    "persisted manifest scene-analysis options do not match this resume".into(),
+                );
+            }
             j.update(|s| {
                 s.result_stats = Some(json!({"operation":"render","renderer":m["rendererStats"],"pyramid":m["pyramidStats"],"alignmentCacheHit":m["alignmentCacheHit"],"alignment":m["alignmentStats"],"phaseTimesMs":m["phaseTimesMs"]}));
                 s.manifest_path = Some("manifest.json".into());
@@ -1217,7 +1424,7 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
         return Err("persisted manifest fingerprints do not match; refusing resume".into());
     }
     let stats = spherical_renderer::render_layout_tiles_with_options(
-        &layout,
+        &render_layout,
         &j.root,
         j.snapshot().memory_budget_mib,
         if j.snapshot().request["parallelRendering"]
@@ -1284,7 +1491,10 @@ fn run_inner(j: &Arc<Control>, resume: bool) -> Result<(), RunFailure> {
     let render_ms = stats["renderMs"].as_f64().unwrap_or(0.0);
     let phase_times = json!({"validationAndHash":validation_hash_ms,"registration":registration_ms,"render":render_ms,"pyramid":pyramid_ms,"total":total_started.elapsed().as_secs_f64()*1000.0});
     let alignment_report = alignment_stats(&layout, alignment_cache_hit);
-    let manifest = json!({"schemaVersion":1,"projection":"spherical","tileSize":512,"width":width,"height":height,"yawMinRad":bounds[0],"yawMaxRad":bounds[1],"pitchMinRad":bounds[2],"pitchMaxRad":bounds[3],"complete":true,"backend":"cpu-rust-tiled","memoryBudgetMiB":j.snapshot().memory_budget_mib,"workersRequested":j.snapshot().workers_requested,"workersEffective":j.snapshot().workers_effective,"renderWorkers":stats["workersEffective"],"pyramidWorkersEffective":pyramid_stats["workersEffective"],"alignmentCacheHit":alignment_cache_hit,"alignmentStats":alignment_report,"registrationMs":registration_ms,"phaseTimesMs":phase_times,"requestHash":j.snapshot().request_hash,"sourceHashes":j.snapshot().source_hashes,"rendererStats":stats,"pyramidStats":pyramid_stats,"levels":levels});
+    let mut manifest = json!({"schemaVersion":1,"projection":"spherical","tileSize":512,"width":width,"height":height,"yawMinRad":bounds[0],"yawMaxRad":bounds[1],"pitchMinRad":bounds[2],"pitchMaxRad":bounds[3],"complete":true,"backend":"cpu-rust-tiled","memoryBudgetMiB":j.snapshot().memory_budget_mib,"workersRequested":j.snapshot().workers_requested,"workersEffective":j.snapshot().workers_effective,"sceneAnalysisCpuWorkers":if protect_people || smooth_water { j.snapshot().workers_effective.clamp(1, 8) } else { 0 },"renderWorkers":stats["workersEffective"],"pyramidWorkersEffective":pyramid_stats["workersEffective"],"alignmentCacheHit":alignment_cache_hit,"alignmentStats":alignment_report,"registrationMs":registration_ms,"phaseTimesMs":phase_times,"requestHash":j.snapshot().request_hash,"sourceHashes":j.snapshot().source_hashes,"rendererStats":stats,"pyramidStats":pyramid_stats,"levels":levels,"protectPeople":protect_people,"smoothWater":smooth_water});
+    if let Some(analysis) = semantic_analysis {
+        manifest["semanticAnalysis"] = analysis;
+    }
     write_json_atomic(&j.root.join("manifest.json"), &manifest)?;
     j.update(|s| {
         s.result_stats = Some(json!({"operation":"render","alignmentCacheHit":alignment_cache_hit,"alignment":alignment_report,"phaseTimesMs":phase_times,"renderer":manifest["rendererStats"],"pyramid":manifest["pyramidStats"]}));
@@ -1332,6 +1542,11 @@ fn fingerprint_request(request: &Value) -> Value {
             "alignmentCacheDir",
             "memoryBudgetMiB",
             "memoryBudgetMib",
+            "protectPeople",
+            "smoothWater",
+            "sceneModelPath",
+            "sceneModelSha256",
+            "sceneCacheDir",
         ] {
             obj.remove(key);
         }
@@ -1376,6 +1591,7 @@ fn alignment_stats(layout: &Value, cache_hit: bool) -> Value {
         "totalAlignmentMs":report["totalAlignmentMs"]
     })
 }
+
 fn alignment_cache_key(request: &Value, hashes: &BTreeMap<String, String>) -> String {
     alignment_cache_key_for_version(ALIGNMENT_CACHE_ALGORITHM_VERSION, request, hashes)
 }
@@ -1463,6 +1679,31 @@ fn write_json_atomic(p: &Path, v: &Value) -> Result<(), String> {
     }
     fs::rename(temp, p).map_err(|e| e.to_string())
 }
+fn write_json_replace_atomic(p: &Path, v: &Value) -> Result<(), String> {
+    let temp = p.with_extension("semantic.json.tmp");
+    let data = serde_json::to_vec_pretty(v).map_err(|e| e.to_string())?;
+    let mut file = fs::File::create(&temp).map_err(|e| e.to_string())?;
+    file.write_all(&data).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    for attempt in 0..=4 {
+        match fs::rename(&temp, p) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if cfg!(windows) && matches!(error.raw_os_error(), Some(5 | 32)) && attempt < 4 =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10))
+            }
+            Err(error) => {
+                return Err(format!(
+                    "could not publish semantic renderer layout {}: {error}",
+                    p.display()
+                ))
+            }
+        }
+    }
+    unreachable!("final rename attempt returns its error")
+}
 fn has_completed_render_checkpoint(j: &Control, snapshot: &Snapshot) -> bool {
     if snapshot.operation != "export"
         || snapshot.layout_path.as_deref() != Some("layout.json")
@@ -1501,7 +1742,55 @@ fn has_completed_render_checkpoint(j: &Control, snapshot: &Snapshot) -> bool {
         Some(value) => value,
         None => return false,
     };
-    manifest["schemaVersion"].as_u64() == Some(1)
+    let people = snapshot.request["protectPeople"].as_bool().unwrap_or(false);
+    let water = snapshot.request["smoothWater"].as_bool().unwrap_or(false);
+    let scene_valid = if people || water {
+        let expected = snapshot.request["sceneModelSha256"]
+            .as_str()
+            .unwrap_or_default();
+        let model = PathBuf::from(
+            snapshot.request["sceneModelPath"]
+                .as_str()
+                .unwrap_or_default(),
+        );
+        let expected_sources = match sources(&snapshot.request) {
+            Ok(paths) => paths
+                .into_iter()
+                .map(|path| {
+                    let key = path.to_string_lossy().into_owned();
+                    let hash = snapshot
+                        .source_hashes
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default();
+                    (path, hash)
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => return false,
+        };
+        layout["semanticAnalysis"] == manifest["semanticAnalysis"]
+            && layout["protectPeople"].as_bool() == Some(people)
+            && layout["smoothWater"].as_bool() == Some(water)
+            && manifest["protectPeople"].as_bool() == Some(people)
+            && manifest["smoothWater"].as_bool() == Some(water)
+            && scene_analysis::validate_manifest(
+                &manifest["semanticAnalysis"],
+                &model,
+                expected,
+                &expected_sources,
+            )
+            .is_ok()
+    } else {
+        layout.get("semanticAnalysis").is_none()
+            && manifest.get("semanticAnalysis").is_none()
+            // Older completed renders predate these optional booleans. Treat
+            // an absent value as disabled, while rejecting any explicit true
+            // or malformed value so feature-enabled checkpoints stay strict.
+            && manifest.get("protectPeople").is_none_or(|value| value.as_bool() == Some(false))
+            && manifest.get("smoothWater").is_none_or(|value| value.as_bool() == Some(false))
+    };
+    scene_valid
+        && manifest["schemaVersion"].as_u64() == Some(1)
         && manifest["complete"].as_bool() == Some(true)
         && manifest["requestHash"].as_str() == Some(snapshot.request_hash.as_str())
         && manifest["sourceHashes"] == json!(snapshot.source_hashes)
@@ -1760,6 +2049,36 @@ mod tests {
         assert!(validate_request_shape(&overflow)
             .unwrap_err()
             .contains("overflow"));
+    }
+
+    #[test]
+    fn disabled_scene_options_preserve_the_pre_feature_request_fingerprint() {
+        let mut legacy = json!({"rows":1,"columns":1,"tiles":[],"sourceWidth":10,"sourceHeight":10,"fx":1.0,"fy":1.0,"cx":5.0,"cy":5.0});
+        let expected = fingerprint_request(&legacy);
+        let mut defaults = json!({"rows":1,"columns":1,"tiles":[],"sourceWidth":10,"sourceHeight":10,"fx":1.0,"fy":1.0,"cx":5.0,"cy":5.0,"protectPeople":false,"smoothWater":false,"sceneModelPath":"ignored","sceneModelSha256":"ignored","sceneCacheDir":"ignored"});
+        normalize_scene_request(&mut legacy).unwrap();
+        normalize_scene_request(&mut defaults).unwrap();
+        assert_eq!(legacy, defaults);
+        assert_eq!(fingerprint_request(&defaults), expected);
+        assert!(defaults.get("sceneModelPath").is_none());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn enabled_scene_options_are_explicitly_unsupported_off_windows() {
+        let mut request = json!({"protectPeople":true,"smoothWater":false});
+        assert!(normalize_scene_request(&mut request)
+            .unwrap_err()
+            .contains("supported only on Windows"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn enabled_scene_options_require_absolute_model_and_cache_paths() {
+        let mut request = json!({"protectPeople":true,"smoothWater":false,"sceneModelPath":"relative.onnx","sceneModelSha256":"a".repeat(64),"sceneCacheDir":"C:\\cache"});
+        assert!(normalize_scene_request(&mut request)
+            .unwrap_err()
+            .contains("absolute path"));
     }
 
     #[test]

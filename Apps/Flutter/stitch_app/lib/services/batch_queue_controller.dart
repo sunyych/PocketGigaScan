@@ -24,6 +24,7 @@ import 'spherical_request.dart';
 import 'task_repository.dart';
 import 'task_record_service.dart';
 import 'dwarf_download_service.dart';
+import 'scene_model_service.dart';
 
 class BatchQueueController extends ChangeNotifier {
   BatchQueueController({
@@ -35,6 +36,7 @@ class BatchQueueController extends ChangeNotifier {
     this.requireLargeJobApproval = false,
     this.runtimeService,
     this.storageService,
+    this.sceneModelService,
   }) : _queueRepository = queueRepository ?? BatchQueueRepository(),
        _taskRepository = taskRepository ?? TaskRepository(),
        _importer = importer ?? BatchFolderImporter(),
@@ -49,6 +51,7 @@ class BatchQueueController extends ChangeNotifier {
   bool requireLargeJobApproval;
   final MobileRuntimeService? runtimeService;
   final MobileStorageService? storageService;
+  final Future<SceneModelService>? sceneModelService;
   MobileResourceBudget? resourceBudget;
   bool resourceConfigurationReady = true;
   int? desiredMemoryBudgetMiB;
@@ -74,6 +77,34 @@ class BatchQueueController extends ChangeNotifier {
   bool _disposed = false;
   bool _ticking = false;
   String? error;
+  bool get hasActiveTasks =>
+      _inFlight.isNotEmpty ||
+      _taskCache.values.any(
+        (task) =>
+            (task.protectPeople || task.smoothWater) &&
+            const {
+              StitchPhase.queued,
+              StitchPhase.running,
+              StitchPhase.pausing,
+              StitchPhase.paused,
+              StitchPhase.interrupted,
+              StitchPhase.exporting,
+            }.contains(task.phase),
+      ) ||
+      _queues.any(
+        (queue) =>
+            (queue.protectPeople || queue.smoothWater) &&
+            queue.items.any(
+              (item) => const {
+                BatchItemState.pending,
+                BatchItemState.ready,
+                BatchItemState.needsApproval,
+                BatchItemState.running,
+                BatchItemState.exporting,
+                BatchItemState.paused,
+              }.contains(item.state),
+            ),
+      );
 
   String _nextTimelineUiId(String taskId, StitchTimeline timeline) {
     var sequence = _timelineUiSequences[taskId] ?? 0;
@@ -956,6 +987,8 @@ class BatchQueueController extends ChangeNotifier {
         refineGridNeighbors: settings?.refineGridNeighbors ?? true,
         seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
         localTextureWarp: settings?.localTextureWarp ?? true,
+        protectPeople: settings?.protectPeople ?? false,
+        smoothWater: settings?.smoothWater ?? false,
       );
       _queues.insert(0, queue);
       await _save(queue);
@@ -1125,6 +1158,8 @@ class BatchQueueController extends ChangeNotifier {
         refineGridNeighbors: settings?.refineGridNeighbors ?? true,
         seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
         localTextureWarp: settings?.localTextureWarp ?? true,
+        protectPeople: settings?.protectPeople ?? false,
+        smoothWater: settings?.smoothWater ?? false,
       );
       _queues.insert(0, queue);
       await _save(queue);
@@ -1205,6 +1240,8 @@ class BatchQueueController extends ChangeNotifier {
         refineGridNeighbors: queue.refineGridNeighbors,
         seamBlendMode: queue.seamBlendMode,
         localTextureWarp: queue.localTextureWarp,
+        protectPeople: queue.protectPeople,
+        smoothWater: queue.smoothWater,
         exportDirectory: queue.exportDestination ?? queue.outputDirectory,
       );
       await _saveTask(task);
@@ -3016,8 +3053,23 @@ class BatchQueueController extends ChangeNotifier {
             _inFlight.remove(item.id);
             continue;
           }
+          final configuredTask = task.copyWith(workers: workers);
+          final sceneModel =
+              Platform.isWindows &&
+                  (configuredTask.protectPeople || configuredTask.smoothWater)
+              ? await _prepareSceneModel(
+                  queue.id,
+                  item.id,
+                  generation,
+                  sceneModelService ?? createDefaultSceneModelService(),
+                )
+              : null;
           response = await _api.start(
-            buildSphericalRequest(task.copyWith(workers: workers)),
+            buildSphericalRequest(
+              configuredTask,
+              sceneModel: sceneModel,
+              supportsSceneModel: Platform.isWindows,
+            ),
             output.path,
             memoryBudgetMiB: memory,
             workers: workers,
@@ -3397,6 +3449,47 @@ class BatchQueueController extends ChangeNotifier {
     _queues[queueIndex] = updated;
     await _save(updated);
     if (!_disposed) notifyListeners();
+  }
+
+  Future<SceneModelMetadata> _prepareSceneModel(
+    String queueId,
+    String itemId,
+    int generation,
+    Future<SceneModelService> serviceFuture,
+  ) async {
+    final service = await serviceFuture;
+    var lastPercent = -1;
+    return service.ensureReady(
+      isCancelled: () => !_stillReady(queueId, itemId, generation),
+      onProgress: (progress) {
+        final total = progress.totalBytes;
+        if (total <= 0) return;
+        final percent = (progress.receivedBytes * 100 / total)
+            .floor()
+            .clamp(0, 100)
+            .toInt();
+        if (percent == lastPercent) return;
+        lastPercent = percent;
+        unawaited(
+          _setPreparationProgress(queueId, itemId, generation, percent),
+        );
+      },
+    );
+  }
+
+  Future<void> _setPreparationProgress(
+    String queueId,
+    String itemId,
+    int generation,
+    int percent,
+  ) async {
+    if (!_stillReady(queueId, itemId, generation)) return;
+    final found = _find(queueId, itemId);
+    if (found == null) return;
+    await _replaceItem(
+      found.index,
+      found.item.copyWith(message: '正在准备场景模型：$percent%'),
+    );
   }
 
   Future<void> _save(BatchQueue queue) {

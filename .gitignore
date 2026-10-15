@@ -112,6 +112,12 @@ __pycache__/
 !/scripts/verify-spherical-seam-alignment.py
 !/scripts/benchmark-dwarf-render.py
 !/scripts/verify-deghost-continuity.py
+!/scripts/export-scene-model.py
+!/scripts/scene-model-export.lock.json
+!/scripts/scene-model-export.requirements.txt
+!/scripts/README-scene-model.md
+!/docs/superpowers/plans/2026-10-15-scene-blending.md
+!/docs/gigascan/evidence/SCENE-BLENDING-2026-10-15.md
 !/docs/superpowers/plans/2026-10-09-deghost-continuity.md
 !/docs/gigascan/evidence/DEGHOST-CONTINUITY-2026-10-09.md
 !/scripts/tests/

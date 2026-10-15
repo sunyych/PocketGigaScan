@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "modelId": "openmmlab/upernet-convnext-tiny",
+  "revision": "876ffc56b819a829448f7e81e9f8606deef6fb65",
+  "license": "MIT",
+  "exportDependencies": { "torch": "2.5.1", "transformers": "4.55.4", "onnx": "1.22.0", "huggingface-hub": "0.34.4", "safetensors": "0.4.5", "numpy": "2.2.6" },
+  "input": { "name": "pixel_values", "shape": [1, 3, 512, 512], "dtype": "float32" },
+  "output": { "name": "scene_probabilities", "shape": [1, 2, 512, 512], "channels": { "person": [12], "water": [21, 26, 60, 109] } },
+  "preprocessing": { "version": 1, "color": "RGB", "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225] },
+  "opset": 17,
+  "packagePath": "data/models/scene-model-v1.onnx",
+  "expectedSizeBytes": 237503947,
+  "expectedSha256": "a997b66ac8ca75632817a62f253e47300b29edbeed6f62b1f04d98fe5bc12a13"
+}

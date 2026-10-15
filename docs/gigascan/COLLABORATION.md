@@ -1,5 +1,11 @@
 # PocketGigaScan collaboration ledger
 
+## PG-068 Windows person protection and water smoothing
+
+User approved implementation on 2026-10-15: independent default-off flags, local automatic recognition, completeness-first overlapping crops, smooth-water blending, first-use model download and Windows-only UI. Luna native coder owns inference/cache/job/build/export tooling; Luna renderer coder owns sparse person protection, mask projection and water weights; Luna Flutter coder owns settings/tasks/queues/model management and bilingual UI. Codex coordinates contracts, reviews independently and owns qualification/documentation. See [implementation plan](../superpowers/plans/2026-10-15-scene-blending.md).
+
+The checkout starts dirty on codex/deghost-continuity, with unrelated task/registration/viewer/Flutter-test changes. Preserve those narrow edits and original photos/results. No Android or complete-panorama visual acceptance is implied. Implementation and qualification are in progress. User revised delivery after the unavailable developer GitHub login: bundle the model in the Windows package, prepare a verified local copy on first use, and require no network/account from end users. No independent model Release publication is needed.
+
 ## PG-061 Windows import and local-storage diagnosis
 
 The user reported a native file-dialog crash and errno-5 failures creating tasks

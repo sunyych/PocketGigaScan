@@ -2,6 +2,8 @@
 param(
     [string]$OpenCvDir,
     [string]$JxlSdk,
+    [string]$OrtSdk,
+    [string]$SceneModel,
     [string]$DjxlExecutable,
     [string]$FlutterPath,
     [string]$OutputDirectory,
@@ -22,6 +24,10 @@ $pin = [ordered]@{
     jxlVersion = '0.12.0'
     jxlUrl = 'https://github.com/libjxl/libjxl/releases/download/v0.12.0/jxl-x64-windows-static.zip'
     jxlSha256 = '3025d7e308390796d20492322e606bc92decaee7b6bc99d3f7547870ae5db7de'
+    ortVersion = '1.31.0'
+    ortUrl = 'https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip'
+    ortSha256 = '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195'
+    sceneModelId = 'openmmlab/upernet-convnext-tiny@876ffc56b819a829448f7e81e9f8606deef6fb65'
     djxlSha256 = '6970ce73de51e046b39bd5f28fc7bc5da64e9f6505c11194319f43d8849d2bf4'
     flutterVersion = '3.44.2'
     flutterCommit = 'c9a6c484230f8b5e408ec57be1ef71dee1e77020'
@@ -37,6 +43,9 @@ $opencvSource = Join-Path $cache "opencv-$($pin.openCvVersion)"
 $opencvBuild = Join-Path $cache "opencv-$($pin.openCvVersion)-build"
 $opencvInstall = Join-Path $cache "opencv-$($pin.openCvVersion)-install"
 $jxlRoot = Join-Path $cache "libjxl-$($pin.jxlVersion)"
+$ortRoot = Join-Path $cache "onnxruntime-$($pin.ortVersion)"
+$sceneExportRoot = Join-Path $cache 'scene-model-export'
+$sceneModelCache = Join-Path $cache 'huggingface-cache'
 $flutterRoot = Join-Path $cache "flutter-$($pin.flutterVersion)"
 $releaseDir = Join-Path $app 'build/windows/x64/runner/Release'
 $packageDir = Join-Path $OutputDirectory 'package'
@@ -142,6 +151,41 @@ function Find-JxlSdkRoot([string]$Root) {
     } | Select-Object -First 1
     if ($candidate) { return $candidate.FullName }
     return $null
+}
+
+function Find-OrtSdkRoot([string]$Root) {
+    $directories = @()
+    if (Test-Path -LiteralPath $Root -PathType Container) {
+        $directories += Get-Item -LiteralPath $Root
+        $directories += Get-ChildItem -LiteralPath $Root -Directory -Recurse
+    }
+    $candidate = $directories | Where-Object {
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'include/onnxruntime_cxx_api.h')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'lib/onnxruntime.dll')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'lib/onnxruntime_providers_shared.dll')) -and
+        (Test-Path -LiteralPath (Join-Path $_.FullName 'LICENSE'))
+    } | Select-Object -First 1
+    if ($candidate) { return $candidate.FullName }
+    return $null
+}
+
+function Assert-SceneModel([string]$ModelPath) {
+    $model = [IO.Path]::GetFullPath($ModelPath)
+    $manifestPath = Join-Path (Split-Path $model -Parent) 'scene-model-v1.manifest.json'
+    if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw "Scene model is missing: $model" }
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Scene model SHA/size manifest is missing: $manifestPath" }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $lock = Get-Content -LiteralPath (Join-Path $repo 'scripts/scene-model-export.lock.json') -Raw | ConvertFrom-Json
+    if ($manifest.schemaVersion -ne 1 -or $manifest.modelId -ne $pin.sceneModelId -or $manifest.onnxFile -ne [IO.Path]::GetFileName($model)) {
+        throw "Scene model manifest identity mismatch: $manifestPath"
+    }
+    $size = (Get-Item -LiteralPath $model).Length
+    $sha = (Get-FileHash -LiteralPath $model -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ([long]$manifest.sizeBytes -ne $size -or $manifest.sha256.ToLowerInvariant() -ne $sha -or
+        $size -ne [long]$lock.expectedSizeBytes -or $sha -ne $lock.expectedSha256) {
+        throw "Scene model size or SHA-256 mismatch: $model"
+    }
+    return [pscustomobject]@{ path = $model; manifestPath = $manifestPath; sizeBytes = $size; sha256 = $sha }
 }
 
 function Assert-Vs18ToolchainVersion([string]$VisualStudioVersion, [string]$VCToolsVersion) {
@@ -339,6 +383,11 @@ function Get-BuildPlan {
         opencvSha256 = $pin.openCvSha256
         libjxlVersion = $pin.jxlVersion
         libjxlSha256 = $pin.jxlSha256
+        onnxRuntimeVersion = $pin.ortVersion
+        onnxRuntimeSha256 = $pin.ortSha256
+        onnxRuntimeSdk = $OrtSdk
+        sceneModelId = $pin.sceneModelId
+        sceneModelPath = if ($SceneModel) { [IO.Path]::GetFullPath($SceneModel) } else { Join-Path $sceneExportRoot 'scene-model-v1.onnx' }
         djxlSha256 = $pin.djxlSha256
         flutterVersion = $pin.flutterVersion
         flutterCommit = $pin.flutterCommit
@@ -538,6 +587,55 @@ if (-not (Test-Path -LiteralPath (Join-Path $JxlSdk 'include/jxl/encode.h'))) { 
 $env:LUMIA_JXL_SDK = $JxlSdk
 Remove-Item Env:LUMIA_JXL_TEST_HELPERS -ErrorAction SilentlyContinue
 
+if (-not $OrtSdk) {
+    $ortArchive = Join-Path $cache "onnxruntime-win-x64-$($pin.ortVersion).zip"
+    Assert-OwnedPath $ortArchive $cache
+    Save-VerifiedArchive $pin.ortUrl $ortArchive $pin.ortSha256
+    if (-not (Test-Path -LiteralPath (Join-Path $ortRoot 'include/onnxruntime_cxx_api.h'))) {
+        if (Test-Path -LiteralPath $ortRoot) {
+            Assert-OwnedPath $ortRoot $cache -InspectTree
+            Remove-Item -LiteralPath $ortRoot -Recurse -Force
+        }
+        Assert-OwnedPath $ortRoot $cache
+        New-Item -ItemType Directory -Force -Path $ortRoot | Out-Null
+        Expand-Archive -LiteralPath $ortArchive -DestinationPath $ortRoot -Force
+    }
+    $OrtSdk = $ortRoot
+}
+$OrtSdk = [IO.Path]::GetFullPath($OrtSdk)
+$ortSdkRoot = Find-OrtSdkRoot $OrtSdk
+if (-not $ortSdkRoot) { throw "ONNX Runtime $($pin.ortVersion) SDK must contain include/onnxruntime_cxx_api.h, both lib runtime DLLs, and LICENSE: $OrtSdk" }
+$ortSdkVersionPath = Join-Path $ortSdkRoot 'VERSION_NUMBER'
+if (-not (Test-Path -LiteralPath $ortSdkVersionPath -PathType Leaf) -or (Get-Content -LiteralPath $ortSdkVersionPath -Raw).Trim() -ne $pin.ortVersion) {
+    throw "ONNX Runtime SDK version does not match the pinned $($pin.ortVersion): $ortSdkRoot"
+}
+if (-not $OrtSdk.StartsWith($cache + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase) -and -not $PSBoundParameters.ContainsKey('OrtSdk')) {
+    throw "Downloaded ONNX Runtime SDK resolved outside its owned dependency cache: $ortSdkRoot"
+}
+$OrtSdk = $ortSdkRoot
+$env:LUMIA_ORT_SDK = $OrtSdk
+
+if (-not $SceneModel) {
+    $SceneModel = Join-Path $sceneExportRoot 'scene-model-v1.onnx'
+}
+if (-not (Test-Path -LiteralPath $SceneModel -PathType Leaf)) {
+    $python = Get-Command python.exe -ErrorAction SilentlyContinue
+    if (-not $python) { throw 'Python is required to produce the bundled pinned scene model on a clean build.' }
+    $requirements = Join-Path $repo 'scripts/scene-model-export.requirements.txt'
+    $pythonForExport = $python.Source
+    $dependencyCheck = & $pythonForExport -c "import importlib.metadata as m; p={'torch':'2.5.1','transformers':'4.55.4','onnx':'1.22.0','huggingface-hub':'0.34.4','safetensors':'0.4.5','numpy':'2.2.6'}; raise SystemExit(0 if all(m.version(k)==v for k,v in p.items()) else 1)" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        $exportVenv = Join-Path $cache 'scene-export-venv'
+        $exportPython = Join-Path $exportVenv 'Scripts/python.exe'
+        if (-not (Test-Path -LiteralPath $exportPython)) { Invoke-Checked $pythonForExport @('-m','venv',$exportVenv) $repo }
+        Invoke-Checked $exportPython @('-m','pip','install','--disable-pip-version-check','-r',$requirements) $repo
+        $pythonForExport = $exportPython
+    }
+    New-Item -ItemType Directory -Force -Path $sceneExportRoot, $sceneModelCache | Out-Null
+    Invoke-Checked $pythonForExport @((Join-Path $repo 'scripts/export-scene-model.py'),'--output-dir',$sceneExportRoot,'--cache-dir',$sceneModelCache) $repo
+}
+$sceneModelInfo = Assert-SceneModel $SceneModel
+
 Invoke-Checked 'rustup.exe' @('toolchain', 'install', $pin.rustVersion, '--profile', 'minimal', '--no-self-update') $repo
 
 $djxlPath = $DjxlExecutable
@@ -564,6 +662,26 @@ Remove-Item Env:LUMIA_DJXL_PATH -ErrorAction SilentlyContinue
 Invoke-Checked 'cargo.exe' @("+$($pin.rustVersion)", 'build', '--release', '--locked', '--manifest-path', (Join-Path $native 'Cargo.toml')) $repo
 $cargoMetadataJson = & cargo.exe "+$($pin.rustVersion)" metadata --format-version 1 --locked --manifest-path (Join-Path $native 'Cargo.toml')
 if ($LASTEXITCODE -ne 0) { throw "Cargo metadata failed ($LASTEXITCODE)." }
+$cargoMetadata = ($cargoMetadataJson -join [Environment]::NewLine) | ConvertFrom-Json
+$freshTargetDirectory = [IO.Path]::GetFullPath($cargoMetadata.target_directory)
+$freshCoreDll = Join-Path $freshTargetDirectory 'release/lumia_gigascan_core.dll'
+if (-not (Test-Path -LiteralPath $freshCoreDll -PathType Leaf)) {
+    throw "The source-built release core DLL is missing from Cargo's target directory: $freshCoreDll"
+}
+
+# Flutter's Windows install rules consume the verified model from this stable
+# build staging path. Copy only the release DLL produced by this source build;
+# Cargo may target an isolated directory on Windows low-integrity workspaces.
+$nativeRelease = Join-Path $native 'target/release'
+New-Item -ItemType Directory -Force -Path $nativeRelease | Out-Null
+Copy-Item -LiteralPath $freshCoreDll -Destination (Join-Path $nativeRelease 'lumia_gigascan_core.dll') -Force
+$freshCoreSha = (Get-FileHash -LiteralPath $freshCoreDll -Algorithm SHA256).Hash.ToLowerInvariant()
+$stagedCoreSha = (Get-FileHash -LiteralPath (Join-Path $nativeRelease 'lumia_gigascan_core.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($stagedCoreSha -ne $freshCoreSha) { throw 'Staged native core DLL differs from the freshly built release artifact.' }
+Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime.dll') -Destination (Join-Path $nativeRelease 'onnxruntime.dll') -Force
+Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime_providers_shared.dll') -Destination (Join-Path $nativeRelease 'onnxruntime_providers_shared.dll') -Force
+Copy-Item -LiteralPath $sceneModelInfo.path -Destination (Join-Path $nativeRelease 'scene-model-v1.onnx') -Force
+Copy-Item -LiteralPath $sceneModelInfo.manifestPath -Destination (Join-Path $nativeRelease 'scene-model-v1.manifest.json') -Force
 
 if (-not $FlutterPath) {
     $flutterArchive = Join-Path $cache "flutter-$($pin.flutterVersion)-windows.zip"
@@ -611,6 +729,22 @@ Clear-OwnedFlutterWindowsBuildOutputs `
     $app
 Invoke-Checked $FlutterPath @('build', 'windows', '--release', '--target', 'lib/main.dart') $app
 
+# The native bridge resolves ONNX Runtime beside lumia_gigascan_core.dll.
+# Stage runtime DLLs from the pinned SDK even when Flutter's CMake install rule also
+# copies it, so the release ZIP is self-contained in clean builds.
+Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime.dll') -Destination (Join-Path $releaseDir 'onnxruntime.dll') -Force
+Copy-Item -LiteralPath (Join-Path $OrtSdk 'lib/onnxruntime_providers_shared.dll') -Destination (Join-Path $releaseDir 'onnxruntime_providers_shared.dll') -Force
+
+$releaseModelDirectory = Join-Path $releaseDir 'data/models'
+New-Item -ItemType Directory -Force -Path $releaseModelDirectory | Out-Null
+Copy-Item -LiteralPath $sceneModelInfo.path -Destination (Join-Path $releaseModelDirectory 'scene-model-v1.onnx') -Force
+Copy-Item -LiteralPath $sceneModelInfo.manifestPath -Destination (Join-Path $releaseModelDirectory 'scene-model-v1.manifest.json') -Force
+$stagedModelPath = Join-Path $releaseModelDirectory 'scene-model-v1.onnx'
+$stagedModelSha = (Get-FileHash -LiteralPath $stagedModelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ((Get-Item -LiteralPath $stagedModelPath).Length -ne $sceneModelInfo.sizeBytes -or $stagedModelSha -ne $sceneModelInfo.sha256) {
+    throw "Staged scene model does not match the verified model manifest: $stagedModelPath"
+}
+
 Assert-OwnedPath $releaseDir $app -InspectTree
 Assert-WindowsReleaseAssets $releaseDir
 $exe = Join-Path $releaseDir 'PocketGigaScan.exe'
@@ -638,6 +772,12 @@ Get-ChildItem -LiteralPath $releaseDir -Force | Copy-Item -Destination $packageD
 $vcRuntimeInventory = Copy-VcRuntime $vsToolchain.vcRuntimeDirectory $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE'), (Join-Path $repo 'NOTICE') -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'third_party/licenses') -Destination (Join-Path $packageDir 'licenses') -Recurse -Force
+New-Item -ItemType Directory -Force -Path (Join-Path $packageDir 'licenses/onnxruntime') | Out-Null
+foreach ($ortNotice in @('LICENSE', 'ThirdPartyNotices.txt', 'Privacy.md')) {
+    $sourceNotice = Join-Path $OrtSdk $ortNotice
+    if (-not (Test-Path -LiteralPath $sourceNotice -PathType Leaf)) { throw "ONNX Runtime package notice is missing: $sourceNotice" }
+    Copy-Item -LiteralPath $sourceNotice -Destination (Join-Path $packageDir "licenses/onnxruntime/$ortNotice") -Force
+}
 $rustLicenseInventory = Copy-RustRegistryLicenses ($cargoMetadataJson -join [Environment]::NewLine) (Join-Path $packageDir 'licenses/rust')
 $manifest = [ordered]@{
     product = 'PocketGigaScan'
@@ -650,6 +790,18 @@ $manifest = [ordered]@{
     openCvSourceSha256 = $pin.openCvSha256
     libjxlVersion = $pin.jxlVersion
     libjxlSdkSha256 = $pin.jxlSha256
+    onnxRuntimeVersion = $pin.ortVersion
+    onnxRuntimeSdkSha256 = $pin.ortSha256
+    onnxRuntimeDllSha256 = (Get-FileHash -LiteralPath (Join-Path $packageDir 'onnxruntime.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+    onnxRuntimeProvidersSharedDllSha256 = (Get-FileHash -LiteralPath (Join-Path $packageDir 'onnxruntime_providers_shared.dll') -Algorithm SHA256).Hash.ToLowerInvariant()
+    onnxRuntimeLicense = 'licenses/onnxruntime/LICENSE'
+    onnxRuntimeThirdPartyNotices = 'licenses/onnxruntime/ThirdPartyNotices.txt'
+    onnxRuntimePrivacyNotice = 'licenses/onnxruntime/Privacy.md'
+    sceneModelId = $pin.sceneModelId
+    sceneModelPath = 'data/models/scene-model-v1.onnx'
+    sceneModelSha256 = $sceneModelInfo.sha256
+    sceneModelSizeBytes = $sceneModelInfo.sizeBytes
+    sceneModelLicense = 'licenses/scene-model-MIT.txt'
     flutterCommit = $pin.flutterCommit
     visualStudioVersion = $vsToolchain.visualStudioVersion
     msvcToolsetVersion = $vsToolchain.msvcToolsetVersion

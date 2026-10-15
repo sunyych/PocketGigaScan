@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'services/scene_model_service.dart';
+import 'widgets/scene_model_dialog.dart';
 import 'models/app_settings.dart';
 import 'models/stitch_quality.dart';
 import 'services/settings_controller.dart';
@@ -15,12 +17,16 @@ class SettingsPage extends StatefulWidget {
     this.mobile = false,
     this.memoryReading,
     this.mobileStorageService,
+    this.sceneModelService,
+    this.activeTasks = false,
   });
   final SettingsController controller;
   final bool android;
   final bool mobile;
   final MemoryResourceReading? memoryReading;
   final MobileStorageService? mobileStorageService;
+  final Future<SceneModelService>? sceneModelService;
+  final bool activeTasks;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
@@ -170,6 +176,46 @@ class _SettingsPageState extends State<SettingsPage> {
                       s.copyWith(localTextureWarp: v),
                     ),
                   ),
+                  if (!widget.mobile) ...[
+                    SwitchListTile(
+                      key: const Key('protect-people-default'),
+                      title: Text(l.protectPeople),
+                      subtitle: Text(l.protectPeopleHelp),
+                      value: s.protectPeople,
+                      onChanged: (value) async {
+                        await widget.controller.update(
+                          s.copyWith(protectPeople: value),
+                        );
+                        if (value &&
+                            widget.sceneModelService != null &&
+                            context.mounted) {
+                          await showSceneModelDialog(
+                            context,
+                            widget.sceneModelService!,
+                          );
+                        }
+                      },
+                    ),
+                    SwitchListTile(
+                      key: const Key('smooth-water-default'),
+                      title: Text(l.smoothWater),
+                      subtitle: Text(l.smoothWaterHelp),
+                      value: s.smoothWater,
+                      onChanged: (value) async {
+                        await widget.controller.update(
+                          s.copyWith(smoothWater: value),
+                        );
+                        if (value &&
+                            widget.sceneModelService != null &&
+                            context.mounted) {
+                          await showSceneModelDialog(
+                            context,
+                            widget.sceneModelService!,
+                          );
+                        }
+                      },
+                    ),
+                  ],
                 ],
               ),
               ExpansionTile(
@@ -223,6 +269,11 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
                 ],
               ),
+              if (!widget.mobile && widget.sceneModelService != null)
+                SceneModelManagerTile(
+                  service: widget.sceneModelService!,
+                  activeTasks: widget.activeTasks,
+                ),
               ExpansionTile(
                 title: Text(l.text('应用内存预算')),
                 subtitle: Text(l.text('为整个应用设置共享预算；不会预先占用所选内存，也不代表操作系统硬内存限制。')),

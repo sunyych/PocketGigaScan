@@ -83,6 +83,43 @@ else()
   message(FATAL_ERROR "lumia_gigascan_core.dll is missing. Run scripts/build-dwarf-stitch-windows.ps1 to build the native core first.")
 endif()
 
+# Scene-analysis options load ONNX Runtime only when enabled. The build script
+# provides the verified SDK location; keep ordinary builds independent of it.
+if(DEFINED ENV{LUMIA_ORT_SDK} AND NOT "$ENV{LUMIA_ORT_SDK}" STREQUAL "")
+  file(TO_CMAKE_PATH "$ENV{LUMIA_ORT_SDK}" LUMIA_ORT_SDK_DIR)
+  set(LUMIA_ORT_DLL "${LUMIA_ORT_SDK_DIR}/lib/onnxruntime.dll")
+  set(LUMIA_ORT_PROVIDERS_DLL "${LUMIA_ORT_SDK_DIR}/lib/onnxruntime_providers_shared.dll")
+  if(NOT EXISTS "${LUMIA_ORT_DLL}")
+    message(FATAL_ERROR "onnxruntime.dll is missing from LUMIA_ORT_SDK: ${LUMIA_ORT_DLL}")
+  endif()
+  if(NOT EXISTS "${LUMIA_ORT_PROVIDERS_DLL}")
+    message(FATAL_ERROR "onnxruntime_providers_shared.dll is missing from LUMIA_ORT_SDK: ${LUMIA_ORT_PROVIDERS_DLL}")
+  endif()
+  install(FILES "${LUMIA_ORT_DLL}" "${LUMIA_ORT_PROVIDERS_DLL}"
+    DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
+else()
+  set(LUMIA_ORT_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../../../../native/core/target/release/onnxruntime.dll")
+  set(LUMIA_ORT_PROVIDERS_DLL "${CMAKE_CURRENT_SOURCE_DIR}/../../../../native/core/target/release/onnxruntime_providers_shared.dll")
+  if(EXISTS "${LUMIA_ORT_DLL}" AND EXISTS "${LUMIA_ORT_PROVIDERS_DLL}")
+    install(FILES "${LUMIA_ORT_DLL}" "${LUMIA_ORT_PROVIDERS_DLL}"
+      DESTINATION "${INSTALL_BUNDLE_LIB_DIR}" COMPONENT Runtime)
+  elseif(EXISTS "${LUMIA_ORT_DLL}" OR EXISTS "${LUMIA_ORT_PROVIDERS_DLL}")
+    message(FATAL_ERROR "The staged ONNX Runtime DLL pair in native/core/target/release is incomplete.")
+  else()
+    message(WARNING "ONNX Runtime is not staged; scene-analysis options will report unavailable if enabled.")
+  endif()
+endif()
+
+# The scene model is bundled with Windows builds, then copied to the user's
+# support cache and hash-verified before any scene-aware job starts.
+set(LUMIA_SCENE_MODEL "${CMAKE_CURRENT_SOURCE_DIR}/../../../../native/core/target/release/scene-model-v1.onnx")
+if(NOT EXISTS "${LUMIA_SCENE_MODEL}")
+  message(FATAL_ERROR "scene-model-v1.onnx is missing. Build staging must place it in native/core/target/release first.")
+endif()
+install(FILES "${LUMIA_SCENE_MODEL}"
+  DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/models"
+  COMPONENT Runtime)
+
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/licenses/"
   DESTINATION "${INSTALL_BUNDLE_DATA_DIR}/licenses"
   COMPONENT Runtime)

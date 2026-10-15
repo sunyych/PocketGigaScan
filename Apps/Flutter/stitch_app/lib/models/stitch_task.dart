@@ -53,6 +53,8 @@ class StitchTask {
     this.refineGridNeighbors = false,
     this.seamBlendMode = SeamBlendMode.feather,
     this.localTextureWarp = true,
+    this.protectPeople = false,
+    this.smoothWater = false,
     this.resultStats,
     this.exportFingerprint,
     this.exportCheckpointPath,
@@ -92,6 +94,8 @@ class StitchTask {
   final bool refineGridNeighbors;
   final SeamBlendMode seamBlendMode;
   final bool localTextureWarp;
+  final bool protectPeople;
+  final bool smoothWater;
   final Map<String, Object?>? resultStats;
   final ExportFileFingerprint? exportFingerprint;
   final String? exportCheckpointPath;
@@ -122,6 +126,8 @@ class StitchTask {
       'axis': grid.axis.name,
       'startCorner': grid.startCorner.name,
       'serpentine': grid.serpentine,
+      'protectPeople': protectPeople,
+      'smoothWater': smoothWater,
       'forced': forced.map((cell) => [cell.row, cell.column]).toList(),
       'photos': photos
           .map(
@@ -173,6 +179,8 @@ class StitchTask {
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
     bool? localTextureWarp,
+    bool? protectPeople,
+    bool? smoothWater,
     Map<String, Object?>? resultStats,
     ExportFileFingerprint? exportFingerprint,
     bool clearExportFingerprint = false,
@@ -223,6 +231,8 @@ class StitchTask {
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
+    protectPeople: protectPeople ?? this.protectPeople,
+    smoothWater: smoothWater ?? this.smoothWater,
     resultStats: resultStats ?? this.resultStats,
     exportFingerprint: clearExportFingerprint
         ? null
@@ -276,6 +286,8 @@ class StitchTask {
     'refineGridNeighbors': refineGridNeighbors,
     'seamBlendMode': seamBlendMode.name,
     'localTextureWarp': localTextureWarp,
+    'protectPeople': protectPeople,
+    'smoothWater': smoothWater,
     'resultStats': resultStats,
     'exportFingerprint': exportFingerprint?.toJson(),
     'exportCheckpointPath': exportCheckpointPath,
@@ -354,6 +366,8 @@ class StitchTask {
       refineGridNeighbors: json['refineGridNeighbors'] as bool? ?? false,
       seamBlendMode: SeamBlendMode.fromSavedValue(json['seamBlendMode']),
       localTextureWarp: json['localTextureWarp'] as bool? ?? true,
+      protectPeople: json['protectPeople'] as bool? ?? false,
+      smoothWater: json['smoothWater'] as bool? ?? false,
       resultStats: json['resultStats'] as Map<String, Object?>?,
       exportFingerprint: json['exportFingerprint'] is Map<String, Object?>
           ? ExportFileFingerprint.fromJson(
@@ -370,4 +384,5 @@ class StitchTask {
       publishError: json['publishError'] as String?,
     );
   }
+
 }

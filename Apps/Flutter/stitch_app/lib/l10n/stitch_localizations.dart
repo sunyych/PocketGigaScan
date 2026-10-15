@@ -83,6 +83,7 @@ class StitchLocalizations {
       'clahe-retry' => 'retry-neighbor-matching',
       'retry-neighbor-matching' => 'retry-neighbor-matching',
       'registration-complete' => 'registration-complete',
+      'semantic-analysis' => 'semantic-analysis',
       'precision-recovery-start' => 'precision-recovery-start',
       'registration-failed' => 'registration-failed',
       'feature-extraction-batch' => 'feature-extraction-batch',
@@ -132,6 +133,21 @@ class StitchLocalizations {
   String get refineNeighbors => text('精细校正相邻照片位置');
   String get seamBlend => text('接缝融合');
   String get localTextureWarp => text('局部纹理校正');
+  String get protectPeople => text('保护人物');
+  String get protectPeopleHelp =>
+      text('尽量保留完整原片人物，避免接缝切割人物。场景分析需要更多内存，处理时间也更长。');
+  String get smoothWater => text('平滑水面');
+  String get smoothWaterHelp =>
+      text('平滑水面接缝可能会柔化局部细节；同时启用时优先保护人物。场景分析需要更多内存，处理时间也更长。');
+  String get sceneModel => text('场景模型');
+  String get sceneModelPrepare => text('重新准备模型缓存');
+  String get sceneModelBundleHelp => text('模型随 Windows 程序附带，可离线使用。');
+  String get sceneModelDelete => text('清除模型使用副本');
+  String get sceneModelReady => text('场景模型已验证并可离线使用。');
+  String get sceneModelPreparing => text('正在准备并验证场景模型');
+  String get done => text('完成');
+  String get cancel => text('取消');
+  String get retry => text('重试');
   String get maxEdgeReprojectionRms => text('相邻配准误差上限 RMS（像素）');
   String get maxEdgeReprojectionRmsHelp => text('限制相邻照片配准可接受的重投影均方根误差；较低值更严格。');
   String get maxEdgeReprojectionRmsWarning =>
@@ -364,6 +380,24 @@ class StitchLocalizations {
   }
 
   String text(String source) {
+    final unwrapped = source.replaceFirst(
+      RegExp(r'^(?:Bad state: |Exception: )'),
+      '',
+    );
+    if (unwrapped != source) return text(unwrapped);
+    if (source.startsWith(
+      'FileSystemException: Bundled scene model is missing',
+    )) {
+      return text('Bundled scene model is missing.');
+    }
+    final modelSizeMismatch = RegExp(
+      r'^Scene model size mismatch: expected (\d+) bytes, received (\d+)\.$',
+    ).firstMatch(source);
+    if (modelSizeMismatch != null) {
+      return isChinese
+          ? '场景模型大小不匹配：预期 ${modelSizeMismatch[1]} 字节，实际 ${modelSizeMismatch[2]} 字节。'
+          : source;
+    }
     final publishError = RegExp(
       r'^发布失败：(.*)。私有整图已保留，可重试发布。$',
     ).firstMatch(source);
@@ -400,7 +434,27 @@ class StitchLocalizations {
           ? source
           : 'Full image format: ${exportDescription(fullImageFormat[1]!)}';
     }
-    if (isChinese) return _zh[source] ?? source;
+    if (isChinese) {
+      final modelProgress = RegExp(r'^正在准备场景模型：(\d+)%$').firstMatch(source);
+      if (modelProgress != null) return '正在准备场景模型：${modelProgress[1]}%';
+      final modelMemory = RegExp(
+        r'^scene analysis needs approximately (\d+) MiB for (\d+)x(\d+) source, model and ONNX Runtime workspace, above the (\d+) MiB job budget$',
+      ).firstMatch(source);
+      if (modelMemory != null) {
+        return '场景分析约需 ${modelMemory[1]} MiB（${modelMemory[2]}×${modelMemory[3]} 原片、模型及 ONNX Runtime 工作区），超过 ${modelMemory[4]} MiB 任务预算。';
+      }
+      final prefixedNativeError = RegExp(r'^([A-Z0-9_]+): (.*)$').firstMatch(source);
+      if (prefixedNativeError != null) {
+        final nested = text(prefixedNativeError[2]!);
+        if (nested != prefixedNativeError[2]) return '${prefixedNativeError[1]}: $nested';
+      }
+      for (final entry in _zh.entries) {
+        if (source.startsWith('${entry.key}: ')) {
+          return '${entry.value}：${source.substring(entry.key.length + 2)}';
+        }
+      }
+      return _zh[source] ?? source;
+    }
     final exact = _en[source];
     if (exact != null) return exact;
     final status = RegExp(r'^(.+) · (\d+)% · (.+)$').firstMatch(source);
@@ -1436,6 +1490,35 @@ class StitchLocalizations {
     '需要设置行列': 'Set the rows and columns first',
     '估算布局': 'Estimated layout',
     '图像': 'image',
+    'Bundled scene model is missing.': 'The bundled scene model is missing.',
+    'Scene model SHA-256 verification failed.':
+        'Scene model SHA-256 verification failed.',
+    'Scene model manifest is invalid.': 'The scene model manifest is invalid.',
+    'Scene model manifest has an invalid bundled model path.':
+        'The scene model bundle path is invalid.',
+    'Scene model is unavailable: its verified SHA-256 is not configured.':
+        'The scene model is unavailable because its verified SHA-256 is missing.',
+    'Scene model is unavailable: its verified file size is not configured.':
+        'The scene model is unavailable because its verified file size is missing.',
+    'Cannot remove the scene model while a task is active.':
+        'Cannot remove the scene model while a task is active.',
+    'Cannot remove the scene model during preparation.':
+        'Cannot remove the scene model while it is being prepared.',
+    'semantic-analysis': 'Semantic scene analysis',
+    '正在准备场景模型：': 'Preparing scene model: ',
+    '保护人物': 'Protect people',
+    '尽量保留完整原片人物，避免接缝切割人物。场景分析需要更多内存，处理时间也更长。':
+        'Preserve people from the original photos and avoid cutting them at seams where possible. Scene analysis uses more memory and takes longer.',
+    '平滑水面': 'Smooth water',
+    '平滑水面接缝可能会柔化局部细节；同时启用时优先保护人物。场景分析需要更多内存，处理时间也更长。':
+        'Smooth water seams may soften local detail. People protection takes priority when both are enabled. Scene analysis uses more memory and takes longer.',
+    '场景模型': 'Scene model',
+    '重新准备模型缓存': 'Prepare model cache again',
+    '模型随 Windows 程序附带，可离线使用。':
+        'The model is included with the Windows app and works offline.',
+    '清除模型使用副本': 'Clear cached model copy',
+    '场景模型已验证并可离线使用。': 'The scene model is verified and available offline.',
+    '正在准备并验证场景模型': 'Preparing and verifying the scene model',
   };
 
   static const _zh = <String, String>{
@@ -1630,6 +1713,29 @@ class StitchLocalizations {
     '分享到…': '分享到…',
     '保存成功': '保存成功',
     '分享已取消': '分享已取消',
+    'Bundled scene model is missing.': '程序附带的场景模型文件缺失。',
+    'Scene model SHA-256 verification failed.': '场景模型 SHA-256 校验失败。',
+    'Scene model manifest is invalid.': '场景模型清单无效。',
+    'Scene model manifest has an invalid bundled model path.':
+        '场景模型清单中的程序包路径无效。',
+    'Scene model is unavailable: its verified SHA-256 is not configured.':
+        '场景模型不可用：尚未配置已验证的 SHA-256。',
+    'Scene model is unavailable: its verified file size is not configured.':
+        '场景模型不可用：尚未配置已验证的文件大小。',
+    'Cannot remove the scene model while a task is active.': '任务运行期间不能清除场景模型。',
+    'Cannot remove the scene model during preparation.': '正在准备场景模型时不能清除。',
+    'semantic-analysis': '场景语义分析',
+    '正在准备场景模型：': '正在准备场景模型：',
+    'people protection and water smoothing are supported only on Windows':
+        '人物保护和水面平滑仅支持 Windows。',
+    'ONNX Runtime is missing beside the application': '应用目录旁缺少 ONNX Runtime。',
+    'scene model SHA-256 mismatch': '场景模型 SHA-256 校验不匹配。',
+    'scene mask cache identity mismatch': '场景掩码缓存身份不匹配。',
+    'scene mask cache hash mismatch': '场景掩码缓存哈希不匹配。',
+    'scene ONNX input must be float32 [1,3,512,512]':
+        '场景 ONNX 输入必须为 float32 [1,3,512,512]。',
+    'scene ONNX output must be float32 [1,2,512,512] person/water probabilities':
+        '场景 ONNX 输出必须为 float32 [1,2,512,512] 人物/水面概率。',
   };
 }
 

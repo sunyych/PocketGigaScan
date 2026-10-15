@@ -4,12 +4,15 @@
 //! spherical JSON layout emitted by `spherical::align_json_detailed`.
 use crate::seam_ownership::{
     adjust_candidates_for_content, coarse_cell_count, coarse_stride, content_disagreement,
-    regularize_owners, CoarseOwnershipMap, OwnershipCandidate,
+    regularize_owners, scene_blend_override, CoarseOwnershipMap, OwnershipCandidate,
+    SceneBlendOverride,
 };
 use crate::texture_warp::{
     corrected_to_source, validate_source_plane_warp, SourcePlaneWarp,
     SOURCE_WARP_MAX_DISPLACEMENT_PX,
 };
+#[path = "scene_render.rs"]
+mod scene_render;
 use image::{GenericImageView, ImageBuffer, Rgba, RgbaImage};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -625,6 +628,17 @@ fn renderer_identity(blend_mode: BlendMode) -> Value {
     })
 }
 
+fn renderer_identity_with_scene(
+    blend_mode: BlendMode,
+    scene_identity: &scene_render::SceneIdentity,
+) -> Value {
+    let mut identity = renderer_identity(blend_mode);
+    if scene_identity.enabled {
+        identity["sceneRendering"] = scene_identity.json();
+    }
+    identity
+}
+
 fn has_existing_render_tiles(output: &Path) -> crate::Result<bool> {
     if !output.is_dir() {
         return Ok(false);
@@ -643,9 +657,16 @@ fn has_existing_render_tiles(output: &Path) -> crate::Result<bool> {
     Ok(false)
 }
 
+#[cfg(test)]
 fn validate_or_write_renderer_identity(output: &Path, blend_mode: BlendMode) -> crate::Result<()> {
+    validate_or_write_renderer_identity_expected(output, renderer_identity(blend_mode))
+}
+
+fn validate_or_write_renderer_identity_expected(
+    output: &Path,
+    expected: Value,
+) -> crate::Result<()> {
     let marker_path = output.join("renderer-identity.json");
-    let expected = renderer_identity(blend_mode);
     if marker_path.is_file() {
         let stored: Value = serde_json::from_slice(&fs::read(&marker_path).map_err(|error| {
             crate::Error::Invalid(format!(
@@ -671,7 +692,9 @@ fn validate_or_write_renderer_identity(output: &Path, blend_mode: BlendMode) -> 
     // Legacy feather rendering is byte-compatible, so it can adopt an
     // identity marker in place. Deghost output predating this marker cannot be
     // safely resumed because some cached tiles may use the old ownership model.
-    if blend_mode == BlendMode::Deghost && has_existing_render_tiles(output)? {
+    if expected["blendModel"] == "sharpness-aware-peer-coupled-coarse-ownership-v2"
+        && has_existing_render_tiles(output)?
+    {
         return Err(crate::Error::Invalid(
             "renderer algorithm changed; create a task copy and restitch to avoid mixing tiles"
                 .into(),
@@ -1316,7 +1339,13 @@ fn render_layout_tiles_with_options_internal_and_ownership(
         return Err(crate::Error::Invalid("workers must be 1..=32".into()));
     }
     let (width, height, bounds, sources, blend_mode) = dimensions(layout)?;
-    validate_or_write_renderer_identity(output, blend_mode)?;
+    let protect_people = layout["protectPeople"].as_bool().unwrap_or(false);
+    let smooth_water = layout["smoothWater"].as_bool().unwrap_or(false);
+    let scene_identity = scene_render::identity(layout, &sources, protect_people, smooth_water)?;
+    validate_or_write_renderer_identity_expected(
+        output,
+        renderer_identity_with_scene(blend_mode, &scene_identity),
+    )?;
     let dir = output.join("level-0");
     fs::create_dir_all(&dir)?;
     let cols = width.div_ceil(TILE);
@@ -1326,6 +1355,17 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let started = Instant::now();
     let budget_bytes = crate::job_resources::checked_memory_budget_bytes(memory_budget_mib)
         .ok_or_else(|| crate::Error::Invalid("memoryBudgetMiB overflows byte accounting".into()))?;
+    let scene_plan = scene_render::prepare(
+        layout,
+        &sources,
+        scene_identity,
+        output,
+        bounds,
+        width,
+        height,
+        budget_bytes,
+        || checkpoint(completed, total),
+    )?;
     let mut source_bytes = Vec::with_capacity(sources.len());
     let mut max_decode = 0u64;
     for s in &sources {
@@ -1360,7 +1400,8 @@ fn render_layout_tiles_with_options_internal_and_ownership(
         24
     };
     let tile_reserve = u64::from(TILE) * u64::from(TILE) * tile_bytes_per_pixel;
-    let source_quality_map_reserve = if blend_mode == BlendMode::Deghost {
+    let source_quality_enabled = blend_mode == BlendMode::Deghost || protect_people;
+    let source_quality_map_reserve = if source_quality_enabled {
         let per_source = SourceQualityMap::byte_len()
             .checked_add(std::mem::size_of::<SourceQualityMap>() as u64)
             .and_then(|bytes| {
@@ -1377,7 +1418,7 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     } else {
         0
     };
-    let source_quality_refs_per_worker = if blend_mode == BlendMode::Deghost {
+    let source_quality_refs_per_worker = if source_quality_enabled {
         sources.len() as u64 * std::mem::size_of::<Option<Arc<SourceQualityMap>>>() as u64
     } else {
         0
@@ -1385,6 +1426,13 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let worker_base = tile_reserve
         .checked_add(max_decode / 2)
         .and_then(|bytes| bytes.checked_add(source_quality_refs_per_worker))
+        .and_then(|bytes| {
+            bytes.checked_add(
+                scene_plan
+                    .as_ref()
+                    .map_or(0, scene_render::ScenePlan::worker_bytes),
+            )
+        })
         .ok_or_else(|| {
             crate::Error::Invalid("renderer worker memory accounting overflowed".into())
         })?;
@@ -1398,7 +1446,13 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     } else {
         0
     };
-    let fixed_reserve = source_quality_map_reserve.saturating_add(seam_ownership_reserve);
+    let fixed_reserve = source_quality_map_reserve
+        .saturating_add(seam_ownership_reserve)
+        .saturating_add(
+            scene_plan
+                .as_ref()
+                .map_or(0, scene_render::ScenePlan::shared_bytes),
+        );
     if one_worker
         .checked_add(fixed_reserve)
         .map_or(true, |bytes| bytes > budget_bytes)
@@ -1525,6 +1579,9 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let classification_micros = AtomicU64::new(0);
     let blend_micros = AtomicU64::new(0);
     let output_micros = AtomicU64::new(0);
+    let scene_person_pixels = AtomicU64::new(0);
+    let scene_water_pixels = AtomicU64::new(0);
+    let scene_object_fallbacks = AtomicU64::new(0);
     let mut tasks = Vec::new();
     for i in 0..total {
         if !checkpoint(completed, total) {
@@ -1574,6 +1631,10 @@ fn render_layout_tiles_with_options_internal_and_ownership(
                 let classification_micros = &classification_micros;
                 let blend_micros = &blend_micros;
                 let output_micros = &output_micros;
+                let scene_person_pixels = &scene_person_pixels;
+                let scene_water_pixels = &scene_water_pixels;
+                let scene_object_fallbacks = &scene_object_fallbacks;
+                let scene_plan_ref = scene_plan.as_ref();
                 let sources_ref = sources.as_slice();
                 let source_bytes_ref = source_bytes.as_slice();
                 let dir_ref = dir.as_path();
@@ -1608,6 +1669,10 @@ fn render_layout_tiles_with_options_internal_and_ownership(
                         blend_mode,
                         sharpness_aware,
                         ownership_map_ref,
+                        scene_plan_ref,
+                        scene_person_pixels,
+                        scene_water_pixels,
+                        scene_object_fallbacks,
                     )
                 }));
             }
@@ -1635,7 +1700,7 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"seamOwnership":seam_diagnostics,"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"seamOwnership":seam_diagnostics,"sceneRendering":{"enabled":scene_plan.is_some(),"protectPeople":protect_people,"smoothWater":smooth_water,"personComponents":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::component_count),"personObjects":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::object_count),"personPixels":scene_person_pixels.load(Ordering::Relaxed),"waterOverlapPixels":scene_water_pixels.load(Ordering::Relaxed),"objectCoverageFallbacks":scene_object_fallbacks.load(Ordering::Relaxed),"sceneBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::estimated_bytes),"sceneWorkerBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::worker_bytes)},"renderMs":render_ms}),
     )
 }
 
@@ -1978,6 +2043,10 @@ fn render_one_tile(
     blend_mode: BlendMode,
     sharpness_aware: bool,
     ownership_map: Option<&CoarseOwnershipMap>,
+    scene_plan: Option<&scene_render::ScenePlan>,
+    scene_person_pixels: &AtomicU64,
+    scene_water_pixels: &AtomicU64,
+    scene_object_fallbacks: &AtomicU64,
 ) -> crate::Result<()> {
     let active = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
     peak_workers.fetch_max(active, Ordering::Relaxed);
@@ -2002,6 +2071,13 @@ fn render_one_tile(
             (pitch.sin(), pitch.cos())
         })
         .collect();
+    let scene_tile = scene_plan
+        .map(|plan| plan.tile(row, col, &x_rays, &y_rays, bounds, sources))
+        .transpose()?
+        .unwrap_or_default();
+    scene_person_pixels.fetch_add(scene_tile.person_pixels, Ordering::Relaxed);
+    scene_water_pixels.fetch_add(scene_tile.water_pixels, Ordering::Relaxed);
+    scene_object_fallbacks.fetch_add(scene_tile.object_fallbacks, Ordering::Relaxed);
     let mut max_adjusted_ownership =
         (blend_mode == BlendMode::Deghost).then(|| vec![f64::NEG_INFINITY; count]);
     let mut max_ownership =
@@ -2309,7 +2385,6 @@ fn render_one_tile(
                 if let Some(geometry) = geometry {
                     let (rgb, weight, ownership, x, y) =
                         sample_with_geometry(source, &image, geometry);
-                    let cell = &mut accum[index];
                     let mut blend_weight = match blend_mode {
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
@@ -2350,7 +2425,32 @@ fn render_one_tile(
                             )
                         }
                     };
-                    if blend_mode == BlendMode::Deghost {
+                    let scene_override = scene_blend_override(
+                        scene_plan.is_some_and(|plan| plan.identity.protect_people),
+                        scene_plan.is_some_and(|plan| plan.identity.smooth_water),
+                        scene_tile.person_owner.get(index).copied().flatten(),
+                        scene_tile.water_blend.get(index).copied().unwrap_or(0),
+                    );
+                    match scene_override {
+                        SceneBlendOverride::Person(person_owner) => {
+                            if source_index != person_owner {
+                                continue;
+                            }
+                            // Copy the selected view through the whole dilated
+                            // object union, including its narrow background band.
+                            blend_weight = 1.0;
+                        }
+                        SceneBlendOverride::SmoothWater(strength) => {
+                            // Water keeps valid views in the feather profile,
+                            // even when the base panorama mode is deghost.
+                            let strength = f64::from(strength) / 255.0;
+                            blend_weight += (weight - blend_weight) * strength;
+                        }
+                        SceneBlendOverride::Base => {}
+                    }
+                    if blend_mode == BlendMode::Deghost
+                        && scene_override == SceneBlendOverride::Base
+                    {
                         if let Some(ownership_map) = ownership_map {
                             let global_x = left + px;
                             let global_y = top + py;
@@ -2374,7 +2474,7 @@ fn render_one_tile(
                             blend_weight *= f64::from(0.05 + 0.95 * prior);
                         }
                     }
-                    accumulate_weighted(cell, rgb, blend_weight);
+                    accumulate_weighted(&mut accum[index], rgb, blend_weight);
                 }
             }
         }
@@ -3358,6 +3458,255 @@ mod tests {
             }
         }
         image
+    }
+
+    fn save_scene_mask(path: &Path, width: u32, height: u32, rect: [u32; 4]) {
+        let mut bytes = vec![0u8; width as usize * height as usize * 2];
+        for y in rect[1]..rect[3] {
+            for x in rect[0]..rect[2] {
+                let index = (y as usize * width as usize + x as usize) * 2;
+                bytes[index] = 255;
+                bytes[index + 1] = 255;
+            }
+        }
+        let file = fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, width, height);
+        encoder.set_color(png::ColorType::GrayscaleAlpha);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&bytes).unwrap();
+    }
+
+    fn two_source_scene_layout(root: &Path) -> serde_json::Value {
+        let source_dir = root.join("sources");
+        let mask_dir = root.join("masks");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&mask_dir).unwrap();
+        let a_path = source_dir.join("a.png");
+        let b_path = source_dir.join("b.png");
+        RgbaImage::from_pixel(1024, 512, Rgba([200, 30, 20, 255]))
+            .save(&a_path)
+            .unwrap();
+        RgbaImage::from_pixel(1024, 512, Rgba([20, 30, 200, 255]))
+            .save(&b_path)
+            .unwrap();
+        let a_mask = mask_dir.join("a-mask.png");
+        let b_mask = mask_dir.join("b-mask.png");
+        save_scene_mask(&a_mask, 1024, 512, [490, 245, 521, 267]);
+        save_scene_mask(&b_mask, 1024, 512, [510, 245, 541, 267]);
+        let source = |path: &Path| {
+            serde_json::json!({
+                "path":path.to_string_lossy(),
+                "width":1024,"height":512,
+                "fx":800.0,"fy":800.0,"cx":511.5,"cy":255.5,
+                "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]
+            })
+        };
+        let descriptor = |path: &Path, mask: &Path| {
+            // Job manifests store canonical paths; the layout tile retains its
+            // original absolute spelling. This intentionally exercises the
+            // Windows `\\?\` versus ordinary-path renderer handoff.
+            let canonical_path = path.canonicalize().unwrap();
+            serde_json::json!({
+                "path":canonical_path.to_string_lossy(),"width":1024,"height":512,
+                "maskPath":mask.to_string_lossy(),
+                "maskSha256":crate::fingerprint::sha256_file(mask).unwrap()
+            })
+        };
+        serde_json::json!({
+            "schemaVersion":1,"projection":"spherical","width":1024,"height":512,
+            "yawMinRad":-0.5,"yawMaxRad":0.5,
+            "pitchMinRad":-0.25,"pitchMaxRad":0.25,
+            "renderBlendMode":"feather","protectPeople":true,"smoothWater":true,
+            "tiles":[source(&a_path),source(&b_path)],
+            "semanticAnalysis":{
+                "schemaVersion":1,"algorithmVersion":1,"modelId":"test-scene-v1",
+                "modelSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "sources":[descriptor(&a_path,&a_mask),descriptor(&b_path,&b_mask)]
+            }
+        })
+    }
+
+    fn render_scene_variant(
+        layout: &serde_json::Value,
+        output: &Path,
+        blend_mode: &str,
+        protect_people: bool,
+        smooth_water: bool,
+        workers: usize,
+    ) -> serde_json::Value {
+        let mut variant = layout.clone();
+        variant["renderBlendMode"] = serde_json::json!(blend_mode);
+        variant["protectPeople"] = serde_json::json!(protect_people);
+        variant["smoothWater"] = serde_json::json!(smooth_water);
+        render_layout_tiles_with_options(&variant, output, 128, workers, true, |_, _| true).unwrap()
+    }
+
+    #[test]
+    fn semantic_person_owner_is_stable_across_tile_edge_and_resume_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "lumia-scene-person-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let layout = two_source_scene_layout(&root);
+        #[cfg(windows)]
+        {
+            let layout_path = layout["tiles"][0]["path"].as_str().unwrap();
+            let manifest_path = layout["semanticAnalysis"]["sources"][0]["path"]
+                .as_str()
+                .unwrap();
+            assert!(!layout_path.starts_with(r"\\?\"));
+            assert!(manifest_path.starts_with(r"\\?\"));
+        }
+        let output = root.join("render-a");
+        let stats =
+            render_layout_tiles_with_options(&layout, &output, 128, 1, true, |_, _| true).unwrap();
+        assert_eq!(stats["sceneRendering"]["personObjects"].as_u64(), Some(1));
+        let image = collect_level_zero(&output, 1024, 512);
+        // Both sources tie on completeness, projection coverage, confidence,
+        // and flat-image sharpness, so stable path ranking selects b.png.
+        assert_eq!(*image.get_pixel(510, 256), Rgba([20, 30, 200, 255]));
+        // x=490 belongs only to source A's person mask and x=540 only to B's.
+        // Both lie in the grouped silhouette union, so the selected B view's
+        // background must be copied across the whole union.
+        assert_eq!(*image.get_pixel(490, 256), Rgba([20, 30, 200, 255]));
+        assert_eq!(*image.get_pixel(540, 256), Rgba([20, 30, 200, 255]));
+        let old_tile = fs::read(output.join("level-0/0-1.png")).unwrap();
+
+        let mut changed_flags = layout.clone();
+        changed_flags["smoothWater"] = serde_json::json!(false);
+        assert!(
+            render_layout_tiles_with_options(&changed_flags, &output, 128, 1, true, |_, _| true,)
+                .is_err()
+        );
+        assert_eq!(fs::read(output.join("level-0/0-1.png")).unwrap(), old_tile);
+
+        let mut changed_model = layout.clone();
+        changed_model["semanticAnalysis"]["modelSha256"] =
+            serde_json::json!("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert!(
+            render_layout_tiles_with_options(&changed_model, &output, 128, 1, true, |_, _| true,)
+                .is_err()
+        );
+        assert_eq!(fs::read(output.join("level-0/0-1.png")).unwrap(), old_tile);
+
+        let changed_mask = root.join("masks/b-mask-changed.png");
+        save_scene_mask(&changed_mask, 1024, 512, [508, 245, 541, 267]);
+        let mut changed_mask_layout = layout.clone();
+        changed_mask_layout["semanticAnalysis"]["sources"][1]["maskPath"] =
+            serde_json::json!(changed_mask.to_string_lossy());
+        changed_mask_layout["semanticAnalysis"]["sources"][1]["maskSha256"] =
+            serde_json::json!(crate::fingerprint::sha256_file(&changed_mask).unwrap());
+        assert!(render_layout_tiles_with_options(
+            &changed_mask_layout,
+            &output,
+            128,
+            1,
+            true,
+            |_, _| true,
+        )
+        .is_err());
+        assert_eq!(fs::read(output.join("level-0/0-1.png")).unwrap(), old_tile);
+
+        // Disabled scene controls keep the legacy renderer identity and tile
+        // bytes exactly, for both independently selectable base blend modes.
+        for blend_mode in ["feather", "deghost"] {
+            let mut legacy = layout.clone();
+            legacy.as_object_mut().unwrap().remove("protectPeople");
+            legacy.as_object_mut().unwrap().remove("smoothWater");
+            legacy.as_object_mut().unwrap().remove("semanticAnalysis");
+            legacy["renderBlendMode"] = serde_json::json!(blend_mode);
+            let legacy_output = root.join(format!("legacy-{blend_mode}"));
+            render_layout_tiles_with_options(&legacy, &legacy_output, 128, 1, true, |_, _| true)
+                .unwrap();
+            let off_output = root.join(format!("off-{blend_mode}"));
+            render_scene_variant(&legacy, &off_output, blend_mode, false, false, 2);
+            for col in 0..2 {
+                let name = format!("level-0/0-{col}.png");
+                assert_eq!(
+                    fs::read(legacy_output.join(&name)).unwrap(),
+                    fs::read(off_output.join(name)).unwrap()
+                );
+            }
+
+            for (protect, water) in [(true, false), (false, true), (true, true)] {
+                let name = format!("{}-{}-{blend_mode}", protect as u8, water as u8);
+                let output_variant = root.join(name);
+                let variant_stats =
+                    render_scene_variant(&layout, &output_variant, blend_mode, protect, water, 2);
+                assert_eq!(
+                    variant_stats["sceneRendering"]["protectPeople"].as_bool(),
+                    Some(protect)
+                );
+                assert_eq!(
+                    variant_stats["sceneRendering"]["smoothWater"].as_bool(),
+                    Some(water)
+                );
+                if protect && !water {
+                    assert!(
+                        variant_stats["sceneRendering"]["personPixels"]
+                            .as_u64()
+                            .unwrap()
+                            > 0
+                    );
+                    assert_eq!(
+                        variant_stats["sceneRendering"]["waterOverlapPixels"].as_u64(),
+                        Some(0)
+                    );
+                } else if water && !protect {
+                    assert_eq!(
+                        variant_stats["sceneRendering"]["personPixels"].as_u64(),
+                        Some(0)
+                    );
+                    assert!(
+                        variant_stats["sceneRendering"]["waterOverlapPixels"]
+                            .as_u64()
+                            .unwrap()
+                            > 0
+                    );
+                }
+            }
+        }
+
+        let reversed = {
+            let mut value = layout.clone();
+            value["tiles"].as_array_mut().unwrap().reverse();
+            value
+        };
+        let reverse_output = root.join("render-reversed");
+        render_layout_tiles_with_options(&reversed, &reverse_output, 128, 2, true, |_, _| true)
+            .unwrap();
+        assert_eq!(
+            fs::read(output.join("level-0/0-1.png")).unwrap(),
+            fs::read(reverse_output.join("level-0/0-1.png")).unwrap()
+        );
+
+        let mut warped = layout.clone();
+        warped["tiles"][1]["sourcePlaneWarp"] = serde_json::json!({
+            "columns":3,"rows":3,"offsets":[
+                [6.0,0.0],[6.0,0.0],[6.0,0.0],
+                [6.0,0.0],[6.0,0.0],[6.0,0.0],
+                [6.0,0.0],[6.0,0.0],[6.0,0.0]
+            ]
+        });
+        let warped_output = root.join("render-warped");
+        render_layout_tiles_with_options(&warped, &warped_output, 128, 1, true, |_, _| true)
+            .unwrap();
+        let warped_image = collect_level_zero(&warped_output, 1024, 512);
+        // The source-to-output projection maps B's right edge to about x=550;
+        // its +6 source-plane correction moves that edge about 8 px farther.
+        // x=554 is outside the unwarped 3 px owner buffer but inside the
+        // corrected union buffer.
+        let outside_unwarped_union = *image.get_pixel(554, 256);
+        assert_ne!(outside_unwarped_union, Rgba([20, 30, 200, 255]));
+        assert!(outside_unwarped_union[0] > 0 && outside_unwarped_union[2] > 0);
+        assert_eq!(*warped_image.get_pixel(554, 256), Rgba([20, 30, 200, 255]));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4352,7 +4701,7 @@ mod tests {
                 let dir = output.join(name);
                 fs::create_dir_all(&dir).unwrap();
                 let cache = DecodeCache::new(0, 1);
-                let counters: Vec<AtomicU64> = (0..16).map(|_| AtomicU64::new(0)).collect();
+                let counters: Vec<AtomicU64> = (0..20).map(|_| AtomicU64::new(0)).collect();
                 for (row, col) in &tiles {
                     render_one_tile(
                         *row,
@@ -4384,6 +4733,10 @@ mod tests {
                         mode,
                         true,
                         ownership_map,
+                        None,
+                        &counters[16],
+                        &counters[17],
+                        &counters[18],
                     )
                     .expect("render selected full-layout output tile");
                 }

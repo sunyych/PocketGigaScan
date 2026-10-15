@@ -176,6 +176,8 @@ class BatchQueue {
     this.refineGridNeighbors = true,
     this.seamBlendMode = SeamBlendMode.deghost,
     this.localTextureWarp = true,
+    this.protectPeople = false,
+    this.smoothWater = false,
   });
 
   final String id;
@@ -191,6 +193,8 @@ class BatchQueue {
   final bool refineGridNeighbors;
   final SeamBlendMode seamBlendMode;
   final bool localTextureWarp;
+  final bool protectPeople;
+  final bool smoothWater;
 
   BatchQueue copyWith({
     List<BatchQueueItem>? items,
@@ -200,6 +204,8 @@ class BatchQueue {
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
     bool? localTextureWarp,
+    bool? protectPeople,
+    bool? smoothWater,
   }) => BatchQueue(
     id: id,
     createdAt: createdAt,
@@ -212,6 +218,8 @@ class BatchQueue {
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
+    protectPeople: protectPeople ?? this.protectPeople,
+    smoothWater: smoothWater ?? this.smoothWater,
   );
 
   Map<String, Object?> toJson() => {
@@ -227,6 +235,8 @@ class BatchQueue {
     'refineGridNeighbors': refineGridNeighbors,
     'seamBlendMode': seamBlendMode.name,
     'localTextureWarp': localTextureWarp,
+    'protectPeople': protectPeople,
+    'smoothWater': smoothWater,
   };
 
   factory BatchQueue.fromJson(Map<String, Object?> json) => BatchQueue(
@@ -249,5 +259,7 @@ class BatchQueue {
       orElse: () => SeamBlendMode.deghost,
     ),
     localTextureWarp: json['localTextureWarp'] as bool? ?? true,
+    protectPeople: json['protectPeople'] as bool? ?? false,
+    smoothWater: json['smoothWater'] as bool? ?? false,
   );
 }

@@ -3,9 +3,14 @@ import 'dart:math' as math;
 import '../models/grid_options.dart';
 import '../models/stitch_task.dart';
 import 'package:path/path.dart' as p;
+import 'scene_model_service.dart';
 
 /// Build the exact request accepted by `lumia_gigascan_spherical_json`.
-Map<String, Object?> buildSphericalRequest(StitchTask task) {
+Map<String, Object?> buildSphericalRequest(
+  StitchTask task, {
+  SceneModelMetadata? sceneModel,
+  bool supportsSceneModel = false,
+}) {
   final grid = task.grid;
   final mapping = grid.mode == GridMode.filename
       ? GridMapping.fromFilenames(task.photos)
@@ -29,6 +34,11 @@ Map<String, Object?> buildSphericalRequest(StitchTask task) {
       : width / (2 * math.tan(task.horizontalFovDegrees * math.pi / 360));
   if (!fx.isFinite || fx <= 0) {
     throw const FormatException('Invalid focal length');
+  }
+  final sceneOptionsEnabled =
+      supportsSceneModel && (task.protectPeople || task.smoothWater);
+  if (sceneOptionsEnabled && sceneModel == null) {
+    throw StateError('Scene model is required for the selected options');
   }
   final options = task.performanceOptions;
   return {
@@ -65,6 +75,13 @@ Map<String, Object?> buildSphericalRequest(StitchTask task) {
     'refineGridNeighbors': task.refineGridNeighbors,
     'seamBlendMode': task.seamBlendMode.name,
     'localTextureWarp': task.localTextureWarp,
+    'protectPeople': supportsSceneModel && task.protectPeople,
+    'smoothWater': supportsSceneModel && task.smoothWater,
+    if (sceneOptionsEnabled) ...{
+      'sceneModelPath': sceneModel!.modelPath,
+      'sceneModelSha256': sceneModel.sha256,
+      'sceneCacheDir': sceneModel.cacheDirectory,
+    },
     if (!task.autoGridOverlap) ...{
       'gridHorizontalOverlap': task.gridHorizontalOverlap,
       'gridVerticalOverlap': task.gridVerticalOverlap,

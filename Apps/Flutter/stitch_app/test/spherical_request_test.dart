@@ -71,6 +71,8 @@ void main() {
         'refineGridNeighbors',
         'seamBlendMode',
         'localTextureWarp',
+        'protectPeople',
+        'smoothWater',
       });
       expect(request['placementMode'], 'grid-assisted');
       expect(request['neighborMode'], 'eight');
@@ -91,6 +93,8 @@ void main() {
       expect(request['refineGridNeighbors'], isFalse);
       expect(request['seamBlendMode'], 'feather');
       expect(request['localTextureWarp'], isTrue);
+      expect(request['protectPeople'], isFalse);
+      expect(request['smoothWater'], isFalse);
       expect(request.containsKey('gridHorizontalOverlap'), isFalse);
       expect(request.containsKey('gridVerticalOverlap'), isFalse);
       expect(request['rows'], 1);

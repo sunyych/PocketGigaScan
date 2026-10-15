@@ -1,6 +1,7 @@
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(lumia_jxl)");
     println!("cargo:rustc-check-cfg=cfg(lumia_jxl_test_helpers)");
+    println!("cargo:rustc-check-cfg=cfg(lumia_scene_ort)");
     println!("cargo:rerun-if-changed=src/native/sift_bridge.cpp");
     println!("cargo:rerun-if-changed=src/native/projection_bridge.cpp");
     println!("cargo:rerun-if-changed=src/native/jxl_stream_bridge.cpp");
@@ -12,6 +13,8 @@ fn main() {
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_SDK");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_LINK_PATHS");
     println!("cargo:rerun-if-env-changed=LUMIA_JXL_TEST_HELPERS");
+    println!("cargo:rerun-if-env-changed=LUMIA_ORT_SDK");
+    println!("cargo:rerun-if-changed=src/native/scene_bridge.cpp");
     println!("cargo:rerun-if-changed=windows/lumia_gigascan_core.rc");
     let root = std::env::var("OPENCV_DIR").expect(
         "OPENCV_DIR must point to an OpenCV install (include/ and a platform library directory)",
@@ -21,6 +24,28 @@ fn main() {
     let target_env = std::env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default();
     if target_os == "windows" && target_env == "msvc" {
         add_windows_version_resource();
+    }
+    if target_os == "windows" {
+        let mut scene = cc::Build::new();
+        scene.cpp(true).file("src/native/scene_bridge.cpp");
+        scene
+            .flag_if_supported("/EHsc")
+            .flag_if_supported("/std:c++17")
+            .static_crt(true);
+        if let Some(sdk) = std::env::var_os("LUMIA_ORT_SDK").map(std::path::PathBuf::from) {
+            let include = sdk.join("include");
+            if !include.join("onnxruntime_cxx_api.h").is_file() {
+                panic!(
+                    "LUMIA_ORT_SDK is missing include/onnxruntime_cxx_api.h: {}",
+                    sdk.display()
+                );
+            }
+            scene.include(include).define("LUMIA_SCENE_ORT", None);
+            println!("cargo:rustc-cfg=lumia_scene_ort");
+        } else {
+            println!("cargo:warning=LUMIA_ORT_SDK is unset; scene analysis will report unsupported in this build");
+        }
+        scene.compile("lumia_scene_bridge");
     }
     let mut build = cc::Build::new();
     build

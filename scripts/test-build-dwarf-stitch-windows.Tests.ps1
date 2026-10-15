@@ -354,4 +354,18 @@ finally {
     if (Test-Path -LiteralPath $metadataTestRoot) { Remove-Item -LiteralPath $metadataTestRoot -Recurse -Force }
 }
 
+Assert-True ($plan.onnxRuntimeVersion -eq '1.31.0' -and $plan.onnxRuntimeSha256 -eq '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195') 'ONNX Runtime SDK pin or checksum changed unexpectedly.'
+Assert-True ($plan.sceneModelId -eq 'openmmlab/upernet-convnext-tiny@876ffc56b819a829448f7e81e9f8606deef6fb65') 'Scene model revision changed unexpectedly.'
+Assert-True ($builderText -match "'VERSION_NUMBER'" -and $builderText -match '\$ortSdkVersionPath.*ortVersion') 'Builder does not verify the extracted ONNX Runtime SDK version.'
+Assert-True ($cmake -match 'LUMIA_ORT_SDK' -and $cmake -match 'onnxruntime\.dll') 'CMake does not install the pinned ONNX Runtime DLL beside the native core.'
+Assert-True ($cmake -match '\$\{LUMIA_ORT_SDK_DIR\}/lib/onnxruntime\.dll' -and $cmake -match '\$\{LUMIA_ORT_SDK_DIR\}/lib/onnxruntime_providers_shared\.dll') 'CMake must install both runtime DLLs from the normalized official SDK lib directory.'
+$ortPathNormalization = $cmake.IndexOf('file(TO_CMAKE_PATH "$ENV{LUMIA_ORT_SDK}" LUMIA_ORT_SDK_DIR)', [StringComparison]::Ordinal)
+$ortPathUse = $cmake.IndexOf('set(LUMIA_ORT_DLL "${LUMIA_ORT_SDK_DIR}/lib/onnxruntime.dll")', [StringComparison]::Ordinal)
+$ortInstall = $cmake.IndexOf('install(FILES "${LUMIA_ORT_DLL}" "${LUMIA_ORT_PROVIDERS_DLL}"', [StringComparison]::Ordinal)
+Assert-True ($ortPathNormalization -ge 0 -and $ortPathUse -gt $ortPathNormalization -and $ortInstall -gt $ortPathUse) 'CMake must normalize the Windows ONNX Runtime SDK environment path before composing or installing DLL paths.'
+Assert-True ($builderText -match 'onnxruntime_providers_shared\.dll' -and $builderText -match 'onnxRuntimeProvidersSharedDllSha256') 'Windows package does not include and inventory the ONNX Runtime shared provider DLL.'
+Assert-True ($builderText -match '\$sceneModelInfo\.path -Destination \(Join-Path \$nativeRelease') 'Builder does not stage the verified model before Flutter configuration.'
+Assert-True ($builderText -match "'LICENSE', 'ThirdPartyNotices\.txt', 'Privacy\.md'") 'Windows package does not include the ONNX Runtime license and notices.'
+Assert-True ($builderText -match 'onnxRuntimeDllSha256' -and $builderText -match 'onnxRuntimeThirdPartyNotices' -and $builderText -match 'sceneModelSha256 = \$sceneModelInfo\.sha256') 'Build manifest does not record the packaged runtime and model hashes/notices.'
+Assert-True ($builderText -match '\$stagedModelSha -ne \$sceneModelInfo\.sha256') 'Builder does not verify the staged scene model against its locked SHA-256.'
 Write-Host 'Windows builder plan, signing metadata, vendored core paths, release safety, and app icon tests passed.'

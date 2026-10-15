@@ -4,6 +4,7 @@ PG-067 tracks continuous quality weighting for exported panorama flakes. The sha
 
 | Task | Scope | Dependency | Status | Owner | Evidence |
 | --- | --- | --- | --- | --- | --- |
+| PG-068 | Windows opt-in person protection and water smoothing, bundled offline model and final-render semantics | PG-067 | implementation reviewed; Windows Release and packaged export qualification in progress | Luna native/renderer/Flutter coders; Codex independent review/builds | [Plan](../superpowers/plans/2026-10-15-scene-blending.md), [Handoff](COLLABORATION.md#pg-068-windows-person-protection-and-water-smoothing) |
 | PG-067 | Continuous deghost quality suppression, compatible render identity and memory accounting | PG-051 | 1.4.9+28 Windows/Android test builds qualified; same-layout real crops remove truck/SUV triangles; 231 native + 330 Flutter tests pass; full panorama/device acceptance pending | Luna renderer coder and validation coder; Codex independent review/builds | [Plan](../superpowers/plans/2026-10-09-deghost-continuity.md), [Evidence](evidence/DEGHOST-CONTINUITY-2026-10-09.md), [Handoff](COLLABORATION.md#pg-067-continuous-deghost-quality-weighting) |
 
 PG-066 completed the bilingual audit of every operator-visible service message

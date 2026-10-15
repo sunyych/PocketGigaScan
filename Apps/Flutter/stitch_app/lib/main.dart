@@ -27,6 +27,7 @@ import 'services/mobile_runtime_service.dart';
 import 'services/dwarf_download_service.dart';
 import 'services/memory_budget_policy.dart';
 import 'services/spherical_request.dart';
+import 'services/scene_model_service.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
 import 'services/task_record_service.dart';
@@ -38,6 +39,7 @@ import 'services/settings_controller.dart';
 import 'settings_page.dart';
 import 'models/stitch_timeline.dart';
 import 'widgets/stitching_log.dart';
+import 'widgets/scene_model_dialog.dart';
 
 void main() => runApp(const LumiaStitchApp());
 
@@ -195,6 +197,8 @@ class _StitchHomePageState extends State<StitchHomePage>
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
   late final _importer = widget.photoImporter ?? PhotoImporter();
+  late final Future<SceneModelService> _sceneModelService =
+      createDefaultSceneModelService();
   late final JobApi _api = widget.jobApi ?? NativeJobApi();
   // ignore: unnecessary_nullable_for_final_variable_declarations
   late final BatchQueueController? _batchController =
@@ -204,6 +208,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         requireLargeJobApproval: _mobile,
         runtimeService: _runtime,
         storageService: _mobile ? _storage : null,
+        sceneModelService: _sceneModelService,
       );
   late final PowerGate _power = widget.powerGate ?? PlatformPowerGate();
   late final ForegroundWorkLock _lock =
@@ -252,6 +257,8 @@ class _StitchHomePageState extends State<StitchHomePage>
       ? SeamBlendMode.feather
       : SeamBlendMode.deghost;
   bool _localTextureWarp = true;
+  bool _protectPeople = false;
+  bool _smoothWater = false;
   List<GridCell> _mappingCells = const [];
   Map<String, Object?>? _manifest;
   int? _viewerLevel;
@@ -518,6 +525,8 @@ class _StitchHomePageState extends State<StitchHomePage>
       _refineGridNeighbors = _task!.refineGridNeighbors;
       _seamBlendMode = _task!.seamBlendMode;
       _localTextureWarp = _task!.localTextureWarp;
+      _protectPeople = _task!.protectPeople;
+      _smoothWater = _task!.smoothWater;
       _horizontalOverlap.text =
           '${(_task!.gridHorizontalOverlap * 100).round()}';
       _verticalOverlap.text = '${(_task!.gridVerticalOverlap * 100).round()}';
@@ -554,6 +563,8 @@ class _StitchHomePageState extends State<StitchHomePage>
       _refineGridNeighbors = s.refineGridNeighbors;
       _seamBlendMode = s.seamBlendMode;
       _localTextureWarp = s.localTextureWarp;
+      _protectPeople = s.protectPeople;
+      _smoothWater = s.smoothWater;
     });
   }
 
@@ -1398,6 +1409,8 @@ class _StitchHomePageState extends State<StitchHomePage>
               _task?.id == selectedTask.id) {
             _task = selectedTask;
             _fov.text = '${selectedTask.horizontalFovDegrees}';
+            _protectPeople = selectedTask.protectPeople;
+            _smoothWater = selectedTask.smoothWater;
           }
         });
       }
@@ -1601,6 +1614,8 @@ class _StitchHomePageState extends State<StitchHomePage>
         refineGridNeighbors: _refineGridNeighbors,
         seamBlendMode: _seamBlendMode,
         localTextureWarp: _localTextureWarp,
+        protectPeople: _protectPeople,
+        smoothWater: _smoothWater,
         gridHorizontalOverlap:
             (double.tryParse(_horizontalOverlap.text) ?? 30) / 100,
         gridVerticalOverlap:
@@ -1937,8 +1952,25 @@ class _StitchHomePageState extends State<StitchHomePage>
         if (!await _canAdmitMemory(effectiveMemory, '启动任务') || !mounted) {
           return;
         }
+        SceneModelMetadata? sceneModel;
+        if (Platform.isWindows &&
+            (active.protectPeople || active.smoothWater)) {
+          final service = await _sceneModelService;
+          sceneModel = await service.cachedMetadata();
+          if (sceneModel == null) {
+            if (!mounted) return;
+            await showSceneModelDialog(context, Future.value(service));
+            if (!mounted) return;
+            sceneModel = await service.cachedMetadata();
+            if (sceneModel == null) return;
+          }
+        }
         final response = await _api.start(
-          buildSphericalRequest(active),
+          buildSphericalRequest(
+            active,
+            sceneModel: sceneModel,
+            supportsSceneModel: Platform.isWindows,
+          ),
           out.path,
           memoryBudgetMiB: effectiveMemory,
           workers: effectiveWorkers,
@@ -3118,6 +3150,8 @@ class _StitchHomePageState extends State<StitchHomePage>
     _autoGridOverlap = task.autoGridOverlap;
     _cameraCalibrationTouched = task.cameraCalibrationOverridden;
     _performanceOptions = task.performanceOptions;
+    _protectPeople = task.protectPeople;
+    _smoothWater = task.smoothWater;
     _horizontalOverlap.text = '${(task.gridHorizontalOverlap * 100).round()}';
     _verticalOverlap.text = '${(task.gridVerticalOverlap * 100).round()}';
     _fx.clear();
@@ -3262,6 +3296,8 @@ class _StitchHomePageState extends State<StitchHomePage>
         _refineGridNeighbors = copy.refineGridNeighbors;
         _seamBlendMode = copy.seamBlendMode;
         _localTextureWarp = copy.localTextureWarp;
+        _protectPeople = copy.protectPeople;
+        _smoothWater = copy.smoothWater;
         _horizontalOverlap.text =
             '${(copy.gridHorizontalOverlap * 100).round()}';
         _verticalOverlap.text = '${(copy.gridVerticalOverlap * 100).round()}';
@@ -3447,6 +3483,20 @@ class _StitchHomePageState extends State<StitchHomePage>
           mobile: _mobile,
           memoryReading: _appMemoryReading,
           mobileStorageService: _storage,
+          sceneModelService: _sceneModelService,
+          activeTasks:
+              _hasActiveJob ||
+              _tasks.any(
+                (task) => {
+                  StitchPhase.queued,
+                  StitchPhase.running,
+                  StitchPhase.pausing,
+                  StitchPhase.paused,
+                  StitchPhase.interrupted,
+                  StitchPhase.exporting,
+                }.contains(task.phase),
+              ) ||
+              (_batchController?.hasActiveTasks ?? false),
         ),
       ),
     );
@@ -4477,6 +4527,24 @@ class _StitchHomePageState extends State<StitchHomePage>
                     value: _localTextureWarp,
                     onChanged: enabled ? _updateLocalTextureWarp : null,
                   ),
+                  if (Platform.isWindows) ...[
+                    CheckboxListTile(
+                      key: const Key('protect-people-option'),
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(StitchLocalizations.of(context).protectPeople),
+                      subtitle: Text(StitchLocalizations.of(context).protectPeopleHelp),
+                      value: _protectPeople,
+                      onChanged: enabled ? _updateProtectPeople : null,
+                    ),
+                    CheckboxListTile(
+                      key: const Key('smooth-water-option'),
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(StitchLocalizations.of(context).smoothWater),
+                      subtitle: Text(StitchLocalizations.of(context).smoothWaterHelp),
+                      value: _smoothWater,
+                      onChanged: enabled ? _updateSmoothWater : null,
+                    ),
+                  ],
                 ],
               ),
             Text('提速测试选项', style: Theme.of(context).textTheme.titleMedium),
@@ -4700,6 +4768,22 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (task != null) {
       _persistQuality(task.copyWith(localTextureWarp: value));
     }
+  }
+
+  void _updateProtectPeople(bool? value) {
+    if (!_editable || value == null) return;
+    setState(() => _protectPeople = value);
+    final task = _task;
+    if (task != null) _persistQuality(task.copyWith(protectPeople: value));
+    if (value) unawaited(showSceneModelDialog(context, _sceneModelService));
+  }
+
+  void _updateSmoothWater(bool? value) {
+    if (!_editable || value == null) return;
+    setState(() => _smoothWater = value);
+    final task = _task;
+    if (task != null) _persistQuality(task.copyWith(smoothWater: value));
+    if (value) unawaited(showSceneModelDialog(context, _sceneModelService));
   }
 
   void _persistQuality(StitchTask updated) {

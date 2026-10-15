@@ -14,6 +14,33 @@ pub(crate) struct OwnershipCandidate {
     pub obstruction: u8,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SceneBlendOverride {
+    Base,
+    SmoothWater(u8),
+    Person(usize),
+}
+
+/// Scene controls are independent of the selected base blend mode. Person
+/// ownership takes precedence when water and person masks overlap.
+pub(crate) fn scene_blend_override(
+    protect_people: bool,
+    smooth_water: bool,
+    person_owner: Option<usize>,
+    water_blend: u8,
+) -> SceneBlendOverride {
+    if protect_people {
+        if let Some(owner) = person_owner {
+            return SceneBlendOverride::Person(owner);
+        }
+    }
+    if smooth_water && water_blend > 0 {
+        SceneBlendOverride::SmoothWater(water_blend)
+    } else {
+        SceneBlendOverride::Base
+    }
+}
+
 pub(crate) fn adjust_candidates_for_content(
     candidates: &mut [OwnershipCandidate],
     blur_peer_texture: u8,
@@ -60,6 +87,55 @@ pub(crate) fn content_disagreement(left: [u8; 3], right: [u8; 3]) -> f32 {
         .sum::<f32>()
         .sqrt()
         / 441.7
+}
+
+#[cfg(test)]
+mod scene_override_tests {
+    use super::{scene_blend_override, SceneBlendOverride};
+
+    #[test]
+    fn scene_options_are_orthogonal_and_person_has_precedence() {
+        assert_eq!(
+            scene_blend_override(true, true, Some(4), 3),
+            SceneBlendOverride::Person(4)
+        );
+        assert_eq!(
+            scene_blend_override(false, true, Some(4), 255),
+            SceneBlendOverride::SmoothWater(255)
+        );
+        assert_eq!(
+            scene_blend_override(true, false, None, 3),
+            SceneBlendOverride::Base
+        );
+        assert_eq!(
+            scene_blend_override(false, false, Some(4), 2),
+            SceneBlendOverride::Base
+        );
+    }
+
+    #[test]
+    fn water_override_requires_a_multi_source_overlap() {
+        assert_eq!(
+            scene_blend_override(false, true, None, 0),
+            SceneBlendOverride::Base
+        );
+        assert_eq!(
+            scene_blend_override(false, true, None, 255),
+            SceneBlendOverride::SmoothWater(255)
+        );
+    }
+
+    #[test]
+    fn low_water_confidence_produces_a_soft_feather_transition() {
+        assert_eq!(
+            scene_blend_override(false, true, None, 32),
+            SceneBlendOverride::SmoothWater(32)
+        );
+        assert_eq!(
+            scene_blend_override(false, true, None, 224),
+            SceneBlendOverride::SmoothWater(224)
+        );
+    }
 }
 
 #[derive(Clone, Debug)]
