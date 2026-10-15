@@ -24,6 +24,7 @@ arch=arm64
 minimum="14.0"
 rust_version="1.88.0"
 target="aarch64-apple-darwin"
+export MACOSX_DEPLOYMENT_TARGET="$minimum"
 
 for command in cargo rustc rustup cmake tar curl shasum otool install_name_tool; do
   command -v "$command" >/dev/null || { echo "Missing required command: $command" >&2; exit 69; }
@@ -32,6 +33,7 @@ rustc "+$rust_version" --version >/dev/null 2>&1 || {
   echo "Rust $rust_version is required; install it with: rustup toolchain install $rust_version --profile minimal" >&2
   exit 69
 }
+rustup component add rustfmt --toolchain "$rust_version"
 rustup target list --installed --toolchain "$rust_version" | grep -qx "$target" || rustup target add "$target" --toolchain "$rust_version"
 
 verify_sha() {

@@ -80,6 +80,8 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn('marker="$destination/skcms.cc"', self.native)
         self.assertIn("modules/core/include/opencv2/core/version.hpp", self.native)
         self.assertNotIn("extract_source \"$opencv_archive\" \"$opencv_source\" include/opencv2/core/version.hpp", self.native)
+        self.assertIn('rustup component add rustfmt --toolchain "$rust_version"', self.native)
+        self.assertIn('export MACOSX_DEPLOYMENT_TARGET="$minimum"', self.native)
         self.assertNotIn("c/CMakeLists.txt", self.native)
         self.assertNotIn("src/skcms.cc", self.native)
         self.assertIn("-iname 'PATENTS*'", self.builder)
@@ -90,6 +92,7 @@ class MacBuildContractTests(unittest.TestCase):
         for trigger in ("push:", "pull_request:", "workflow_dispatch:"):
             self.assertIn(trigger, self.workflow)
         self.assertIn("runs-on: macos-15", self.workflow)
+        self.assertIn("rustup component add rustfmt --toolchain 1.88.0", self.workflow)
         self.assertIn("actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25", self.workflow)
         self.assertIn("actions/cache/save@caa296126883cff596d87d8935842f9db880ef25", self.workflow)
         self.assertIn("if: always() && steps.macos-native-cache.outputs.cache-hit != 'true'", self.workflow)
