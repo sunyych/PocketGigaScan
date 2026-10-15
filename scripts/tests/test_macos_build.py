@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import re
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
 
@@ -118,6 +120,32 @@ class MacBuildContractTests(unittest.TestCase):
             manifest.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "Pinned scene model size/SHA mismatch"):
                 VERIFIER.verify_model(model, manifest)
+
+    def test_macos_runner_localizes_permission_and_native_menus(self) -> None:
+        runner = ROOT / "Apps/Flutter/stitch_app/macos/Runner"
+        project = (ROOT / "Apps/Flutter/stitch_app/macos/Runner.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        english_permission = (runner / "en.lproj/InfoPlist.strings").read_text(encoding="utf-8")
+        chinese_permission = (runner / "zh-Hans.lproj/InfoPlist.strings").read_text(encoding="utf-8")
+        chinese_menu_path = runner / "zh-Hans.lproj/MainMenu.strings"
+        chinese_menu = chinese_menu_path.read_text(encoding="utf-8")
+        xib = ET.parse(runner / "Base.lproj/MainMenu.xib").getroot()
+        menu_keys = {
+            f"{element.get('id')}.title"
+            for element in xib.iter()
+            if element.tag in ("menuItem", "menu", "window")
+            and element.get("title")
+            and element.get("systemMenu") != "main"
+        }
+        localized_keys = set(re.findall(r'^"([^"]+)"\s*=', chinese_menu, re.MULTILINE))
+
+        self.assertIn('"zh-Hans"', project)
+        self.assertIn("InfoPlist.strings in Resources", project)
+        self.assertIn("InfoPlist.strings", project)
+        self.assertIn('"NSLocalNetworkUsageDescription"', english_permission)
+        self.assertIn('"NSLocalNetworkUsageDescription"', chinese_permission)
+        self.assertEqual(localized_keys, menu_keys)
+        self.assertIn('"APP_NAME"', chinese_menu)
+        self.assertIn("MainMenu.xib in Resources", project)
 
     def test_macho_floor_parser_rejects_newer_dependencies(self) -> None:
         binary = Path("libonnxruntime.dylib")
