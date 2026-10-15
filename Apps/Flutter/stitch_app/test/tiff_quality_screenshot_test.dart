@@ -10,6 +10,7 @@ import 'package:stitch_app/services/power_service.dart';
 import 'package:stitch_app/services/task_repository.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
+import 'support/platform_golden.dart';
 
 class _ScreenshotApi implements JobApi {
   @override
@@ -168,7 +169,7 @@ void main() {
 
       await expectLater(
         find.byType(Scaffold),
-        matchesGoldenFile(
+        platformGoldenFile(
           'goldens/export_format_card_desktop_${entry.key}.png',
         ),
       );
@@ -286,7 +287,7 @@ void main() {
 
       await expectLater(
         find.byKey(const Key('stitch-quality-expansion')),
-        matchesGoldenFile('goldens/tiff_quality_desktop_$state.png'),
+        platformGoldenFile('goldens/tiff_quality_desktop_$state.png'),
       );
     });
   }

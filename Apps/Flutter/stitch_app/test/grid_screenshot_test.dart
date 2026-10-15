@@ -12,6 +12,7 @@ import 'package:stitch_app/services/power_service.dart';
 import 'package:stitch_app/services/task_repository.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
+import 'support/platform_golden.dart';
 
 class _ScreenshotApi implements JobApi {
   @override
@@ -272,7 +273,7 @@ void main() {
         expect(contactSheet.width / 24, greaterThanOrEqualTo(15));
         expect(contactSheet.height, greaterThanOrEqualTo(100));
         expect(tester.takeException(), isNull);
-        await expectLater(find.byType(Scaffold), matchesGoldenFile(golden));
+        await expectLater(find.byType(Scaffold), platformGoldenFile(golden));
       }
       tester.view.resetPhysicalSize();
       tester.view.resetDevicePixelRatio();

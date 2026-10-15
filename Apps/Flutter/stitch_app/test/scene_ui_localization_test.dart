@@ -11,6 +11,7 @@ import 'package:stitch_app/settings_page.dart';
 import 'package:stitch_app/l10n/stitch_localizations.dart';
 import 'package:stitch_app/services/scene_model_service.dart';
 import 'package:stitch_app/widgets/scene_model_dialog.dart';
+import 'support/platform_golden.dart';
 
 void main() {
   late Directory temp;
@@ -102,7 +103,7 @@ void main() {
     expect(find.textContaining('avoid cutting them at seams'), findsOneWidget);
     await expectLater(
       find.byType(SettingsPage),
-      matchesGoldenFile('goldens/scene-options-settings-en.png'),
+      platformGoldenFile('goldens/scene-options-settings-en.png'),
     );
 
     await tester.pumpWidget(
@@ -115,7 +116,7 @@ void main() {
     expect(find.text('平滑水面'), findsOneWidget);
     await expectLater(
       find.byType(SettingsPage),
-      matchesGoldenFile('goldens/scene-options-settings-zh.png'),
+      platformGoldenFile('goldens/scene-options-settings-zh.png'),
     );
 
     await tester.pumpWidget(
@@ -193,7 +194,11 @@ Widget _settingsApp(
     GlobalWidgetsLocalizations.delegate,
     GlobalCupertinoLocalizations.delegate,
   ],
-  home: SettingsPage(controller: controller, mobile: mobile, supportsSceneOptions: !mobile),
+  home: SettingsPage(
+    controller: controller,
+    mobile: mobile,
+    supportsSceneOptions: !mobile,
+  ),
 );
 
 class _ControlledSceneModelSource implements SceneModelBundleSource {

@@ -16,6 +16,7 @@ import 'package:stitch_app/services/mobile_storage_service.dart';
 import 'package:stitch_app/services/task_record_service.dart';
 import 'package:stitch_app/widgets/exported_image_viewer.dart';
 import 'support/chinese_test_app.dart';
+import 'support/platform_golden.dart';
 
 final _png = base64Decode(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOIWnAJAAMkAc2CFM/BAAAAAElFTkSuQmCC',
@@ -954,7 +955,7 @@ void main() {
       expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
       await expectLater(
         find.byType(ExportedImageViewer),
-        matchesGoldenFile('goldens/exported_image_viewer_$state.png'),
+        platformGoldenFile('goldens/exported_image_viewer_$state.png'),
       );
     }
 
@@ -965,7 +966,7 @@ void main() {
     expect(find.byIcon(Icons.broken_image_outlined), findsNothing);
     await expectLater(
       find.byType(ExportedImageViewer),
-      matchesGoldenFile('goldens/exported_image_viewer_100_percent.png'),
+      platformGoldenFile('goldens/exported_image_viewer_100_percent.png'),
     );
 
     await capture('legacy_warning', null);

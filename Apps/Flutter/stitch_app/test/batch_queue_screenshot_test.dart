@@ -6,6 +6,7 @@ import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'support/chinese_test_app.dart';
+import 'support/platform_golden.dart';
 
 class _ScreenshotApi implements JobApi {
   @override
@@ -154,7 +155,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),
-      matchesGoldenFile('goldens/batch_queue_desktop_top.png'),
+      platformGoldenFile('goldens/batch_queue_desktop_top.png'),
     );
 
     await tester.scrollUntilVisible(find.text('08_BlurrySet'), 300);
@@ -166,7 +167,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),
-      matchesGoldenFile('goldens/batch_queue_desktop_bottom.png'),
+      platformGoldenFile('goldens/batch_queue_desktop_bottom.png'),
     );
   });
 
@@ -180,7 +181,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),
-      matchesGoldenFile('goldens/batch_queue_desktop_1000.png'),
+      platformGoldenFile('goldens/batch_queue_desktop_1000.png'),
     );
   });
 
@@ -194,7 +195,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),
-      matchesGoldenFile('goldens/batch_queue_empty.png'),
+      platformGoldenFile('goldens/batch_queue_empty.png'),
     );
   });
 
@@ -218,7 +219,7 @@ void main() {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),
-      matchesGoldenFile('goldens/batch_queue_mobile.png'),
+      platformGoldenFile('goldens/batch_queue_mobile.png'),
     );
   });
 }

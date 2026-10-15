@@ -119,7 +119,7 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("continue-on-error: true", self.workflow)
         self.assertIn("--update-goldens", self.workflow)
         self.assertIn("macos-golden-diagnostic-snapshots-${{ github.sha }}", self.workflow)
-        self.assertIn("test/goldens/*.png", self.workflow)
+        self.assertIn("test/goldens/**/*.png", self.workflow)
         for golden_test in (
             "test/batch_queue_screenshot_test.dart",
             "test/force_grid_options_screenshot_test.dart",

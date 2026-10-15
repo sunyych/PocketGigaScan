@@ -15,6 +15,7 @@ import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/mobile_runtime_service.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
+import 'support/platform_golden.dart';
 
 class _NoopForegroundLock implements ForegroundWorkLock {
   @override
@@ -220,7 +221,7 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byKey(const Key('stitch-options-card')),
-      matchesGoldenFile('goldens/grid_overlap_${mode}_$profile.png'),
+      platformGoldenFile('goldens/grid_overlap_${mode}_$profile.png'),
     );
     tester.view.resetPhysicalSize();
     tester.view.resetDevicePixelRatio();
