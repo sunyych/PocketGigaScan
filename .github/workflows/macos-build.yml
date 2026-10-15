@@ -15,53 +15,48 @@ concurrency:
 
 jobs:
   prepare-scene-model:
-    name: Export the pinned CPU scene model
-    runs-on: windows-2025-vs2026
-    timeout-minutes: 120
+    name: Download the validated canonical scene model
+    runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - name: Check out sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Restore canonical Windows model export
-        id: scene-model-cache
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
-        with:
-          path: ${{ runner.temp }}/PocketGigaScan-scene-model
-          key: pocketgigascan-scene-model-windows-${{ runner.arch }}-${{ hashFiles('scripts/export-scene-model.py', 'scripts/scene-model-export.lock.json', 'scripts/scene-model-export.requirements.txt') }}
-      - name: Set up Python 3.12
-        if: steps.scene-model-cache.outputs.cache-hit != 'true'
+      - name: Set up Python for the package verifier
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
-      - name: Export and verify the public pinned model
-        if: steps.scene-model-cache.outputs.cache-hit != 'true'
-        id: export-model
+      - name: Download and verify the fixed public model asset
         shell: pwsh
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $modelDir = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-scene-model'
-          $cacheDir = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-model-cache'
-          $venv = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-scene-export-venv'
-          python -m venv $venv
-          if ($LASTEXITCODE -ne 0) { throw 'Creating the isolated scene exporter environment failed.' }
-          $exportPython = Join-Path $venv 'Scripts/python.exe'
-          & $exportPython -m pip install --disable-pip-version-check -r scripts/scene-model-export.requirements.txt
-          if ($LASTEXITCODE -ne 0) { throw 'Installing the pinned scene model exporter failed.' }
-          & $exportPython scripts/export-scene-model.py --output-dir $modelDir --cache-dir $cacheDir
-          if ($LASTEXITCODE -ne 0) { throw 'The pinned scene model export or digest check failed.' }
-      - name: Verify the cached or freshly exported model
-        shell: pwsh
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $modelDir = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-scene-model'
+          $lock = Get-Content scripts/scene-model-export.lock.json -Raw | ConvertFrom-Json
+          $asset = $lock.releaseAsset
+          $zipPath = Join-Path $env:RUNNER_TEMP $asset.fileName
+          Invoke-WebRequest -Uri $asset.url -OutFile $zipPath
+          $zipInfo = Get-Item -LiteralPath $zipPath
+          if ($zipInfo.Length -ne $asset.sizeBytes) { throw "Model release ZIP size mismatch: $($zipInfo.Length)" }
+          $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          if ($zipHash -ne $asset.sha256) { throw "Model release ZIP SHA-256 mismatch: $zipHash" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $names = @($archive.Entries | ForEach-Object FullName | Sort-Object)
+            $expected = @('scene-model-NOTICE.txt', 'scene-model-README.md', 'scene-model-v1.manifest.json', 'scene-model-v1.onnx') | Sort-Object
+            if (Compare-Object $names $expected) { throw "Model ZIP entry layout mismatch: $($names -join ', ')" }
+          } finally { $archive.Dispose() }
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $modelDir
           $modelPath = Join-Path $modelDir 'scene-model-v1.onnx'
           $manifestPath = Join-Path $modelDir 'scene-model-v1.manifest.json'
-          if (-not (Test-Path -LiteralPath (Join-Path $modelDir 'scene-model-LICENSE.txt') -PathType Leaf)) { throw 'The scene model license is missing.' }
           python scripts/verify-macos-package.py --model $modelPath --manifest $manifestPath
           if ($LASTEXITCODE -ne 0) { throw 'The canonical scene model SHA/manifest verification failed.' }
+          $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($manifest.sourceReadmeFile -ne 'scene-model-README.md' -or $manifest.licenseNoticeFile -ne 'scene-model-NOTICE.txt') { throw 'Pinned model README or license notice is not recorded in the model manifest.' }
+          if (-not (Test-Path -LiteralPath (Join-Path $modelDir 'scene-model-README.md') -PathType Leaf)) { throw 'The pinned upstream model README is missing.' }
+          if (-not (Test-Path -LiteralPath (Join-Path $modelDir 'scene-model-NOTICE.txt') -PathType Leaf)) { throw 'The pinned model license notice is missing.' }
       - name: Upload the validated model and license
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -69,14 +64,6 @@ jobs:
           path: ${{ runner.temp }}/PocketGigaScan-scene-model/
           if-no-files-found: error
           retention-days: 7
-      - name: Upload unvalidated export diagnostics after a hash mismatch
-        if: failure() && steps.export-model.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: UNVALIDATED-PocketGigaScan-scene-model-debug-${{ github.sha }}
-          path: ${{ runner.temp }}/PocketGigaScan-scene-model/
-          if-no-files-found: ignore
-          retention-days: 1
 
   macos-arm64:
     name: macOS 14+ Apple Silicon package

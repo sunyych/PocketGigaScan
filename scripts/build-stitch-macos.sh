@@ -6,7 +6,7 @@ usage() {
 Usage: build-stitch-macos.sh --scene-model <scene-model-v1.onnx> [--output-dir <directory>]
 
 Builds the non-sandboxed Apple Silicon macOS client and an ad-hoc-signed ZIP.
-The scene model and its exporter manifest must be in the same directory.
+The model, exporter manifest, upstream README model card, and model notice must be in the same directory.
 USAGE
   exit 64
 }
@@ -89,9 +89,13 @@ resources="$bundle/Contents/Resources"
 mkdir -p "$resources/models"
 cp "$scene_model" "$resources/models/scene-model-v1.onnx"
 cp "$scene_manifest" "$resources/models/scene-model-v1.manifest.json"
+model_readme="$(dirname "$scene_model")/scene-model-README.md"
+model_notice="$(dirname "$scene_model")/scene-model-NOTICE.txt"
+[[ -f "$model_readme" && -f "$model_notice" ]] || { echo 'Pinned scene model README and license notice are required beside the ONNX model.' >&2; exit 66; }
+cp "$model_readme" "$resources/models/scene-model-README.md"
+cp "$model_notice" "$resources/models/scene-model-NOTICE.txt"
 model_license="$(dirname "$scene_model")/scene-model-LICENSE.txt"
-[[ -f "$model_license" ]] || { echo "Scene model license is missing: $model_license" >&2; exit 66; }
-cp "$model_license" "$resources/models/scene-model-LICENSE.txt"
+if [[ -f "$model_license" ]]; then cp "$model_license" "$resources/models/scene-model-LICENSE.txt"; fi
 
 codesign --force --deep --sign - --timestamp=none "$bundle"
 codesign --verify --strict --deep "$bundle"
@@ -107,7 +111,9 @@ cp "$repo/THIRD-PARTY-NOTICES.md" "$package/licenses/THIRD-PARTY-NOTICES.md"
 ort_root="$cache/dependencies/sdk/onnxruntime/onnxruntime-osx-arm64-1.31.0"
 cp "$ort_root/LICENSE" "$package/licenses/ONNX-Runtime-LICENSE.txt"
 cp "$ort_root/ThirdPartyNotices.txt" "$package/licenses/ONNX-Runtime-ThirdPartyNotices.txt"
-cp "$model_license" "$package/licenses/Scene-Model-MIT.txt"
+cp "$model_readme" "$package/licenses/Scene-Model-README.md"
+cp "$model_notice" "$package/licenses/Scene-Model-NOTICE.txt"
+if [[ -f "$model_license" ]]; then cp "$model_license" "$package/licenses/Scene-Model-LICENSE.txt"; fi
 for entry in 'OpenCV:opencv-4.13.0' 'libjxl:libjxl-0.12.0' 'Brotli:brotli-028fb5a23661f123017c060daa546b55cf4bde29' 'Highway:highway-457c891775a7397bdb0376bb1031e6e027af1c48' 'skcms:skcms-96d9171c94b937a1b5f0293de7309ac16311b722'; do
   IFS=: read -r label folder <<< "$entry"
   source_dir="$cache/dependencies/sources/$folder"
@@ -116,13 +122,21 @@ for entry in 'OpenCV:opencv-4.13.0' 'libjxl:libjxl-0.12.0' 'Brotli:brotli-028fb5
     [[ -f "$source" ]] || continue
     cp "$source" "$package/licenses/$label-$(basename "$source")"
     license_count=$((license_count + 1))
-  done < <(find "$source_dir" -maxdepth 1 -type f \( -iname 'LICENSE' -o -iname 'LICENSE-*' -o -iname 'LICENSE_*' -o -iname 'LICENSE.*' -o -iname 'COPYING' -o -iname 'COPYING-*' -o -iname 'NOTICE' -o -iname 'NOTICE-*' \) -print)
+  done < <(find "$source_dir" -maxdepth 1 -type f \( -iname 'LICENSE' -o -iname 'LICENSE-*' -o -iname 'LICENSE_*' -o -iname 'LICENSE.*' -o -iname 'COPYING' -o -iname 'COPYING-*' -o -iname 'NOTICE' -o -iname 'NOTICE-*' -o -iname 'PATENTS*' \) -print)
   ((license_count > 0)) || { echo "Dependency license missing in pinned source: $source_dir" >&2; exit 66; }
 done
 for codec in libjpeg-turbo libpng zlib; do
-  source="$(find "$cache/dependencies/sources/opencv-4.13.0/3rdparty" -type f \( -iname 'LICENSE*' -o -iname 'COPYING*' \) -print | grep -i "/$codec/" | head -n 1 || true)"
-  [[ -n "$source" && -f "$source" ]] || { echo "OpenCV bundled codec license is missing: $codec" >&2; exit 66; }
-  cp "$source" "$package/licenses/OpenCV-$codec-LICENSE.txt"
+  codec_root="$cache/dependencies/sources/opencv-4.13.0/3rdparty/$codec"
+  [[ -d "$codec_root" ]] || { echo "OpenCV bundled codec source is missing: $codec_root" >&2; exit 66; }
+  codec_text_count=0
+  while IFS= read -r source; do
+    [[ -f "$source" ]] || continue
+    cp "$source" "$package/licenses/OpenCV-$codec-$(basename "$source")"
+    codec_text_count=$((codec_text_count + 1))
+  done < <(find "$codec_root" -type f \( \
+    -iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'PATENTS*' -o -iname 'README*' \
+  \) -print)
+  ((codec_text_count > 0)) || { echo "OpenCV bundled codec license texts are missing: $codec" >&2; exit 66; }
 done
 cp "$flutter_sdk_root/packages/flutter/LICENSE" "$package/licenses/Flutter-LICENSE.txt"
 python3 - "$app/.dart_tool/package_config.json" "$package/licenses/flutter-packages" <<'PY'

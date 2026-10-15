@@ -37,12 +37,21 @@ class MacBuildContractTests(unittest.TestCase):
         manifest = json.loads((ROOT / model["manifest"]).read_text(encoding="utf-8"))
         self.assertEqual(model["sha256"], manifest["expectedSha256"])
         self.assertEqual(model["sizeBytes"], manifest["expectedSizeBytes"])
-        self.assertIn("export-scene-model.py", self.workflow)
-        self.assertIn("scene-model-cache", self.workflow)
-        self.assertIn("scripts/scene-model-export.requirements.txt", self.workflow)
-        self.assertIn("Verify the cached or freshly exported model", self.workflow)
+        export_lock = json.loads((ROOT / "scripts/scene-model-export.lock.json").read_text(encoding="utf-8"))
+        asset = export_lock["releaseAsset"]
+        self.assertEqual(asset["fileName"], "PocketGigaScan-scene-model-v1.zip")
+        self.assertEqual(asset["sizeBytes"], 219959932)
+        self.assertEqual(asset["sha256"], "cb9769f81929590711a2a0b84373946c1b429c96ff4eac6bfc4ebe22eb250c41")
+        self.assertIn("Download and verify the fixed public model asset", self.workflow)
+        self.assertIn("Get-FileHash -Algorithm SHA256", self.workflow)
+        self.assertIn("Expand-Archive", self.workflow)
+        self.assertNotIn("export-scene-model.py", self.workflow)
         self.assertIn("verify-macos-package.py --model", self.workflow)
-        self.assertIn("scene-model-LICENSE.txt", self.builder)
+        self.assertIn("scene-model-README.md", self.workflow)
+        self.assertIn("scene-model-NOTICE.txt", self.workflow)
+        self.assertIn("initializer-digests", (ROOT / "scripts/export-scene-model.py").read_text(encoding="utf-8"))
+        self.assertIn("scene-model-README.md", self.builder)
+        self.assertIn("scene-model-NOTICE.txt", self.builder)
 
     def test_release_build_embeds_native_runtime_and_scene_model(self) -> None:
         self.assertIn("export LUMIA_NATIVE_APPLE_ENABLED=YES", self.builder)
@@ -65,6 +74,9 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertIn("cp -L", self.native)
         self.assertIn('"$runtime_dir"/*.dylib', self.embed)
         self.assertIn("otool", self.embed)
+        self.assertIn("-iname 'PATENTS*'", self.builder)
+        self.assertIn("-iname 'README*'", self.builder)
+        self.assertIn('OpenCV-$codec-$(basename "$source")', self.builder)
 
     def test_distribution_is_public_runner_artifact_without_signing_credentials(self) -> None:
         for trigger in ("push:", "pull_request:", "workflow_dispatch:"):

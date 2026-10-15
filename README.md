@@ -1,12 +1,19 @@
 # PocketGigaScan
 
-Independent DWARF panorama stitching on shared Flutter/Rust processing layers. Windows has a published build; the Android ARM64 APK passes host tests and packaging inspection, with connected-device qualification pending. The portable processing boundary is retained for future iOS work. This product does not use the retired OpenPocketCine/DJI application or protocol code.
+Independent DWARF panorama stitching on shared Flutter/Rust processing layers. Windows has a published build; the Android ARM64 APK passes host tests and packaging inspection, with connected-device qualification pending. An Apple silicon macOS test client is being qualified separately; the portable processing boundary is retained for future iOS work. This product does not use the retired OpenPocketCine/DJI application or protocol code.
 
 ## Download
 
 [Latest Windows download](https://github.com/sunyych/PocketGigaScan/releases/download/latest/PocketGigaScan-Windows-x64.zip) · [Releases](https://github.com/sunyych/PocketGigaScan/releases) · [Build status](https://github.com/sunyych/PocketGigaScan/actions)
 
 Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the included Flutter DLL, native core and data directory; do not copy it alone. Every push creates a build artifact; successful default-branch builds refresh the stable `latest` download after signing is configured and verified. Current downloads remain unsigned while SignPath Foundation acceptance and repository configuration are pending.
+
+The macOS test client targets Apple silicon (M1 or later), macOS 14 or newer.
+Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/macos-build.yml)
+produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
+runtime and licenses. See [Mac build and test instructions](Apps/Flutter/stitch_app/APPLE-BUILD.md)
+and [qualification evidence](docs/gigascan/evidence/MACOS-DESKTOP-2026-10-15.md).
+A successful package build is separate from user testing on a Mac.
 
 ## Code signing policy
 
@@ -18,6 +25,7 @@ Planned provider: Free code signing provided by SignPath.io, certificate by Sign
 - Compare adjacent photos; refine texture geometry and retain every input. Explicit nominal/forced grid placement remains labelled as estimated and needs visual review.
 - Process individual jobs or queue child folders with resource-bounded concurrency, pause/resume and progress.
 - Choose lossless PNG or TIFF/BigTIFF, or high-quality lossy JPEG XL, before stitching. New Windows tasks default to TIFF and export automatically after successful rendering.
+- On Windows/macOS, optionally protect complete people at seams and smooth water overlap. The two settings are independent and default off; the bundled model runs offline. Phones hide these controls and keep semantic inference disabled.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
 - Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.
 - Open Settings to choose system/English/Chinese language, system/light/dark appearance, accent color, output quality, performance defaults and output folder. Processing defaults apply to new tasks; saved tasks retain their options.
@@ -29,7 +37,7 @@ photo-count or axis limit: more than 6 rows, 6 columns or 36 photos requires
 confirmation before processing. Concurrency remains bounded by actual resources.
 Choose a persistent output folder in Settings to copy completed Android exports
 automatically. The private result remains available for viewing; a failed copy
-can be retried without re-encoding. Windows encodes directly into its selected folder.
+can be retried without re-encoding. Windows and macOS encode directly into their selected folder.
 Package/device qualification status is recorded in the
 [Android evidence](docs/gigascan/evidence/ANDROID-STITCH-2026-10-05.md).
 
@@ -71,9 +79,10 @@ for measured limits and the distinction between local crops and full-panorama ac
 
 | Path | Purpose |
 | --- | --- |
-| `Apps/Flutter/stitch_app` | Shared application and Windows/Android runners |
+| `Apps/Flutter/stitch_app` | Shared application and Windows/macOS/Android runners |
 | `native/core` | Vendored independent Rust/OpenCV stitching and export engine |
 | `scripts/build-dwarf-stitch-windows.ps1` | Source build, verification and complete Windows ZIP |
+| `scripts/build-stitch-macos.sh` | Apple silicon source build, offline model and test ZIP verification |
 | `scripts/build-stitch-android-core.ps1` | Pinned ARM64/optional x86_64 native source build and license staging |
 | `justfile` | Current product build/check recipes |
 | `branding` | Original icon source and generator |

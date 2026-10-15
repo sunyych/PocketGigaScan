@@ -10,5 +10,11 @@
   "opset": 17,
   "packagePath": "data/models/scene-model-v1.onnx",
   "expectedSizeBytes": 237503947,
-  "expectedSha256": "a997b66ac8ca75632817a62f253e47300b29edbeed6f62b1f04d98fe5bc12a13"
+  "expectedSha256": "a997b66ac8ca75632817a62f253e47300b29edbeed6f62b1f04d98fe5bc12a13",
+  "releaseAsset": {
+    "url": "https://github.com/sunyych/PocketGigaScan/releases/download/scene-model-v1/PocketGigaScan-scene-model-v1.zip",
+    "sha256": "cb9769f81929590711a2a0b84373946c1b429c96ff4eac6bfc4ebe22eb250c41",
+    "sizeBytes": 219959932,
+    "fileName": "PocketGigaScan-scene-model-v1.zip"
+  }
 }

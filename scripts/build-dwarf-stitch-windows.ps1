@@ -17,6 +17,17 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $app = Join-Path $repo 'Apps/Flutter/stitch_app'
 $native = Join-Path $repo 'native/core'
+$sceneModelLockPath = Join-Path $repo 'scripts/scene-model-export.lock.json'
+$sceneModelLock = Get-Content -LiteralPath $sceneModelLockPath -Raw | ConvertFrom-Json
+$sceneModelAsset = $sceneModelLock.releaseAsset
+if (-not $sceneModelAsset -or -not $sceneModelAsset.url -or -not $sceneModelAsset.sha256 -or
+    -not $sceneModelAsset.sizeBytes -or -not $sceneModelAsset.fileName) {
+    throw "The pinned scene model release asset is incomplete: $sceneModelLockPath"
+}
+if ($sceneModelAsset.url -notmatch '^https://' -or $sceneModelAsset.sha256 -notmatch '^[0-9a-f]{64}$' -or
+    [long]$sceneModelAsset.sizeBytes -le 0 -or $sceneModelAsset.fileName -ne [IO.Path]::GetFileName($sceneModelAsset.fileName)) {
+    throw "The pinned scene model release asset metadata is invalid: $sceneModelLockPath"
+}
 $pin = [ordered]@{
     openCvVersion = '4.13.0'
     openCvUrl = 'https://github.com/opencv/opencv/archive/refs/tags/4.13.0.tar.gz'
@@ -44,8 +55,8 @@ $opencvBuild = Join-Path $cache "opencv-$($pin.openCvVersion)-build"
 $opencvInstall = Join-Path $cache "opencv-$($pin.openCvVersion)-install"
 $jxlRoot = Join-Path $cache "libjxl-$($pin.jxlVersion)"
 $ortRoot = Join-Path $cache "onnxruntime-$($pin.ortVersion)"
-$sceneExportRoot = Join-Path $cache 'scene-model-export'
-$sceneModelCache = Join-Path $cache 'huggingface-cache'
+$sceneModelAssetRoot = Join-Path $cache 'scene-model-v1'
+$sceneModelArchive = Join-Path $cache $sceneModelAsset.fileName
 $flutterRoot = Join-Path $cache "flutter-$($pin.flutterVersion)"
 $releaseDir = Join-Path $app 'build/windows/x64/runner/Release'
 $packageDir = Join-Path $OutputDirectory 'package'
@@ -195,7 +206,7 @@ function Assert-SceneModel([string]$ModelPath) {
     if (-not (Test-Path -LiteralPath $model -PathType Leaf)) { throw "Scene model is missing: $model" }
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw "Scene model SHA/size manifest is missing: $manifestPath" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    $lock = Get-Content -LiteralPath (Join-Path $repo 'scripts/scene-model-export.lock.json') -Raw | ConvertFrom-Json
+    $lock = $sceneModelLock
     if ($manifest.schemaVersion -ne 1 -or $manifest.modelId -ne $pin.sceneModelId -or $manifest.onnxFile -ne [IO.Path]::GetFileName($model)) {
         throw "Scene model manifest identity mismatch: $manifestPath"
     }
@@ -205,7 +216,47 @@ function Assert-SceneModel([string]$ModelPath) {
         $size -ne [long]$lock.expectedSizeBytes -or $sha -ne $lock.expectedSha256) {
         throw "Scene model size or SHA-256 mismatch: $model"
     }
-    return [pscustomobject]@{ path = $model; manifestPath = $manifestPath; sizeBytes = $size; sha256 = $sha }
+    return [pscustomobject]@{
+        path = $model
+        manifestPath = $manifestPath
+        readmePath = Join-Path (Split-Path $model -Parent) 'scene-model-README.md'
+        noticePath = Join-Path (Split-Path $model -Parent) 'scene-model-NOTICE.txt'
+        sizeBytes = $size
+        sha256 = $sha
+    }
+}
+
+function Resolve-SceneModelPath([string]$ModelOverride) {
+    if ($ModelOverride) { return [IO.Path]::GetFullPath($ModelOverride) }
+
+    Assert-OwnedPath $sceneModelArchive $cache
+    Save-VerifiedArchive $sceneModelAsset.url $sceneModelArchive $sceneModelAsset.sha256
+    if ((Get-Item -LiteralPath $sceneModelArchive).Length -ne [long]$sceneModelAsset.sizeBytes) {
+        throw "Scene model release archive size mismatch: $sceneModelArchive"
+    }
+
+    $modelPath = Join-Path $sceneModelAssetRoot 'scene-model-v1.onnx'
+    $manifestPath = Join-Path $sceneModelAssetRoot 'scene-model-v1.manifest.json'
+    $readmePath = Join-Path $sceneModelAssetRoot 'scene-model-README.md'
+    $noticePath = Join-Path $sceneModelAssetRoot 'scene-model-NOTICE.txt'
+    $requiredFiles = @($modelPath, $manifestPath, $readmePath, $noticePath)
+    if (-not ($requiredFiles | Where-Object { -not (Test-Path -LiteralPath $_ -PathType Leaf) })) {
+        return $modelPath
+    }
+
+    if (Test-Path -LiteralPath $sceneModelAssetRoot) {
+        Assert-OwnedPath $sceneModelAssetRoot $cache -InspectTree
+        Remove-Item -LiteralPath $sceneModelAssetRoot -Recurse -Force
+    }
+    Assert-OwnedPath $sceneModelAssetRoot $cache
+    New-Item -ItemType Directory -Force -Path $sceneModelAssetRoot | Out-Null
+    Expand-Archive -LiteralPath $sceneModelArchive -DestinationPath $sceneModelAssetRoot -Force
+    foreach ($requiredFile in $requiredFiles) {
+        if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+            throw "Pinned scene model archive is missing a required root entry: $(Split-Path -Leaf $requiredFile)"
+        }
+    }
+    return $modelPath
 }
 
 function Assert-Vs18ToolchainVersion([string]$VisualStudioVersion, [string]$VCToolsVersion) {
@@ -407,7 +458,9 @@ function Get-BuildPlan {
         onnxRuntimeSha256 = $pin.ortSha256
         onnxRuntimeSdk = $OrtSdk
         sceneModelId = $pin.sceneModelId
-        sceneModelPath = if ($SceneModel) { [IO.Path]::GetFullPath($SceneModel) } else { Join-Path $sceneExportRoot 'scene-model-v1.onnx' }
+        sceneModelPath = if ($SceneModel) { [IO.Path]::GetFullPath($SceneModel) } else { Join-Path $sceneModelAssetRoot 'scene-model-v1.onnx' }
+        sceneModelAssetUrl = $sceneModelAsset.url
+        sceneModelAssetSha256 = $sceneModelAsset.sha256
         djxlSha256 = $pin.djxlSha256
         flutterVersion = $pin.flutterVersion
         flutterCommit = $pin.flutterCommit
@@ -635,25 +688,7 @@ if (-not $OrtSdk.StartsWith($cache + [IO.Path]::DirectorySeparatorChar, [StringC
 $OrtSdk = $ortSdkRoot
 $env:LUMIA_ORT_SDK = $OrtSdk
 
-if (-not $SceneModel) {
-    $SceneModel = Join-Path $sceneExportRoot 'scene-model-v1.onnx'
-}
-if (-not (Test-Path -LiteralPath $SceneModel -PathType Leaf)) {
-    $python = Get-Command python.exe -ErrorAction SilentlyContinue
-    if (-not $python) { throw 'Python is required to produce the bundled pinned scene model on a clean build.' }
-    $requirements = Join-Path $repo 'scripts/scene-model-export.requirements.txt'
-    $pythonForExport = $python.Source
-    $dependencyCheck = & $pythonForExport -c "import importlib.metadata as m; p={'torch':'2.5.1','transformers':'4.55.4','onnx':'1.22.0','huggingface-hub':'0.34.4','safetensors':'0.4.5','numpy':'2.2.6'}; raise SystemExit(0 if all(m.version(k)==v for k,v in p.items()) else 1)" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        $exportVenv = Join-Path $cache 'scene-export-venv'
-        $exportPython = Join-Path $exportVenv 'Scripts/python.exe'
-        if (-not (Test-Path -LiteralPath $exportPython)) { Invoke-Checked $pythonForExport @('-m','venv',$exportVenv) $repo }
-        Invoke-Checked $exportPython @('-m','pip','install','--disable-pip-version-check','-r',$requirements) $repo
-        $pythonForExport = $exportPython
-    }
-    New-Item -ItemType Directory -Force -Path $sceneExportRoot, $sceneModelCache | Out-Null
-    Invoke-Checked $pythonForExport @((Join-Path $repo 'scripts/export-scene-model.py'),'--output-dir',$sceneExportRoot,'--cache-dir',$sceneModelCache) $repo
-}
+$SceneModel = Resolve-SceneModelPath $SceneModel
 $sceneModelInfo = Assert-SceneModel $SceneModel
 
 Invoke-Checked 'rustup.exe' @('toolchain', 'install', $pin.rustVersion, '--profile', 'minimal', '--no-self-update') $repo
@@ -789,6 +824,11 @@ Get-ChildItem -LiteralPath $releaseDir -Force | Copy-Item -Destination $packageD
 $vcRuntimeInventory = Copy-VcRuntime $vsToolchain.vcRuntimeDirectory $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'LICENSE'), (Join-Path $repo 'NOTICE') -Destination $packageDir
 Copy-Item -LiteralPath (Join-Path $repo 'third_party/licenses') -Destination (Join-Path $packageDir 'licenses') -Recurse -Force
+foreach ($sceneNotice in @(@{ source = $sceneModelInfo.readmePath; destination = 'scene-model-README.md' }, @{ source = $sceneModelInfo.noticePath; destination = 'scene-model-NOTICE.txt' })) {
+    if (Test-Path -LiteralPath $sceneNotice.source -PathType Leaf) {
+        Copy-Item -LiteralPath $sceneNotice.source -Destination (Join-Path $packageDir "licenses/$($sceneNotice.destination)") -Force
+    }
+}
 New-Item -ItemType Directory -Force -Path (Join-Path $packageDir 'licenses/onnxruntime') | Out-Null
 foreach ($ortNotice in @('LICENSE', 'ThirdPartyNotices.txt', 'Privacy.md')) {
     $sourceNotice = Join-Path $OrtSdk $ortNotice
@@ -816,6 +856,7 @@ $manifest = [ordered]@{
     onnxRuntimePrivacyNotice = 'licenses/onnxruntime/Privacy.md'
     sceneModelId = $pin.sceneModelId
     sceneModelPath = 'data/models/scene-model-v1.onnx'
+    sceneModelAssetSha256 = if ($SceneModel -eq (Join-Path $sceneModelAssetRoot 'scene-model-v1.onnx')) { $sceneModelAsset.sha256 } else { $null }
     sceneModelSha256 = $sceneModelInfo.sha256
     sceneModelSizeBytes = $sceneModelInfo.sizeBytes
     sceneModelLicense = 'licenses/scene-model-MIT.txt'

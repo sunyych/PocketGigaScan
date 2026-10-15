@@ -69,9 +69,11 @@ bash scripts/build-stitch-macos.sh \
   --output-dir .build/stitch-macos
 ```
 
-Keep the export's adjacent `scene-model-v1.manifest.json` and
-`scene-model-LICENSE.txt` beside the ONNX file; the builder validates and
-packages all three.
+Keep the export's adjacent `scene-model-v1.manifest.json`,
+`scene-model-README.md`, and `scene-model-NOTICE.txt` beside the ONNX file; the
+builder validates and packages them. The pinned model card declares MIT, while
+the pinned repository has no separate `LICENSE` file, so the notice preserves
+the source attribution without inventing a holder or copyright year.
 
 The script installs Flutter 3.44.2 from its checksum-pinned official archive if
 Flutter is not already available, then builds OpenCV 4.13.0 and libjxl 0.12.0

@@ -126,6 +126,21 @@ def main() -> None:
         cache_dir=str(args.cache_dir.resolve()) if args.cache_dir else None,
     )
     model = UperNetForSemanticSegmentation.from_pretrained(snapshot, use_safetensors=True).cpu().eval()
+    source_readme = Path(snapshot) / "README.md"
+    if not source_readme.is_file():
+        raise RuntimeError("The pinned model snapshot is missing its upstream README model card")
+    front_matter = source_readme.read_text(encoding="utf-8").split("---", 2)
+    if len(front_matter) < 3:
+        raise RuntimeError("The pinned upstream model README has no YAML metadata block")
+    readme_license = next((
+        line.split(":", 1)[1].strip().lower()
+        for line in front_matter[1].splitlines()
+        if line.strip().lower().startswith("license:")
+    ), None)
+    if readme_license != LOCK["license"].lower():
+        raise RuntimeError(
+            f"Pinned model card declares license {readme_license!r}, expected {LOCK['license']!r}"
+        )
     if model.config.num_labels != 150:
         raise RuntimeError(f"Expected 150 ADE20K labels, got {model.config.num_labels}")
     example = torch.linspace(-2, 2, 3 * 512 * 512, dtype=torch.float32).reshape(1, 3, 512, 512)
@@ -149,6 +164,8 @@ def main() -> None:
     manifest = {
         "schemaVersion": 1, "modelId": f"{LOCK['modelId']}@{LOCK['revision']}",
         "license": LOCK["license"], "onnxFile": onnx_path.name,
+        "sourceReadmeFile": "scene-model-README.md",
+        "licenseNoticeFile": "scene-model-NOTICE.txt",
         "sizeBytes": onnx_path.stat().st_size, "sha256": sha256(onnx_path),
         "input": LOCK["input"], "output": LOCK["output"],
         "preprocessing": LOCK["preprocessing"], "opset": LOCK["opset"],
@@ -160,6 +177,22 @@ def main() -> None:
     source_license = Path(snapshot) / "LICENSE"
     if source_license.is_file():
         (output_dir / "scene-model-LICENSE.txt").write_bytes(source_license.read_bytes())
+    (output_dir / "scene-model-README.md").write_bytes(source_readme.read_bytes())
+    source_url = f"https://huggingface.co/{LOCK['modelId']}/blob/{LOCK['revision']}/README.md"
+    notice = (
+        "Scene-model source and license notice\n\n"
+        f"Model: {LOCK['modelId']}\n"
+        f"Pinned revision: {LOCK['revision']}\n"
+        f"License: {LOCK['license']} (as declared in the pinned upstream README model-card metadata)\n"
+    )
+    if source_license.is_file():
+        notice += "The upstream LICENSE file is included separately as scene-model-LICENSE.txt.\n"
+    else:
+        notice += (
+            "The pinned model snapshot contains no LICENSE file. This package includes the complete upstream README model card and does not invent a copyright holder or year.\n"
+        )
+    notice += f"Source: {source_url}\n"
+    (output_dir / "scene-model-NOTICE.txt").write_text(notice, encoding="utf-8")
     if manifest["sizeBytes"] != LOCK["expectedSizeBytes"] or manifest["sha256"] != LOCK["expectedSha256"]:
         import onnx
 

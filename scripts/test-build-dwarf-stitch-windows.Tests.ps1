@@ -44,6 +44,24 @@ $verifiedCoreCopyAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $verifiedCoreCopyAst) 'Builder must verify and safely stage the freshly built native core DLL.'
 Invoke-Expression $verifiedCoreCopyAst.Extent.Text
+$saveVerifiedArchiveAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-VerifiedArchive'
+}, $true)
+Assert-True ($null -ne $saveVerifiedArchiveAst) 'Builder must validate downloaded model archives against their pinned SHA-256.'
+Invoke-Expression $saveVerifiedArchiveAst.Extent.Text
+$sceneModelAssertAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-SceneModel'
+}, $true)
+Assert-True ($null -ne $sceneModelAssertAst) 'Builder must check the model manifest and actual ONNX size/SHA-256.'
+Invoke-Expression $sceneModelAssertAst.Extent.Text
+$sceneModelResolverAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Resolve-SceneModelPath'
+}, $true)
+Assert-True ($null -ne $sceneModelResolverAst) 'Builder must resolve the frozen model asset or caller-provided override.'
+Invoke-Expression $sceneModelResolverAst.Extent.Text
 $jxlRootAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-JxlSdkRoot'
@@ -384,6 +402,13 @@ finally {
 
 Assert-True ($plan.onnxRuntimeVersion -eq '1.31.0' -and $plan.onnxRuntimeSha256 -eq '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195') 'ONNX Runtime SDK pin or checksum changed unexpectedly.'
 Assert-True ($plan.sceneModelId -eq 'openmmlab/upernet-convnext-tiny@876ffc56b819a829448f7e81e9f8606deef6fb65') 'Scene model revision changed unexpectedly.'
+Assert-True ($plan.sceneModelAssetUrl -match 'github\.com/sunyych/PocketGigaScan/releases/download/scene-model-v1/') 'Build plan does not expose the pinned public scene model release asset.'
+Assert-True ($plan.sceneModelAssetSha256 -match '^[0-9a-f]{64}$' -and $plan.sceneModelPath -match 'dependencies[\\/]scene-model-v1[\\/]scene-model-v1\.onnx$') 'Build plan does not point to the cached frozen model asset and its archive SHA.'
+$sceneModelLock = Get-Content -LiteralPath (Join-Path $repo 'scripts/scene-model-export.lock.json') -Raw | ConvertFrom-Json
+Assert-True ($plan.sceneModelAssetUrl -eq $sceneModelLock.releaseAsset.url -and $plan.sceneModelAssetSha256 -eq $sceneModelLock.releaseAsset.sha256) 'Builder model asset pin differs from the shared export lock.'
+Assert-True ($builderText -match '\$sceneModelAsset\.sizeBytes' -and $builderText -match 'Save-VerifiedArchive \$sceneModelAsset\.url \$sceneModelArchive \$sceneModelAsset\.sha256') 'Builder does not verify the frozen ZIP size and SHA before extraction.'
+Assert-True ($builderText -match "'scene-model-README\.md'" -and $builderText -match "'scene-model-NOTICE\.txt'") 'Builder does not require and package the model asset notices.'
+Assert-True ($builderText -notmatch 'export-scene-model\.py|scene-export-venv|huggingface-cache|Python is required to produce the bundled pinned scene model') 'A clean Windows package build must not export or download model weights through Python.'
 Assert-True ($builderText -match "'VERSION_NUMBER'" -and $builderText -match '\$ortSdkVersionPath.*ortVersion') 'Builder does not verify the extracted ONNX Runtime SDK version.'
 Assert-True ($cmake -match 'LUMIA_ORT_SDK' -and $cmake -match 'onnxruntime\.dll') 'CMake does not install the pinned ONNX Runtime DLL beside the native core.'
 Assert-True ($cmake -match '\$\{LUMIA_ORT_SDK_DIR\}/lib/onnxruntime\.dll' -and $cmake -match '\$\{LUMIA_ORT_SDK_DIR\}/lib/onnxruntime_providers_shared\.dll') 'CMake must install both runtime DLLs from the normalized official SDK lib directory.'
@@ -396,4 +421,62 @@ Assert-True ($builderText -match '\$sceneModelInfo\.path -Destination \(Join-Pat
 Assert-True ($builderText -match "'LICENSE', 'ThirdPartyNotices\.txt', 'Privacy\.md'") 'Windows package does not include the ONNX Runtime license and notices.'
 Assert-True ($builderText -match 'onnxRuntimeDllSha256' -and $builderText -match 'onnxRuntimeThirdPartyNotices' -and $builderText -match 'sceneModelSha256 = \$sceneModelInfo\.sha256') 'Build manifest does not record the packaged runtime and model hashes/notices.'
 Assert-True ($builderText -match '\$stagedModelSha -ne \$sceneModelInfo\.sha256') 'Builder does not verify the staged scene model against its locked SHA-256.'
+
+$sceneModelTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('pocket-scene-model-asset-test-' + [guid]::NewGuid().ToString('N'))
+$sceneModelTestRoot = [IO.Path]::GetFullPath($sceneModelTestRoot)
+Assert-True ($sceneModelTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -and
+    [IO.Path]::GetFileName($sceneModelTestRoot) -match '^pocket-scene-model-asset-test-[0-9a-f]{32}$') 'Refusing unsafe scene model asset test fixture path.'
+try {
+    $cache = Join-Path $sceneModelTestRoot 'dependencies'
+    $assetSource = Join-Path $sceneModelTestRoot 'asset-source'
+    $sceneModelAssetRoot = Join-Path $cache 'scene-model-v1'
+    New-Item -ItemType Directory -Force -Path $cache, $assetSource | Out-Null
+    $modelFixture = Join-Path $assetSource 'scene-model-v1.onnx'
+    [IO.File]::WriteAllBytes($modelFixture, [Text.Encoding]::ASCII.GetBytes('canonical ONNX fixture'))
+    $modelFixtureSha = (Get-FileHash -LiteralPath $modelFixture -Algorithm SHA256).Hash.ToLowerInvariant()
+    $manifestFixture = [ordered]@{
+        schemaVersion = 1
+        modelId = 'fixture/model@revision'
+        onnxFile = 'scene-model-v1.onnx'
+        sizeBytes = (Get-Item -LiteralPath $modelFixture).Length
+        sha256 = $modelFixtureSha
+    }
+    $manifestFixture | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $assetSource 'scene-model-v1.manifest.json') -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $assetSource 'scene-model-README.md') -Value 'Model card fixture' -Encoding utf8
+    Set-Content -LiteralPath (Join-Path $assetSource 'scene-model-NOTICE.txt') -Value 'License notice fixture' -Encoding utf8
+    $sceneModelArchive = Join-Path $cache 'scene-model-fixture.zip'
+    Compress-Archive -Path (Join-Path $assetSource '*') -DestinationPath $sceneModelArchive
+    $sceneModelAsset = [pscustomobject]@{
+        url = 'https://example.invalid/fixture.zip'
+        sha256 = (Get-FileHash -LiteralPath $sceneModelArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        sizeBytes = (Get-Item -LiteralPath $sceneModelArchive).Length
+        fileName = [IO.Path]::GetFileName($sceneModelArchive)
+    }
+    $pin = [pscustomobject]@{ sceneModelId = 'fixture/model@revision' }
+    $sceneModelLock = [pscustomobject]@{
+        expectedSizeBytes = (Get-Item -LiteralPath $modelFixture).Length
+        expectedSha256 = $modelFixtureSha
+    }
+
+    $resolvedSceneModel = Resolve-SceneModelPath ''
+    Assert-True (Test-Path -LiteralPath $resolvedSceneModel -PathType Leaf) 'Frozen model asset was not extracted from the verified archive.'
+    $verifiedSceneModel = Assert-SceneModel $resolvedSceneModel
+    Assert-True ($verifiedSceneModel.sha256 -eq $modelFixtureSha -and $verifiedSceneModel.readmePath -and $verifiedSceneModel.noticePath) 'Extracted model metadata or bundled notices were not verified.'
+
+    $overridePath = Join-Path $sceneModelTestRoot 'caller-model.onnx'
+    Assert-True ((Resolve-SceneModelPath $overridePath) -eq [IO.Path]::GetFullPath($overridePath)) 'Caller-provided SceneModel override was not preserved.'
+
+    [IO.File]::AppendAllText($sceneModelArchive, 'tampered')
+    $tamperedArchiveRejected = $false
+    try { Resolve-SceneModelPath '' | Out-Null } catch { $tamperedArchiveRejected = $true }
+    Assert-True $tamperedArchiveRejected 'Scene model archive SHA mismatch was not rejected before reuse.'
+
+    [IO.File]::AppendAllText($resolvedSceneModel, 'tampered')
+    $tamperedModelRejected = $false
+    try { Assert-SceneModel $resolvedSceneModel } catch { $tamperedModelRejected = $true }
+    Assert-True $tamperedModelRejected 'Model metadata accepted an ONNX file whose actual SHA-256 changed.'
+}
+finally {
+    if (Test-Path -LiteralPath $sceneModelTestRoot) { Remove-Item -LiteralPath $sceneModelTestRoot -Recurse -Force }
+}
 Write-Host 'Windows builder plan, signing metadata, vendored core paths, release safety, and app icon tests passed.'

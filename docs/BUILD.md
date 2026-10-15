@@ -47,7 +47,8 @@ Rust 1.88.0, CMake, Ninja, and Python installed. The builder prepares pinned
 native dependencies from verified downloads and builds the normal Release
 application. `.github/workflows/macos-build.yml` performs the same build on an
 Apple silicon runner and uploads a test ZIP. The CI model preparation job
-exports the pinned model on Windows before transferring it to the Mac job.
+downloads the frozen model dependency ZIP anonymously, verifies archive/model
+hashes and license notices, and transfers those exact files to the Mac job.
 
 People protection and water smoothing are available only on Windows and macOS.
 The model and ONNX Runtime are included in desktop test packages; using them

@@ -51,6 +51,30 @@ def verify_model(model_path: Path, manifest_path: Path) -> dict:
         raise ValueError("Scene model exporter manifest does not match the ONNX file")
     if manifest.get("modelId") != f"{model_lock['modelId']}@{model_lock['revision']}":
         raise ValueError("Scene model exporter manifest identity does not match the pinned revision")
+    if manifest.get("license") != model_lock["license"]:
+        raise ValueError("Scene model exporter manifest license differs from the pinned model-card license")
+    readme_path = model_path.parent / "scene-model-README.md"
+    if manifest.get("sourceReadmeFile") != "scene-model-README.md" or not readme_path.is_file():
+        raise ValueError("Pinned upstream model README is missing from the model export")
+    if manifest.get("licenseNoticeFile") != "scene-model-NOTICE.txt" or not (model_path.parent / "scene-model-NOTICE.txt").is_file():
+        raise ValueError("Pinned model license notice is missing from the model export")
+    readme_parts = readme_path.read_text(encoding="utf-8").split("---", 2)
+    readme_license = None
+    if len(readme_parts) >= 3:
+        readme_license = next((
+            line.split(":", 1)[1].strip().lower()
+            for line in readme_parts[1].splitlines()
+            if line.strip().lower().startswith("license:")
+        ), None)
+    if readme_license != model_lock["license"].lower():
+        raise ValueError("Pinned upstream model README does not declare the locked model license")
+    notice_path = model_path.parent / "scene-model-NOTICE.txt"
+    if manifest.get("licenseNoticeFile") != "scene-model-NOTICE.txt" or not notice_path.is_file():
+        raise ValueError("Pinned model license notice is missing from the model export")
+    notice = notice_path.read_text(encoding="utf-8")
+    for required_notice_text in (model_lock["modelId"], model_lock["revision"], model_lock["license"]):
+        if required_notice_text.lower() not in notice.lower():
+            raise ValueError(f"Pinned model notice is missing its source attribution field: {required_notice_text}")
     return {"path": str(model_path), "sizeBytes": actual_size, "sha256": actual_sha, "manifest": manifest}
 
 

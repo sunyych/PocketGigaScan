@@ -47,7 +47,7 @@ Files: `macos/**`, `tool/native/apple/**`, `APPLE-BUILD.md`, `scripts/build-stit
 - [x] Add the real tracked Runner, PocketGigaScan identity and a direct-distribution entitlement configuration that supports photo import, arbitrary exports and task recovery.
 - [x] Source-build verified OpenCV/JXL, use a verified official arm64 ORT SDK, and compile this repository's Rust engine.
 - [x] Stage model/resources/licenses, rewrite/verify dylib dependency closure, ad-hoc sign inside-out, and ZIP the resulting app with a build manifest.
-- [x] Export the model in a Windows CI preparation job using the existing pinned exporter; Mac jobs consume the verified artifact, avoiding unsupported Intel PyTorch wheels or architecture-dependent re-exports.
+- [x] Resolve the frozen model dependency ZIP from the shared SHA-256/size lock; verify archive, graph, manifest and source/license notices before transferring it to Mac CI. Keep the source converter as a strict reference-profile tool.
 - [ ] Run `python -m unittest discover -s scripts/tests -p 'test_macos_build.py'`, shell syntax checks, then native Mac CI build and packaged-FFI/model/export smoke tests.
 
 ## Coordinator acceptance
@@ -58,3 +58,5 @@ Files: `macos/**`, `tool/native/apple/**`, `APPLE-BUILD.md`, `scripts/build-stit
 - [x] Record local/static, hosted Mac native, and user physical/visual evidence separately in the collaboration ledger and roadmap.
 
 Implementation and local validation are complete. Hosted Mac compilation/package smoke and user physical/visual acceptance are pending, and are tracked separately. Windows/Android CI staging/install regressions received narrow contract-tested fixes during review.
+
+Hosted re-export exposed backend-dependent Conv/BatchNorm folding. The canonical model and its hash remain unchanged; builds now consume a separate frozen model dependency ZIP, as allowed by the original asset design. The concrete 219959932-byte ZIP is prepared locally with SHA-256 cb9769f81929590711a2a0b84373946c1b429c96ff4eac6bfc4ebe22eb250c41. Automatic approval review rejected public Release creation as requiring explicit persistent-publication authorization; that user question is pending. No release was created or uploaded.

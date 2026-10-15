@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate the Windows multi-resolution ICO from the DWARF Stitch mark.
+"""Regenerate the Windows ICO or macOS PNG icons from the DWARF Stitch mark.
 
 The adjacent SVG is the editable vector master. The Pillow drawing below uses
 the same 256-unit geometry so generation needs no platform-specific renderer.
 """
 
+import argparse
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -13,6 +14,8 @@ from PIL import Image, ImageDraw
 ROOT = Path(__file__).resolve().parents[1]
 DESTINATION = ROOT / "Apps/Flutter/stitch_app/windows/runner/resources/app_icon.ico"
 SIZES = (16, 24, 32, 48, 64, 128, 256)
+MACOS_DESTINATION = ROOT / "Apps/Flutter/stitch_app/macos/Runner/Assets.xcassets/AppIcon.appiconset"
+MACOS_SIZES = (16, 32, 64, 128, 256, 512, 1024)
 
 
 def draw_mark(size: int) -> Image.Image:
@@ -45,10 +48,24 @@ def draw_mark(size: int) -> Image.Image:
 
 
 def main() -> None:
-    DESTINATION.parent.mkdir(parents=True, exist_ok=True)
-    images = [draw_mark(size) for size in SIZES]
-    images[-1].save(DESTINATION, format="ICO", sizes=[(size, size) for size in SIZES])
-    print(f"Generated {DESTINATION}")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--macos",
+        action="store_true",
+        help="Generate the macOS AppIcon.appiconset PNGs instead of the Windows ICO.",
+    )
+    args = parser.parse_args()
+    if args.macos:
+        MACOS_DESTINATION.mkdir(parents=True, exist_ok=True)
+        for size in MACOS_SIZES:
+            destination = MACOS_DESTINATION / f"app_icon_{size}.png"
+            draw_mark(size).save(destination, format="PNG", optimize=True)
+            print(f"Generated {destination}")
+    else:
+        DESTINATION.parent.mkdir(parents=True, exist_ok=True)
+        images = [draw_mark(size) for size in SIZES]
+        images[-1].save(DESTINATION, format="ICO", sizes=[(size, size) for size in SIZES])
+        print(f"Generated {DESTINATION}")
 
 
 if __name__ == "__main__":
