@@ -60,20 +60,41 @@ checked against that actual Mach-O minimum. Intel Macs are not included in this
 first package.
 
 On macOS with Xcode command-line tools, CMake, Python 3, and Rust 1.88.0, build
-with the exact ONNX model and exporter manifest produced by the pinned model
-exporter:
+with the fixed model release asset pinned in
+`scripts/scene-model-export.lock.json`. Download and verify the ZIP, then
+extract and validate its ONNX model and manifest:
 
 ```sh
+set -euo pipefail
+model_dir="$PWD/.build/scene-model-v1"
+mkdir -p "$model_dir"
+model_zip="$model_dir/PocketGigaScan-scene-model-v1.zip"
+asset_url="$(python3 -c 'import json; print(json.load(open("scripts/scene-model-export.lock.json"))["releaseAsset"]["url"])')"
+asset_sha="$(python3 -c 'import json; print(json.load(open("scripts/scene-model-export.lock.json"))["releaseAsset"]["sha256"])')"
+curl --fail --location "$asset_url" --output "$model_zip"
+actual_sha="$(shasum -a 256 "$model_zip" | awk '{print $1}')"
+test "$actual_sha" = "$asset_sha"
+ditto -x -k "$model_zip" "$model_dir"
+python3 scripts/verify-macos-package.py \
+  --model "$model_dir/scene-model-v1.onnx" \
+  --manifest "$model_dir/scene-model-v1.manifest.json"
+
 bash scripts/build-stitch-macos.sh \
-  --scene-model /path/to/scene-model-v1.onnx \
+  --scene-model "$model_dir/scene-model-v1.onnx" \
   --output-dir .build/stitch-macos
 ```
 
-Keep the export's adjacent `scene-model-v1.manifest.json`,
-`scene-model-README.md`, and `scene-model-NOTICE.txt` beside the ONNX file; the
-builder validates and packages them. The pinned model card declares MIT, while
-the pinned repository has no separate `LICENSE` file, so the notice preserves
-the source attribution without inventing a holder or copyright year.
+The fixed ZIP contains the model, manifest, `scene-model-README.md`, and
+`scene-model-NOTICE.txt` beside the ONNX file; the builder validates and
+packages them. CI verifies the ZIP SHA-256 and then the ONNX SHA-256 from the
+shared lock before the Mac build. The pinned model card declares MIT, while the
+pinned repository has no separate `LICENSE` file, so the notice preserves the
+source attribution without inventing a holder or copyright year.
+
+`scripts/export-scene-model.py` remains a reference and QA exporter for the
+pinned upstream model. It enforces the canonical ONNX digest, but CPU backend
+rounding can vary; the product build consumes the already validated release
+asset instead of re-exporting the model on each runner.
 
 The script installs Flutter 3.44.2 from its checksum-pinned official archive if
 Flutter is not already available, then builds OpenCV 4.13.0 and libjxl 0.12.0
@@ -105,8 +126,9 @@ and JPEG XL. Close and reopen the app to confirm the task can resume and the
 original photos remain available. This manual check is separate from the Mac
 CI inference and package checks.
 
-The macOS CI runs on GitHub's `macos-15` Apple Silicon runner. It prepares the
-canonical model on Windows using the existing pinned exporter, then builds the
-arm64 app and runs the packaged core FFI, 512x512 ONNX CPU inference, Mach-O
+The macOS CI is configured for GitHub's `macos-15` Apple Silicon runner. It
+downloads and verifies the fixed model asset, then builds the arm64 app and
+runs the packaged core FFI, 512x512 ONNX CPU inference, Mach-O
 architecture/minimum-version, signature, and dependency-closure checks on Mac.
-Those checks do not replace visual review of a real panorama on a user's Mac.
+Hosted macOS build and inference qualification is still pending. Those checks
+do not replace visual review of a real panorama on a user's Mac.

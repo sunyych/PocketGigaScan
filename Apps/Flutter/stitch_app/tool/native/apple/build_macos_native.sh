@@ -57,10 +57,10 @@ download() {
 }
 
 extract_source() {
-  local archive="$1" destination="$2" marker="$3"
+  local archive="$1" destination="$2" marker="$3" strip_components="${4:-1}"
   if [[ ! -f "$destination/$marker" ]]; then
     mkdir -p "$destination"
-    tar -xzf "$archive" --strip-components=1 -C "$destination"
+    tar -xzf "$archive" --strip-components="$strip_components" -C "$destination"
   fi
   [[ -f "$destination/$marker" ]] || { echo "Source marker missing after extraction: $destination/$marker" >&2; exit 66; }
 }
@@ -127,8 +127,12 @@ cmake --build "$jxl_build" --target install --parallel "$(sysctl -n hw.logicalcp
 ort_archive="$cache/downloads/onnxruntime-osx-arm64-1.31.0.tgz"
 ort_root="$cache/sdk/onnxruntime/onnxruntime-osx-arm64-1.31.0"
 download 'https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-osx-arm64-1.31.0.tgz' "$ort_archive" '1031b36dd3bdaa8d976a6130d9cf2a05e9be320b93ae804f8427b91dc3432afc'
-extract_source "$ort_archive" "$ort_root" include/onnxruntime_cxx_api.h
+# ORT paths start with ./<release-root>/, so strip both components into the SDK root.
+extract_source "$ort_archive" "$ort_root" include/onnxruntime_cxx_api.h 2
 [[ "$(cat "$ort_root/VERSION_NUMBER" | tr -d '\r\n')" == '1.31.0' ]] || { echo 'Unexpected ONNX Runtime SDK version.' >&2; exit 66; }
+for artifact in include/onnxruntime_c_api.h lib/libonnxruntime.dylib LICENSE ThirdPartyNotices.txt; do
+  [[ -f "$ort_root/$artifact" ]] || { echo "Missing expected ONNX Runtime SDK file: $ort_root/$artifact" >&2; exit 66; }
+done
 
 native_dir="$app/macos/Native"
 runtime_dir="$native_dir/runtime"

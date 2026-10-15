@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:stitch_app/batch_queue_page.dart';
 import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
@@ -77,8 +78,8 @@ const _states = <BatchItemState>[
 BatchQueue _fixtureQueue() => BatchQueue(
   id: 'queue-screenshot',
   createdAt: DateTime.utc(2026, 10, 3),
-  parentDirectory: r'C:\Scans\AutumnTrip',
-  outputDirectory: r'C:\Scans\AutumnTrip_stitched',
+  parentDirectory: p.join('Scans', 'AutumnTrip'),
+  outputDirectory: p.join('Scans', 'AutumnTrip_stitched'),
   items: [
     for (var index = 0; index < _states.length; index++)
       BatchQueueItem(
@@ -93,7 +94,7 @@ BatchQueue _fixtureQueue() => BatchQueue(
           '07_InteriorRoom',
           '08_BlurrySet',
         ][index],
-        sourceDirectory: r'C:\Scans\AutumnTrip\set',
+        sourceDirectory: p.join('Scans', 'AutumnTrip', 'set'),
         state: _states[index],
         message: switch (_states[index]) {
           BatchItemState.failed => '纹理不足，无法可靠配准',
