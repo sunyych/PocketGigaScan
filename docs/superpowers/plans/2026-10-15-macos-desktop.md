@@ -48,15 +48,15 @@ Files: `macos/**`, `tool/native/apple/**`, `APPLE-BUILD.md`, `scripts/build-stit
 - [x] Source-build verified OpenCV/JXL, use a verified official arm64 ORT SDK, and compile this repository's Rust engine.
 - [x] Stage model/resources/licenses, rewrite/verify dylib dependency closure, ad-hoc sign inside-out, and ZIP the resulting app with a build manifest.
 - [x] Resolve the frozen model dependency ZIP from the shared SHA-256/size lock; verify archive, graph, manifest and source/license notices before transferring it to Mac CI. Keep the source converter as a strict reference-profile tool.
-- [ ] Run `python -m unittest discover -s scripts/tests -p 'test_macos_build.py'`, shell syntax checks, then native Mac CI build and packaged-FFI/model/export smoke tests.
+- [x] Run `python -m unittest discover -s scripts/tests -p 'test_macos_build.py'`, shell syntax checks, then native Mac CI build and packaged-FFI/model/export smoke tests.
 
 ## Coordinator acceptance
 
 - [x] Independently review platform gates, Unicode paths, model/runtime loading and packaging contracts.
 - [x] Run Rust formatting/native tests, Flutter analysis/full tests, Windows/Android/Mac build contracts and a normal Windows Release build for regression.
-- [ ] Push the branch and inspect actual Mac CI results; collect the usable Mac test app when available.
+- [x] Push the branch and inspect actual Mac CI results; collect and independently verify the usable Mac test ZIP.
 - [x] Record local/static, hosted Mac native, and user physical/visual evidence separately in the collaboration ledger and roadmap.
 
-Implementation and local validation are complete. Hosted Mac compilation/package smoke and user physical/visual acceptance are pending, and are tracked separately. Windows/Android CI staging/install regressions received narrow contract-tested fixes during review.
+Implementation, independent review, Windows regression and hosted Mac Release/package/model/export qualification are complete. [Run 38817678302](https://github.com/sunyych/PocketGigaScan/actions/runs/38817678302) at `96c6ae5` passes 340 Flutter / 241 native tests (3 optional ignored), 12 package contracts and packaged inference/render/PNG/TIFF/JXL checks. The untouched distribution ZIP and all 263 manifest file hashes are independently verified. User physical launch/import/resume and real-photo visual acceptance remain pending and are tracked separately. Windows/Android CI staging/install regressions received narrow contract-tested fixes during review.
 
 Hosted re-export exposed backend-dependent Conv/BatchNorm folding. The canonical model and its hash remain unchanged; builds now consume a separate frozen model dependency ZIP, as allowed by the original asset design. The concrete 219959932-byte ZIP is prepared locally with SHA-256 cb9769f81929590711a2a0b84373946c1b429c96ff4eac6bfc4ebe22eb250c41. The original independent-asset plan supplied publication authorization on continuation. Review accepted that evidence; the exact ZIP is published as the non-latest scene-model-v1 prerelease, and anonymous download plus hosted preparation verify its pinned size and SHA-256. No end-user login is required.

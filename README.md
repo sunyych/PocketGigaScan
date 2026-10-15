@@ -1,6 +1,6 @@
 # PocketGigaScan
 
-Independent DWARF panorama stitching on shared Flutter/Rust processing layers. Windows has a published build; the Android ARM64 APK passes host tests and packaging inspection, with connected-device qualification pending. An Apple silicon macOS test client is being qualified separately; the portable processing boundary is retained for future iOS work. This product does not use the retired OpenPocketCine/DJI application or protocol code.
+Independent DWARF panorama stitching on shared Flutter/Rust processing layers. Windows has a published build; the Android ARM64 APK passes host tests and packaging inspection, with connected-device qualification pending. An Apple silicon macOS test client passes source Release, offline inference and export checks; user Mac acceptance is pending, and the portable processing boundary is retained for future iOS work. This product does not use the retired OpenPocketCine/DJI application or protocol code.
 
 ## Download
 
@@ -13,7 +13,7 @@ Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workf
 produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
 runtime and licenses. See [Mac build and test instructions](Apps/Flutter/stitch_app/APPLE-BUILD.md)
 and [qualification evidence](docs/gigascan/evidence/MACOS-DESKTOP-2026-10-15.md).
-A successful package build is separate from user testing on a Mac.
+The [qualified test build](https://github.com/sunyych/PocketGigaScan/actions/runs/38817678302) is version 1.5.1+30. Mac launch/import/resume and real-photo visual acceptance remain user testing.
 
 ## Code signing policy
 

@@ -60,6 +60,9 @@ The Mac test app uses ad-hoc signing for local testing and is not notarized.
 Dependency hashes, licenses, architecture, bundled dylib paths, signatures,
 and native smoke checks are validated during packaging. A successful build
 is separate from running the app and inspecting real final exports on a Mac.
+[Run 38817678302](https://github.com/sunyych/PocketGigaScan/actions/runs/38817678302) qualifies version 1.5.1+30: 241 native tests
+(3 optional ignored), 340 Flutter tests, 12 packaging contracts, and packaged
+model/render/PNG/TIFF/JXL checks pass. See the [artifact evidence](gigascan/evidence/MACOS-DESKTOP-2026-10-15.md).
 
 ## Android
 

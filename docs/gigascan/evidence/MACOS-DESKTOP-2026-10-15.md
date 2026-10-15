@@ -2,6 +2,25 @@
 
 Date: 2026-10-15. Branch: `codex/macos-desktop`. This development uses an isolated managed worktree based on `605d67c`; the dirty original checkout, its photographs, task records and exports are preserved.
 
+## Qualified test package
+
+[Hosted Apple Silicon run 38817678302](https://github.com/sunyych/PocketGigaScan/actions/runs/38817678302) **passes** the normal source Release and final packaged checks at `96c6ae5d1e98c8719a91e40f17bfe336e30a6c0d`. Version: **1.5.1+30**, arm64, declared minimum macOS 14.0. The runner is native Apple silicon on macOS 15; a separate physical Mac 14 launch is not claimed.
+
+| Check | Final result |
+| --- | --- |
+| Flutter analysis and full tests on Mac | Clean; 340 passed, including strict separate Mac goldens |
+| Rust formatting and native tests on Mac | Passed; 241 passed, 3 optional fixtures ignored |
+| Mac packaging contracts | 12 passed |
+| Normal source Release app | Built successfully with Xcode 16.4 |
+| arm64 slice, deployment floor, bundled dependency closure, ad-hoc signature | Passed on the final staged app |
+| Packaged model/public-job smoke | Actual CPU inference, two persisted source masks and scene-enabled rendering passed with both options enabled, deghost and local warp |
+| Packaged PNG / TIFF / JPEG XL exports | All passed; source/cache/export paths include Chinese and emoji |
+| Downloaded distribution integrity | Sidecar matched; all 263 manifest file hashes, model, version, core arm64 header, executable permission and framework links verified without unpacking or modifying the inner ZIP |
+
+Distribution artifact ID: `12011978126`. Inner ZIP: `PocketGigaScan-macos-arm64.zip`, **273055977 bytes**. SHA-256: `b5cb6c2bc4f430c4c51ae08b0aaf636b475dd156db0908bed36d3edd21dabdf1`. The adjacent `.sha256` uses the relative ZIP filename. A persistent local delivery copy is under `.local/deliverables/macos-1.5.1+30-96c6ae5/`; the original CI artifact ZIP, full job log and independent ZIP verification JSON are under `.local/macos-desktop/`. All remain excluded from Git. The package contains the fixed offline model, ONNX Runtime and dependency notices; users need no account, network or Python. It is ad-hoc signed for testing and is not notarized.
+
+**Remaining user acceptance:** launch/import/resume on the user's Mac and real-photograph final tiles/export crops. Hosted synthetic inputs prove execution and packaging; reviewed test goldens prove expected test rendering. Neither establishes small-person, dense-crowd, shoreline or water-ripple visual quality on a real panorama. Original missing body parts are not reconstructed.
+
 ## Product scope
 
 - Windows and macOS expose independent people protection and water smoothing. The desktop test package includes the fixed ONNX model and CPU runtime; end users need no login, network or Python.
@@ -22,20 +41,20 @@ Review of existing hosted failures also found two independent build issues: the 
 | Check | Result |
 | --- | --- |
 | Rust formatting | Passed |
-| Native core tests with pinned OpenCV/JXL/ORT | 243 passed, 3 ignored (both full Windows builds) |
+| Native core tests with pinned OpenCV/JXL/ORT | 243 passed, 3 ignored (three normal Windows builds) |
 | Flutter analysis | No issues |
-| Flutter full suite | 337 passed (both full Windows builds) |
+| Flutter full suite | 337 passed in normal builders; current separate full rerun 340 passed |
 | Normal Windows source Release builder | Passed, 1.5.1+30 signing input; not a signed distribution |
 | Windows and Android build contracts | Passed; Windows contract executes both same-path and external-target DLL staging |
-| Mac shell syntax and package contracts on Windows | Passed; these do not constitute a Mac build |
+| Mac shell syntax and package contracts on Windows | Passed (12 contracts); these alone do not constitute a Mac build |
 | Canonical model verifier on actual ONNX + exporter manifest | Passed: 237503947 bytes, SHA-256 a997b66ac8ca75632817a62f253e47300b29edbeed6f62b1f04d98fe5bc12a13 |
 | UTF-8 private bridge regression | Real public people fixture with model path containing Chinese and emoji: scene analysis/render and PNG/TIFF/JXL exports passed |
 
 The Unicode-path run used the freshly source-built Windows DLL, preserved both input photos, reused the baseline geometry, and checked final tile/export pixels through the existing private verifier. Artifacts remain local under `.local/macos-desktop/unicode-scene-smoke`; no model, cache, photograph, export or executable is committed. This is Windows native functional evidence, not Mac visual acceptance.
 
-## Hosted Mac checks and remaining acceptance
+## Hosted bring-up history and manual acceptance
 
-The new workflow consumes the fixed canonical model dependency ZIP and transfers its verified graph, manifest and source/license notices to the Mac arm64 job. The Mac build is required to run core tests, Flutter analysis/tests, source Release build, architecture/minimum-OS/dependency/signature checks, and scene-enabled public-job rendering plus PNG/TIFF/JXL export against the packaged core. Actual hosted results will be recorded after the branch is pushed.
+The new workflow consumes the fixed canonical model dependency ZIP and transfers its verified graph, manifest and source/license notices to the Mac arm64 job. The Mac build is required to run core tests, Flutter analysis/tests, source Release build, architecture/minimum-OS/dependency/signature checks, and scene-enabled public-job rendering plus PNG/TIFF/JXL export against the packaged core. The final qualified result is recorded above. The following notes retain intermediate failures and repairs; their pending statements describe those earlier runs.
 
 A Windows host cannot establish that Xcode builds or launches the app. Mac build success, Mac application launch/import/resume behavior, and real-photograph visual quality are separate evidence. The user will test final tiles and exported same-coordinate crops on their Mac, especially small people, crowded areas, source/tile boundaries, shoreline people and water ripples. Original missing body parts are not reconstructed.
 

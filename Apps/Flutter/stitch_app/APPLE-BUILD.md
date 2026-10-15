@@ -136,5 +136,10 @@ The macOS CI is configured for GitHub's `macos-15` Apple Silicon runner. It
 downloads and verifies the fixed model asset, then builds the arm64 app and
 runs the packaged core FFI, 512x512 ONNX CPU inference, Mach-O
 architecture/minimum-version, signature, and dependency-closure checks on Mac.
-Hosted macOS build and inference qualification is still pending. Those checks
-do not replace visual review of a real panorama on a user's Mac.
+[Hosted run 38817678302](https://github.com/sunyych/PocketGigaScan/actions/runs/38817678302) qualifies version 1.5.1+30 at source
+commit `96c6ae5`: the normal Release app, all 340 Flutter / 241 native tests
+(3 optional native fixtures ignored), 12 packaging contracts, and packaged
+model/render/PNG/TIFF/JXL checks pass. The resulting ZIP and its relative
+checksum file are available in that run's `PocketGigaScan-macos-arm64-96c6ae5...`
+artifact. Those checks do not replace launch/import/resume and visual review of
+a real panorama on a user's Mac.
