@@ -1,0 +1,98 @@
+name: PocketGigaScan iOS build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-build:
+    name: iOS device and simulator app bundles
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Flutter
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: '3.44.2'
+          channel: stable
+          cache: true
+          pub-cache: true
+          pub-cache-path: ${{ github.workspace }}/.local/pub-cache
+
+      - name: Record Apple toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          flutter --version
+
+      - name: Validate iOS build and artifact contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test_ios_build.py
+
+      - name: Resolve Flutter dependencies from lockfile
+        working-directory: Apps/Flutter/stitch_app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter pub get --enforce-lockfile
+
+      - name: Build unsigned iOS device Release app
+        working-directory: Apps/Flutter/stitch_app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build ios --release --no-codesign
+          test -d build/ios/iphoneos/Runner.app
+
+      - name: Build unsigned iOS simulator Debug app
+        working-directory: Apps/Flutter/stitch_app
+        shell: bash
+        run: |
+          set -euo pipefail
+          flutter build ios --debug --simulator --no-codesign
+          test -d build/ios/iphonesimulator/Runner.app
+
+      - name: Validate and package both app bundles
+        shell: bash
+        env:
+          IOS_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/package_ios_build.py \
+            --app Apps/Flutter/stitch_app/build/ios/iphoneos/Runner.app \
+            --kind device \
+            --configuration Release \
+            --output-dir .build/ios-artifacts \
+            --source-revision "$IOS_SOURCE_REVISION" \
+            --flutter-version 3.44.2
+          python3 scripts/package_ios_build.py \
+            --app Apps/Flutter/stitch_app/build/ios/iphonesimulator/Runner.app \
+            --kind simulator \
+            --configuration Debug \
+            --output-dir .build/ios-artifacts \
+            --source-revision "$IOS_SOURCE_REVISION" \
+            --flutter-version 3.44.2
+
+      - name: Upload unsigned app bundles, manifests, and SHA-256 files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-iOS-${{ github.sha }}
+          path: .build/ios-artifacts/*
+          if-no-files-found: error
+          retention-days: 14

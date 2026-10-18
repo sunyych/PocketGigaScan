@@ -1,0 +1,124 @@
+# Build and download
+
+Windows build entry: `scripts/build-dwarf-stitch-windows.ps1`. The source engine is `native/core`; no external sibling checkout or machine-local DLL is required. The builder prepares pinned OpenCV and verified official libjxl dependencies, runs native/application checks, and builds normal `lib/main.dart` Release. Its `-PrepareSigning` mode creates an unsigned signing-input ZIP for local inspection and CI handoff; this input is not a distributable release.
+
+GitHub workflow: `.github/workflows/windows-build.yml`. Each run builds a signing input; PRs and fork builds upload only a short-retention, unsigned non-release input. Canonical repository pushes and manual dispatches enter the protected SignPath signing gate. A default-branch push updates the stable `latest` prerelease only after signing and package verification succeed. Source, workflow and build logs identify the exact commit. Do not distribute the EXE by itself. See the [Windows code signing policy](WINDOWS-SIGNING.md).
+
+The ZIP includes the selected Visual Studio toolchain's x64 Release C++ runtime DLLs beside the EXE. The builder checks their PE architecture and required files, and records versions and SHA-256 inventory. This uses Microsoft's [app-local deployment](https://learn.microsoft.com/en-us/cpp/windows/choosing-a-deployment-method?view=msvc-170); runtime updates are delivered by rebuilding the application package. Failed Flutter screenshot tests upload their diagnostic PNGs for seven days.
+
+## Local setup
+
+Install Flutter 3.44.2 (Dart 3.12.2), Rust 1.88.0 with MSVC target, Visual Studio 2026 C++ desktop tools (MSVC 14.50 or newer), CMake with the Visual Studio 18 generator, Python and Git. Run the PowerShell builder from the repository. The verified libjxl static SDK needs the newer Microsoft STL; VS 2022's 14.44 libraries cannot link it. CI uses the explicit `windows-2025-vs2026` hosted image. Native dependencies may be reused through explicit path options; clean CI downloads/builds them independently.
+
+```powershell
+pwsh -File scripts/build-dwarf-stitch-windows.ps1 -PrepareSigning
+# Optional verified local dependency reuse:
+pwsh -File scripts/build-dwarf-stitch-windows.ps1 `
+  -PrepareSigning `
+  -OpenCvDir C:/SDKs/opencv-4.13.0/install `
+  -JxlSdk C:/SDKs/libjxl-0.12.0 `
+  -DjxlExecutable C:/SDKs/libjxl-0.12.0/tools/djxl.exe `
+  -FlutterPath C:/SDKs/flutter/bin/flutter.bat
+```
+
+The builder verifies dependency versions/checksums. Its `-PlanOnly` option
+prints the pinned versions and output paths without building.
+
+Local test executables must run from a normal user directory. A development
+workspace may carry an inherited Windows Low Mandatory Level label; an EXE
+created or extracted there then starts at low integrity even when Explorer is
+running normally. That process cannot write ordinary AppData task records.
+Extract the release ZIP into a fresh Downloads directory and check the process
+integrity when diagnosing `Access is denied` errors. Do not grant broad AppData
+permissions or require administrator execution. ZIP contents do not carry the
+development directory's Windows ACL or mandatory label.
+
+Current Windows application binaries remain unsigned while SignPath Foundation review and repository setup are pending. `-PrepareSigning` output is development material and must not be presented as a signed release. Third-party DLL bytes and any vendor signatures they already carry are preserved unchanged. SmartScreen's unknown-publisher warning is a distribution/signing concern, distinct from task-storage access and import-dialog failures. See Microsoft's [SmartScreen documentation](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation).
+
+## macOS (Apple silicon test client)
+
+The macOS client uses the same Flutter UI and vendored Rust/OpenCV engine.
+The initial package targets Apple silicon (M1 or later) running macOS 14 or later. Intel packaging is not
+qualified by this build. See [Apple build instructions](../Apps/Flutter/stitch_app/APPLE-BUILD.md)
+for the source build, package paths, and the on-device test checklist.
+
+Run `scripts/build-stitch-macos.sh` on a Mac with Xcode, Flutter 3.44.2,
+Rust 1.88.0, CMake, Ninja, and Python installed. The builder prepares pinned
+native dependencies from verified downloads and builds the normal Release
+application. `.github/workflows/macos-build.yml` performs the same build on an
+Apple silicon runner and uploads a test ZIP. The CI model preparation job
+downloads the frozen model dependency ZIP anonymously, verifies archive/model
+hashes and license notices, and transfers those exact files to the Mac job.
+
+People protection and water smoothing are available only on Windows and macOS.
+The model and ONNX Runtime are included in desktop test packages; using them
+requires no account, Python installation, or model download. Android and iOS
+hide these controls and disable the flags in native requests, including old
+saved tasks. Ordinary mobile stitching remains available.
+
+The Mac test app uses ad-hoc signing for local testing and is not notarized.
+Dependency hashes, licenses, architecture, bundled dylib paths, signatures,
+and native smoke checks are validated during packaging. A successful build
+is separate from running the app and inspecting real final exports on a Mac.
+Hosted run 38817678302 qualifies version 1.5.1+30: 241 native tests
+(3 optional ignored), 340 Flutter tests, 12 packaging contracts, and packaged
+model/render/PNG/TIFF/JXL checks pass. See the [platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+
+## Android
+
+The Android application shares Flutter and the vendored native processing engine.
+Its package is `com.lumiaiq.pocketgigascan`; Android bridge channels use the same
+namespace. Windows uses that AppUserModelID; the existing iOS runner uses the
+same bundle identity. See the iOS section for its current build boundary.
+Install Android SDK platform 36, NDK 28.2.13676358, JDK 21, CMake/Ninja, Flutter
+3.44.2 and Rust 1.88.0 with `aarch64-linux-android`. Native minimum API is 29
+(Android 10). The current default APK selects ARM64; x86_64 is an explicit
+optional build target. The app imports local files and supports DWARF camera
+package listing and original downloads over the camera's local network. See the
+DWARF import evidence for the distinction between fixture, phone and camera
+qualification.
+
+```powershell
+rustup target add aarch64-linux-android
+pwsh -File scripts/test-build-stitch-android-core.Tests.ps1
+pwsh -File scripts/build-stitch-android-core.ps1 -AndroidSdkRoot D:/Android/Sdk
+cd Apps/Flutter/stitch_app
+flutter pub get --enforce-lockfile
+flutter analyze
+flutter test --reporter expanded
+flutter build apk --release --target-platform android-arm64
+```
+
+Set `JAVA_HOME` to the installed JDK and `ANDROID_HOME` to the SDK before
+building. The builder downloads the SHA-256-pinned official OpenCV Android SDK
+and libjxl source archives, builds JPEG XL and the source engine, rejects unresolved native dependencies,
+checks both core/runtime ELF architecture and 16 KiB LOAD alignment, and stages
+required notices and hashed provenance. Gradle refuses missing ABI libraries or
+incomplete license assets. Output is
+`Apps/Flutter/stitch_app/build/app/outputs/flutter-apk/app-release.apk`.
+The local release currently uses a development signing key; it is not a Play
+Store release or a guarantee of compatibility with an APK signed elsewhere.
+
+`-BuildTests` additionally builds a native ARM64 test executable outside APK
+assets. `-JxlOnly` builds dependencies only. `just check`, `just android-core`,
+`just android-build` and `just android-check` provide current product recipes
+when `just` is installed. The Windows publishing workflow does not publish or
+physically qualify Android packages.
+
+See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
+[Android qualification](gigascan/evidence/ANDROID-STITCH-2026-10-05.md) and
+[DWARF camera-transfer evidence](gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md).
+
+## iOS (native-free runner)
+
+The hosted [iOS build workflow](../.github/workflows/ios-build.yml) builds the
+existing Flutter runner with Flutter 3.44.2 on a macOS 15 Apple Silicon runner.
+It compiles a Release device bundle with `--no-codesign` and a Debug simulator
+bundle. The uploaded `.app` bundles are unsigned validation artifacts. The
+current runner does not link the Rust stitching engine, so this build does not
+qualify native iOS stitching, Apple signing, installation or TestFlight. The
+shared Dart DWARF transfer flow is present, but physical iOS camera-transfer
+behavior has not been qualified.
+
+See [four-platform build evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
+for the exact hosted run and artifact checksums.

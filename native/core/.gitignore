@@ -1,0 +1,10 @@
+/target/
+/.local/
+/.tools/
+/artifacts/
+*.tmp
+__pycache__/
+/fixtures/generated/dart-*
+/fixtures/generated/alignment/
+/fixtures/generated/core-*
+/fixtures/generated/regression-*

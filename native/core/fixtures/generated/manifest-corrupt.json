@@ -1,0 +1,11 @@
+{
+  "rows": 1,
+  "columns": 1,
+  "tiles": [
+    {
+      "row": 0,
+      "column": 0,
+      "path": "corrupt.png"
+    }
+  ]
+}

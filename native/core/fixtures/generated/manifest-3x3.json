@@ -1,0 +1,53 @@
+{
+  "rows": 3,
+  "columns": 3,
+  "overlapX": 0.5,
+  "overlapY": 0.5,
+  "tiles": [
+    {
+      "row": 0,
+      "column": 0,
+      "path": "tile_0_0.png"
+    },
+    {
+      "row": 0,
+      "column": 1,
+      "path": "tile_0_1.png"
+    },
+    {
+      "row": 0,
+      "column": 2,
+      "path": "tile_0_2.png"
+    },
+    {
+      "row": 1,
+      "column": 0,
+      "path": "tile_1_0.png"
+    },
+    {
+      "row": 1,
+      "column": 1,
+      "path": "tile_1_1.png"
+    },
+    {
+      "row": 1,
+      "column": 2,
+      "path": "tile_1_2.png"
+    },
+    {
+      "row": 2,
+      "column": 0,
+      "path": "tile_2_0.png"
+    },
+    {
+      "row": 2,
+      "column": 1,
+      "path": "tile_2_1.png"
+    },
+    {
+      "row": 2,
+      "column": 2,
+      "path": "tile_2_2.png"
+    }
+  ]
+}

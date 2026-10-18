@@ -1,0 +1,2 @@
+/* macOS 显示的本地网络访问说明。 */
+"NSLocalNetworkUsageDescription" = "PocketGigaScan 通过本地 Wi-Fi 连接 DWARF3 相机，以浏览和下载全景照片。";

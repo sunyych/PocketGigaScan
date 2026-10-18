@@ -1,0 +1,55 @@
+# PG-068 Windows scene-aware blending qualification
+
+## Approved behavior and delivery
+
+Windows 1.5.0+29 adds independent default-off person protection and water smoothing. Both may be enabled with either feather or deghost base blending; person protection takes precedence. Person groups use original-source confidence masks projected with the same bounded warp as RGB, with one stable source copied across the dilated group union, including its background. Water smoothing requires all geometry-valid views at a pixel to support water, then softly approaches linear-light feather weights with confidence. Non-water structure retains the base blend policy.
+
+The complete Windows package contains the offline model and CPU runtime. First use prepares and verifies a working copy from installed resources, with progress, cancellation, retry, removal and local restoration. No account, network login or model-hosting setup is required from users.
+
+## Reproducible dependencies
+
+- Model: `openmmlab/upernet-convnext-tiny`, revision `876ffc56b819a829448f7e81e9f8606deef6fb65`, MIT. Source model config maps person=12, water=21, sea=26, river=60, swimming pool=109.
+- Fixed-shape ONNX: 237,503,947 bytes, SHA256 `a997b66ac8ca75632817a62f253e47300b29edbeed6f62b1f04d98fe5bc12a13`. Two separate exports produced identical bytes. The exporter validates an equivalent static replacement for all four adaptive-pooling operators against the original PyTorch network before export. Export dependencies and expected output hash/size are pinned in the tracked script lock and requirements.
+- ONNX Runtime: official Windows x64 1.31.0 archive, SHA256 `3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195`. Both upstream runtime DLLs and license/notices are included; telemetry is disabled in the scene session. The runtime loads by absolute path beside the native module only when a scene option is requested.
+- Inference follows the job's CPU reservation, capped at 8 intra-op threads, with one inter-op thread. Model/workspace/source memory preflight uses a conservative estimate. A real single-thread diagnostic reached about 1.24 GiB working set; this informed the larger reserve rather than treating a file-size-only estimate as a memory ceiling.
+
+Weights, runtime archives, source photographs, masks and generated outputs stay in ignored directories. The build stages only the freshly source-built engine, verified model and verified runtime; CMake and package copies are hash-checked. This is an unsigned local test-package qualification, not a signed public release.
+
+## Evidence collected
+
+- Rust formatting and both Windows/Android builder contracts pass. The Windows contract reports its junction fixture unavailable for the restricted Windows account; the remaining path guards and contracts execute.
+- Native suite: 246 tests pass (211 unit and 35 integration); three optional historical real-photo/topology fixtures are ignored. The semantic fixture exercises all four flag combinations, feather/deghost, local warp, canonical-vs-ordinary source paths, source order, tile boundaries, worker count and resumed-render identity. Disabled output bytes retain parity.
+- Full shared-tree Flutter suite: 340 tests pass, including defaults/persistence/request combinations, model cache integrity, suspended-read cancellation, one-time dialog closing, bilingual controls and mobile hiding. Full Flutter analysis reports no issues. Final review corrected Chinese preparation progress and translated the dynamic memory-budget message; EN/ZH regressions pass. Existing unrelated dirty goldens were preserved; only new scene settings baselines were added.
+- Release-engine real inference: two OpenCV basketball frames (640x480) produce 92,337 and 94,685 person-confidence pixels at threshold 128, respectively, with zero water-confidence pixels at that threshold. Fresh one-worker and two-worker runs produce exactly matching mask hashes and final PNG hashes. Visual inspection confirms the two principal human silhouettes.
+- Real full-resolution water inference: OpenCV `boat1.jpg` (3888x2592) produces 4,184,125 water-confidence pixels at threshold 128 (41.5% of the frame); inspected masks follow the broad water/shore split rather than classifying the building/ship as water. There are 2,690 detected person-confidence pixels along the distant shore. This is bounded visual inspection, not ground-truth segmentation scoring.
+- Private previews/logs are under `.local/scene-blending`. The original four-image diagnostic was intentionally stopped after saving the two person masks and full-resolution boat1 mask to free CPU; no complete four-image run is claimed.
+
+The reference photos came from the OpenCV public fixtures: [basketball1](https://github.com/opencv/opencv/blob/4.13.0/samples/data/basketball1.png), [basketball2](https://github.com/opencv/opencv/blob/4.13.0/samples/data/basketball2.png), [boat1](https://github.com/opencv/opencv_extra/blob/4.x/testdata/stitching/boat1.jpg). They are private QA inputs, not redistributed application assets.
+
+## Final release and product replay
+
+The standard builder's first installation attempt exposed raw Windows backslashes in generated CMake ORT installation paths (`\U` escape). The SDK path is normalized with `file(TO_CMAKE_PATH)` and covered by a focused contract. The final normal builder passes native tests, Flutter analysis, all 340 Flutter tests and a clean Windows Release build (72.2 seconds for Flutter Windows compilation). Earlier failed compile/test/install attempts are not passing evidence.
+
+The independently copied Release install contains core DLL SHA256 `37b0dd5dd9dcf8247abc3191dec9ed72f00bc3825dac0a2fdeeef07a084e1903`, the pinned model and both runtime DLLs. It runs outside build outputs so validation cannot lock the linker inputs. The final archive contains matching core/model/runtime hashes and required model/runtime licenses. EXE and core DLL both report `1.5.0+29` and `NotSigned`.
+
+Test package: `.local/deliverables/PocketGigaScan-Windows-x64-v1.5.0-29-people-water-test.zip`, 247,576,475 bytes, SHA256 `54793470af820592fb1c064d01431971abafeef3c70f03f653ee988287e8ffd1`. It was independently extracted to a new normal-user temporary directory. Inventory is saved in `package-inventory.json`.
+
+Feature implementation is isolated in `d6f6560`. The independent clean-commit qualification below records the exact source tested separately from the shared-tree package.
+
+Independent clean-commit qualification: the exact `d6f6560` tree passes Rust formatting, both builder contracts (including the junction guards under the normal user), 240 native tests (205 unit plus 35 integration, three optional fixtures ignored), clean Flutter analysis and all 334 Flutter tests. The normal source Windows Release builder succeeds, with Flutter Windows compilation taking 119.2 seconds. The smaller test counts exclude the unrelated old repairs and their tests; no test was disabled to obtain this result.
+
+Clean-commit archive: `.local/scene-blending/clean-commit-package.zip`, 247,566,602 bytes, SHA256 `4d83b2613ddf23a2b7f97223815341906352a7b4f6927b3c5dd2f9a272ecfeb3`; core SHA256 `f95d247a72a33e85105c76bc8f6edcae68f3b41f56f14319a3092d25cebb8328`. Its build manifest identifies `d6f6560`, and model/runtime/licenses are independently inventoried. After independent extraction, both real-image jobs complete again (about 26 seconds each). All mask hashes and all PNG/TIFF/JXL file hashes match the shared-tree runs exactly, so the inspected final tiles, lossless export parity and independently decoded JXL evidence apply to both builds. Private replay evidence: `clean-product-people/evidence.json`, `clean-product-water/evidence.json`, and `clean-commit-evidence.json`.
+
+- Real person pair: the native job API completed baseline, scene analysis, level-zero rendering, pyramid and PNG/TIFF/JXL export in 27.4 seconds, with a 2 GiB reservation and two effective workers. Output is 637x487. Enabled rendering reuses baseline geometry exactly; 67,612 pixels differ. The report records 93,124 protected pixels, four person groups and 427 coverage-fallback pixels. These limits are reported rather than treated as complete-body reconstruction.
+- Real water pair: the two public 3888x2592 boat images were resized proportionally to 768x512 for bounded final-render QA; originals remain untouched. Baseline and enabled layouts match exactly. Output is 923x549; analysis/render/three exports finish in 25.6 seconds, with 104,835 water-overlap pixels and zero protected person pixels at this reduced scale. This is distinct from the original-resolution diagnostic above.
+- For both pairs, full decoded PNG and TIFF pixels equal the assembled final level-zero tiles exactly. The independent official `djxl` decoder reads both JXL exports; alpha is exact, and valid RGB mean absolute error versus PNG is 0.84/1.34 levels out of 255 (JXL quality 90 is lossy).
+- Same-coordinate crops: people `(25,70)-(220,465)`, water `(180,245)-(780,510)`. Inspection shows reduced mixed hand/ball outlines and localized water-texture blending without obvious new holes in those crops. This is bounded visual evidence, not complete-panorama or dense-crowd acceptance.
+- Packaged-engine faults: 64 MiB is rejected at job admission (the existing job floor is 128 MiB); 128 MiB reaches an explicit approximately-1480-MiB scene preflight error. Missing model, wrong expected model hash and same-dimension copied-mask tampering all fail explicitly during scene analysis. Five cases finish within 1.85 seconds without timeout. The successful source cache's directory hash is unchanged. Evidence: `fault-verify-v3/evidence.json`.
+
+Private evidence: `product-people-verify-v2/evidence.json`, `product-water-verify/evidence.json`, `product-people-one-worker/evidence.json`, `worker-consistency-evidence.json`, `export-parity-evidence.json`, and the two `*-final-crop-comparison.png` panels under `.local/scene-blending`. The first private replay attempt failed because its baseline parent directory did not exist; the verifier was corrected and the successful runs use new directories.
+
+## Acceptance limits
+
+Current Flutter golden-test typography uses the test font, producing blocks even for English; the new goldens establish layout geometry and widget assertions establish localized strings. They do not establish readable physical-window font appearance. No full user panorama, dense moving crowd, phone, Android package or hardware acceptance is claimed. A full user scene should be copied into a new task and re-rendered; enabled renderer identity includes the scene selections, model and mask identity so old partial tiles cannot silently mix with new selections. Original photos and existing exported results remain intact. Missing body parts in the originals are not synthesized.
+
+The shared checkout already contained unrelated Flutter/task/viewer/registration changes before PG-068. Build/test results qualify that shared tree; they do not imply ownership or isolated validation of those pre-existing edits.

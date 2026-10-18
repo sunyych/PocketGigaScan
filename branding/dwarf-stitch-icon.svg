@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img">
+  <title>PocketGigaScan panorama mark</title>
+  <desc>Teal panoramic ribbons form a G around an amber alignment point.</desc>
+  <rect width="256" height="256" rx="52" fill="#0B1B2B"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#123A50" stroke-width="32" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#123A50" stroke-width="20" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#12677D" stroke-width="25" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#12677D" stroke-width="15" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#30C9CB" stroke-width="18" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#30C9CB" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="1.0"/>
+  <path d="M 188 78 C 166 61 139 57 116 65 C 81 76 59 103 57 136 C 54 171 77 197 111 204 C 146 212 177 192 190 166 C 198 151 201 137 197 122 C 181 121 165 122 148 124" fill="none" stroke="#82F1E6" stroke-width="3.3" stroke-linecap="round" stroke-linejoin="round" opacity="0.72"/>
+  <path d="M 78 143 C 99 130 121 121 143 122 C 160 122 177 128 191 138" fill="none" stroke="#82F1E6" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" opacity="0.72"/>
+  <circle cx="189.0" cy="76.0" r="8.7" fill="#0B1B2B"/>
+  <circle cx="189.0" cy="76.0" r="6.5" fill="#FFBB62"/>
+  <circle cx="187.5" cy="74.5" r="1.5" fill="#FFE4B6"/>
+</svg>

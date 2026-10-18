@@ -1,0 +1,22 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.{rs,kt,kts,cpp,h,hpp,ps1}]
+indent_size = 4
+
+[*.md]
+indent_size = unset
+trim_trailing_whitespace = false
+
+[*.{png,jpg,jpeg,ico,jar}]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
