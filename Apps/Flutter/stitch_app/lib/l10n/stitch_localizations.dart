@@ -544,6 +544,16 @@ class StitchLocalizations {
           : 'Full image format: ${exportDescription(fullImageFormat[1]!)}';
     }
     if (isChinese) {
+      final registrationQualityFailure = RegExp(
+        r'^(?:REGISTRATION_FAILED: )?global matched-ray reprojection is ([\d.]+)px RMS \(global limit ([\d.]+)px; worst edge ([\d.]+)px, selected edge limit ([\d.]+)px\); supplied intrinsics or scene parallax may be unsuitable$',
+      ).firstMatch(source);
+      if (registrationQualityFailure != null) {
+        return '配准失败：整体重投影均方根误差为 '
+            '${registrationQualityFailure[1]} px RMS（全局上限 '
+            '${registrationQualityFailure[2]} px；最差相邻照片对误差 '
+            '${registrationQualityFailure[3]} px，设置上限 '
+            '${registrationQualityFailure[4]} px）。相机参数不匹配，或近景与远景视差过大，可能导致无法对齐。';
+      }
       final modelProgress = RegExp(r'^正在准备场景模型：(\d+)%$').firstMatch(source);
       if (modelProgress != null) {
         return '正在准备场景模型：${modelProgress[1]}%';

@@ -804,6 +804,70 @@ void main() {
     expect(remainingChinese, isEmpty, reason: remainingChinese.join('\n'));
   });
 
+  test('registration quality failure translates coded and plain messages', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+    const body =
+        'global matched-ray reprojection is 2.34px RMS '
+        '(global limit 12.0px; worst edge 29.96px, selected edge limit '
+        '20.0px); supplied intrinsics or scene parallax may be unsuitable';
+    const codedSource = 'REGISTRATION_FAILED: $body';
+    const translated =
+        '配准失败：整体重投影均方根误差为 2.34 px RMS（全局上限 '
+        '12.0 px；最差相邻照片对误差 29.96 px，设置上限 '
+        '20.0 px）。相机参数不匹配，或近景与远景视差过大，可能导致无法对齐。';
+
+    expect(english.text(codedSource), codedSource);
+    expect(english.text(body), body);
+    expect(chinese.text(codedSource), translated);
+    expect(chinese.text(body), translated);
+  });
+
+  testWidgets(
+    'Chinese task failure displays localized registration diagnosis',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const body =
+          'global matched-ray reprojection is 2.34px RMS '
+          '(global limit 12.0px; worst edge 29.96px, selected edge limit '
+          '20.0px); supplied intrinsics or scene parallax may be unsuitable';
+      const codedSource = 'REGISTRATION_FAILED: $body';
+      const translated =
+          '配准失败：整体重投影均方根误差为 2.34 px RMS（全局上限 '
+          '12.0 px；最差相邻照片对误差 29.96 px，设置上限 '
+          '20.0 px）。相机参数不匹配，或近景与远景视差过大，可能导致无法对齐。';
+      final api = LocalizationSurfaceJobApi();
+      final repository = LocalizationSurfaceTaskRepository();
+      final queue = EmptyBatchQueueController(
+        api: api,
+        taskRepository: repository,
+      );
+      await tester.pumpWidget(
+        LumiaStitchApp(
+          locale: const Locale('zh', 'CN'),
+          home: StitchHomePage(
+            initialTask: localizationTask().copyWith(
+              phase: StitchPhase.failed,
+              error: codedSource,
+            ),
+            jobApi: api,
+            repository: repository,
+            batchQueueController: queue,
+            foregroundWorkLock: LocalizationSurfaceLock(),
+            mobileOverride: false,
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(find.text(translated), findsOneWidget);
+      expect(find.text(codedSource), findsNothing);
+    },
+  );
+
   test(
     'bilingual audit: prefix and regex fallbacks translate dynamic messages',
     () {
