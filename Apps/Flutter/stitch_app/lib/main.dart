@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart' hide Text;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
@@ -28,6 +29,7 @@ import 'services/dwarf_download_service.dart';
 import 'services/memory_budget_policy.dart';
 import 'services/spherical_request.dart';
 import 'services/scene_model_service.dart';
+import 'services/registration_issues.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
 import 'services/task_record_service.dart';
@@ -40,6 +42,7 @@ import 'settings_page.dart';
 import 'models/stitch_timeline.dart';
 import 'widgets/stitching_log.dart';
 import 'widgets/scene_model_dialog.dart';
+import 'widgets/photo_grid_issues.dart';
 
 void main() => runApp(const LumiaStitchApp());
 
@@ -162,6 +165,7 @@ class StitchHomePage extends StatefulWidget {
     this.mobileRuntimeService,
     this.settingsController,
     this.photoImporter,
+    this.registrationIssueLoader,
   });
   final JobApi? jobApi;
   final PowerGate? powerGate;
@@ -176,6 +180,8 @@ class StitchHomePage extends StatefulWidget {
   final MobileRuntimeService? mobileRuntimeService;
   final SettingsController? settingsController;
   final PhotoImporter? photoImporter;
+  final Future<List<RegistrationIssue>> Function(StitchTask task)?
+  registrationIssueLoader;
   @override
   State<StitchHomePage> createState() => _StitchHomePageState();
 }
@@ -263,6 +269,9 @@ class _StitchHomePageState extends State<StitchHomePage>
   bool _smoothWater = false;
   double _maxEdgeReprojectionRmsPixels = 12;
   List<GridCell> _mappingCells = const [];
+  Set<String> _selectedPhotoPaths = {};
+  List<RegistrationIssue> _registrationIssues = const [];
+  int _registrationIssueGeneration = 0;
   Map<String, Object?>? _manifest;
   int? _viewerLevel;
   double _viewerScale = 1;
@@ -514,6 +523,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       _task = widget.initialTask;
       _manifest = widget.initialManifest;
       _hydrateTaskConfiguration(_task!);
+      unawaited(_loadRegistrationIssues(_task!));
       if (_hasActiveJob) _beginPolling();
     }
     final batchController = _batchController;
@@ -576,6 +586,239 @@ class _StitchHomePageState extends State<StitchHomePage>
     _maxEdgeReprojectionRmsPixels = task.maxEdgeReprojectionRmsPixels;
     _horizontalOverlap.text = '${(task.gridHorizontalOverlap * 100).round()}';
     _verticalOverlap.text = '${(task.gridVerticalOverlap * 100).round()}';
+  }
+
+  Future<void> _loadRegistrationIssues(StitchTask task) async {
+    final issueGeneration = ++_registrationIssueGeneration;
+    final selectionGeneration = _controlGeneration;
+    final photoPaths = task.photos.map((photo) => photo.storedPath).toList();
+    final requestedGrid = task.grid;
+    List<RegistrationIssue> issues;
+    try {
+      issues = await (widget.registrationIssueLoader ?? loadRegistrationIssues)(
+        task,
+      );
+    } on Object {
+      issues = const [];
+    }
+    if (!mounted ||
+        issueGeneration != _registrationIssueGeneration ||
+        selectionGeneration != _controlGeneration ||
+        _task?.id != task.id ||
+        !listEquals(
+          _task!.photos.map((photo) => photo.storedPath).toList(),
+          photoPaths,
+        ) ||
+        !_sameGridTopology(_grid, requestedGrid)) {
+      return;
+    }
+    setState(() {
+      _registrationIssues = issues.where((issue) => issue.exceedsLimit).toList();
+    });
+  }
+
+  void _clearPhotoGridIssueState() {
+    _registrationIssueGeneration++;
+    _selectedPhotoPaths = {};
+    _registrationIssues = const [];
+  }
+
+  bool _sameGridTopology(GridOptions first, GridOptions second) =>
+      first.mode == second.mode &&
+      first.rows == second.rows &&
+      first.columns == second.columns &&
+      first.axis == second.axis &&
+      first.startCorner == second.startCorner &&
+      first.serpentine == second.serpentine;
+
+  List<PhotoGridIssueConnection> _photoGridIssueConnections(
+    StitchTask task, {
+    required double cellWidth,
+    required double cellHeight,
+  }) {
+    final indexByPath = <String, int>{
+      for (var index = 0; index < task.photos.length; index++)
+        task.photos[index].storedPath: index,
+    };
+    Offset centerFor(GridCell cell) => Offset(
+      cell.column * (cellWidth + 4) + cellWidth / 2,
+      cell.row * (cellHeight + 4) + cellHeight / 2,
+    );
+    final result = <PhotoGridIssueConnection>[];
+    for (final issue in _registrationIssues) {
+      final fromIndex = indexByPath[issue.fromPhotoPath];
+      final toIndex = indexByPath[issue.toPhotoPath];
+      if (fromIndex == null || toIndex == null ||
+          fromIndex >= _mappingCells.length ||
+          toIndex >= _mappingCells.length) {
+        continue;
+      }
+      final fromCell = _mappingCells[fromIndex];
+      final toCell = _mappingCells[toIndex];
+      final columnDelta = toCell.column - fromCell.column;
+      final rowDelta = toCell.row - fromCell.row;
+      if ((columnDelta == 0 && rowDelta == 0) ||
+          columnDelta.abs() > 1 ||
+          rowDelta.abs() > 1) {
+        continue;
+      }
+      final fromCenter = centerFor(fromCell);
+      final toCenter = centerFor(toCell);
+      final direction = Offset(columnDelta.sign.toDouble(), rowDelta.sign.toDouble());
+      result.add(
+        PhotoGridIssueConnection(
+          issue: issue,
+          start: Offset(
+            fromCenter.dx + direction.dx * cellWidth / 2,
+            fromCenter.dy + direction.dy * cellHeight / 2,
+          ),
+          end: Offset(
+            toCenter.dx - direction.dx * cellWidth / 2,
+            toCenter.dy - direction.dy * cellHeight / 2,
+          ),
+          handled: _issueHandled(issue),
+        ),
+      );
+    }
+    return result;
+  }
+
+  void _selectGridPhoto(String path, {required bool extendSelection}) {
+    setState(() {
+      if (!extendSelection) {
+        _selectedPhotoPaths = {path};
+      } else {
+        final next = Set<String>.of(_selectedPhotoPaths);
+        if (!next.add(path)) next.remove(path);
+        _selectedPhotoPaths = next;
+      }
+    });
+  }
+
+  void _selectIssuePhotos(RegistrationIssue issue) {
+    final currentPaths = _task?.photos.map((photo) => photo.storedPath).toSet();
+    setState(() {
+      _selectedPhotoPaths = {
+        if (currentPaths?.contains(issue.fromPhotoPath) == true)
+          issue.fromPhotoPath,
+        if (currentPaths?.contains(issue.toPhotoPath) == true)
+          issue.toPhotoPath,
+      };
+    });
+  }
+
+  bool _photoLocked(StitchTask task, String path) {
+    final photoIndex = task.photos.indexWhere(
+      (photo) => photo.storedPath == path,
+    );
+    if (photoIndex < 0 || photoIndex >= _mappingCells.length) return false;
+    return _grid.placementFor(
+          task.photos[photoIndex],
+          _mappingCells[photoIndex],
+        ).kind ==
+        'hardGridLock';
+  }
+
+  bool _issueHandled(RegistrationIssue issue) {
+    final task = _task;
+    return task != null &&
+        _photoLocked(task, issue.fromPhotoPath) &&
+        _photoLocked(task, issue.toPhotoPath);
+  }
+
+  bool get _canEditPhotoGridLocks {
+    final task = _task;
+    if (task == null ||
+        _busy ||
+        !_batchOwnershipReady ||
+        _isActivelyBatchOwned(task) ||
+        _mappingError() != null ||
+        _mappingCells.length != task.photos.length) {
+      return false;
+    }
+    return !{
+      StitchPhase.queued,
+      StitchPhase.running,
+      StitchPhase.pausing,
+      StitchPhase.paused,
+      StitchPhase.interrupted,
+      StitchPhase.exporting,
+    }.contains(task.phase);
+  }
+
+  Future<void> _changeSelectedPhotoLocks({required bool locked}) async {
+    final task = _task;
+    final selectedPaths = _selectedPhotoPaths.toSet();
+    if (task == null ||
+        !_canEditPhotoGridLocks ||
+        (locked && selectedPaths.length < 2) ||
+        selectedPaths.isEmpty) {
+      return;
+    }
+
+    var nextGrid = _grid;
+    for (var index = 0; index < task.photos.length; index++) {
+      final photo = task.photos[index];
+      if (selectedPaths.contains(photo.storedPath)) {
+        nextGrid = nextGrid.setPhotoLock(
+          _mappingCells[index],
+          photo.storedPath,
+          locked: locked,
+        );
+      }
+    }
+    if (identical(nextGrid, _grid)) return;
+
+    final selectionGeneration = _controlGeneration;
+    final issueSnapshot = List<RegistrationIssue>.of(_registrationIssues);
+    final photoPathSnapshot = task.photos
+        .map((photo) => photo.storedPath)
+        .toList();
+    final gridSnapshot = task.grid;
+    final selectedPathSnapshot = Set<String>.of(_selectedPhotoPaths);
+    setState(() => _busy = true);
+    try {
+      if (task.nativeJobId != null) {
+        final prepared = task.copyWith(grid: nextGrid);
+        final copy = await _repository.duplicateForNewRun(prepared);
+        if (!mounted ||
+            selectionGeneration != _controlGeneration ||
+            _task?.id != task.id) {
+          return;
+        }
+        await _selectTaskImpl(copy);
+        if (!mounted || _task?.id != copy.id) return;
+        // Keep the validated failure report available during this editing
+        // session so the operator can address other reported pairs. The copy
+        // has no native measurements of its own; this remains explicitly
+        // labeled as the previous registration until a new run is started.
+        if (listEquals(
+              copy.photos.map((photo) => photo.storedPath).toList(),
+              photoPathSnapshot,
+            ) &&
+            _sameGridTopology(copy.grid, gridSnapshot)) {
+          _registrationIssueGeneration++;
+          setState(() {
+            _registrationIssues = issueSnapshot;
+            _selectedPhotoPaths = selectedPathSnapshot;
+          });
+        }
+        setState(() {
+          _message = locked
+              ? '已创建重算副本，并锁定所选照片。'
+              : '已创建重算副本，并解除所选照片的网格锁定。';
+        });
+        await _refreshTasks();
+      } else {
+        await _persist(task.copyWith(grid: nextGrid));
+      }
+    } on Object catch (error) {
+      if (mounted && _task?.id == task.id) {
+        setState(() => _message = '无法更新所选照片的网格锁定：$error');
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
   }
 
   Future<void> _initializeBatchOwnership(
@@ -1429,6 +1672,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         });
       }
       final restored = restoredInitialSelection;
+      if (restored != null) unawaited(_loadRegistrationIssues(restored));
       if (restored != null &&
           (restored.phase == StitchPhase.completed ||
               (restored.nativeJobId != null &&
@@ -1571,6 +1815,8 @@ class _StitchHomePageState extends State<StitchHomePage>
             : '排列已改变；强制网格标记已随原片保留。';
       }
     }
+    final task = _task;
+    if (rearranged) _clearPhotoGridIssueState();
     setState(() {
       _grid = next;
       if (resize) {
@@ -1579,6 +1825,9 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       _mappingCells = _makeMapping(next);
     });
+    if (rearranged && task != null) {
+      unawaited(_loadRegistrationIssues(task.copyWith(grid: next)));
+    }
   }
 
   List<GridCell> _makeMapping(GridOptions options, {StitchTask? task}) {
@@ -1674,6 +1923,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             (double.tryParse(_verticalOverlap.text) ?? 30) / 100,
       );
       await _repository.save(task);
+      _clearPhotoGridIssueState();
       setState(() {
         _task = task;
         if (useDwarfNominalProfile) _fov.text = profileFov.toStringAsFixed(4);
@@ -1682,6 +1932,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             ? '已复制并校验 ${batch.photos.length} 张原片（${batch.dimensions.$1}×${batch.dimensions.$2}）。'
             : '原片尺寸不一致；请统一尺寸后重新导入。照片均已保留。';
       });
+      unawaited(_loadRegistrationIssues(task));
       await _refreshTasks();
     } on Object catch (error) {
       setState(() => _message = '导入失败：$error');
@@ -2657,6 +2908,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         await _repository.removeTaskRecord(task.id);
       }
       if (!mounted) return;
+      if (_task?.id == task.id) _clearPhotoGridIssueState();
       setState(() {
         _tasks = [
           for (final value in _tasks)
@@ -2729,6 +2981,23 @@ class _StitchHomePageState extends State<StitchHomePage>
     String? expectedTaskId,
   }) async {
     final previous = _task?.id == updated.id ? _task : null;
+    final newlyFailed =
+        previous != null &&
+        previous.phase != StitchPhase.failed &&
+        updated.phase == StitchPhase.failed;
+    final newRenderStarted =
+        previous != null &&
+        !{
+          StitchPhase.queued,
+          StitchPhase.running,
+          StitchPhase.pausing,
+          StitchPhase.paused,
+          StitchPhase.exporting,
+        }.contains(previous.phase) &&
+        {
+          StitchPhase.queued,
+          StitchPhase.running,
+        }.contains(updated.phase);
     var mergedTimeline = (previous?.timeline ?? const StitchTimeline()).merge(
       updated.timeline,
     );
@@ -2775,6 +3044,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             _task?.id == expectedTaskId);
     setState(() {
       if (selectionStillMatches) {
+        if (newRenderStarted) _clearPhotoGridIssueState();
         _task = updated;
         _grid = updated.grid;
       }
@@ -2787,6 +3057,9 @@ class _StitchHomePageState extends State<StitchHomePage>
         _tasks = next;
       }
     });
+    if (newlyFailed && selectionStillMatches) {
+      unawaited(_loadRegistrationIssues(updated));
+    }
     unawaited(_syncForegroundLock());
   }
 
@@ -3203,12 +3476,14 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (!mounted || selectionGeneration != _controlGeneration) return false;
     if (hydrateConfiguration) _hydrateTaskConfiguration(task);
     _fx.clear();
+    _clearPhotoGridIssueState();
     setState(() {
       _task = task;
       _manifest = null;
       _message = null;
       _diagnosticsPanelGeneration++;
     });
+    unawaited(_loadRegistrationIssues(task));
     unawaited(_syncForegroundLock());
     if (task.phase == StitchPhase.completed) {
       await _loadManifest(
@@ -4917,6 +5192,10 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Widget _photoGrid(StitchTask task, String? error) {
+    final selectedLockedCount = _selectedPhotoPaths
+        .where((path) => _photoLocked(task, path))
+        .length;
+    final canEditGrid = _canEditPhotoGridLocks;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -4929,8 +5208,25 @@ class _StitchHomePageState extends State<StitchHomePage>
             ),
             Text(
               StitchLocalizations.of(context).text(
-                '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。',
+                '照片不会从网格移除；照片上的锁定按钮可固定其网格位置。点按照片可选中一张，Shift+点按可添加或移除多张；“锁定所选照片的网格位置”可批量锁定。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。长按可查看完整文件名。',
               ),
+            ),
+            PhotoGridSelectionActions(
+              selectionCount: _selectedPhotoPaths.length,
+              canLock:
+                  canEditGrid &&
+                  _selectedPhotoPaths.length >= 2 &&
+                  selectedLockedCount < _selectedPhotoPaths.length,
+              canUnlock: canEditGrid && selectedLockedCount > 0,
+              onClear: () => setState(() => _selectedPhotoPaths = {}),
+              onLock: () => unawaited(_changeSelectedPhotoLocks(locked: true)),
+              onUnlock: () =>
+                  unawaited(_changeSelectedPhotoLocks(locked: false)),
+            ),
+            PhotoGridIssueList(
+              issues: _registrationIssues,
+              handled: _issueHandled,
+              onTapIssue: _selectIssuePhotos,
             ),
             if (_grid.pendingForceGridCells.isNotEmpty)
               Text(
@@ -4954,169 +5250,251 @@ class _StitchHomePageState extends State<StitchHomePage>
                   final minimumCellWidth = box.maxWidth >= 800 ? 28.0 : 72.0;
                   final cellWidth = math.max(
                     minimumCellWidth,
-                    math.min(160.0, box.maxWidth / columns),
+                    math.min(
+                      160.0,
+                      (box.maxWidth - 4 * (columns - 1)) / columns,
+                    ),
                   );
                   final lockButtonSize = cellWidth < 50 ? 20.0 : 32.0;
                   final lockIconSize = cellWidth < 50 ? 12.0 : 16.0;
-                  final gridWidth = cellWidth * columns;
+                  final gridWidth = cellWidth * columns + 4 * (columns - 1);
                   final cellHeight = cellWidth * 10 / 16;
+                  final contentHeight =
+                      rows * cellHeight + 4 * math.max(0, rows - 1);
+                  final gridSize = Size(gridWidth, contentHeight);
+                  final connections = _photoGridIssueConnections(
+                    task,
+                    cellWidth: cellWidth,
+                    cellHeight: cellHeight,
+                  );
                   final byCell = <GridCell, int>{
                     for (var i = 0; i < _mappingCells.length; i++)
                       _mappingCells[i]: i,
                   };
-                  final viewportHeight = math.min(rows * cellHeight, 520.0);
+                  final viewportHeight = math.min(contentHeight, 520.0);
                   return SingleChildScrollView(
                     scrollDirection: Axis.horizontal,
                     child: SizedBox(
                       width: gridWidth,
                       height: viewportHeight,
-                      child: GridView.builder(
-                        shrinkWrap: false,
-                        physics: const ClampingScrollPhysics(),
-                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                          crossAxisCount: columns,
-                          crossAxisSpacing: 4,
-                          mainAxisSpacing: 4,
-                          childAspectRatio: 16 / 10,
-                        ),
-                        itemCount: _mappingCells.length,
-                        itemBuilder: (context, index) {
-                          final cell = GridCell(
-                            index ~/ columns,
-                            index % columns,
-                          );
-                          final photo = task.photos[byCell[cell]!];
-                          final placement = _grid.placementFor(photo, cell);
-                          final forced = placement.kind == 'hardGridLock';
-                          final label =
-                              '${photo.originalName} · ${cell.row + 1},${cell.column + 1}';
-                          return Tooltip(
-                            message: '$label${forced ? ' · 强制按网格放置' : ''}',
-                            child: Stack(
-                              fit: StackFit.expand,
-                              children: [
-                                Container(
-                                  color: Colors.black12,
-                                  alignment: Alignment.center,
-                                  child: Image.file(
-                                    File(photo.storedPath),
-                                    key: ValueKey(
-                                      'photo-grid-image-${cell.row}-${cell.column}',
-                                    ),
-                                    fit: BoxFit.contain,
-                                    cacheWidth: 256,
-                                    errorBuilder: (_, _, _) =>
-                                        const Icon(Icons.broken_image),
-                                  ),
+                      child: SingleChildScrollView(
+                        child: PhotoGridIssueOverlay(
+                          size: gridSize,
+                          connections: connections,
+                          onTapIssue: _selectIssuePhotos,
+                          child: GridView.builder(
+                            primary: false,
+                            shrinkWrap: true,
+                            physics: const NeverScrollableScrollPhysics(),
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: columns,
+                                  crossAxisSpacing: 4,
+                                  mainAxisSpacing: 4,
+                                  childAspectRatio: 16 / 10,
                                 ),
-                                Positioned(
-                                  left: 2,
-                                  bottom: 2,
-                                  child: Container(
-                                    color: Colors.black54,
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 3,
-                                    ),
-                                    child: Text(
-                                      '${cell.row + 1},${cell.column + 1}',
-                                      style: const TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 9,
-                                      ),
-                                    ),
+                            itemCount: _mappingCells.length,
+                            itemBuilder: (context, index) {
+                              final cell = GridCell(
+                                index ~/ columns,
+                                index % columns,
+                              );
+                              final photo = task.photos[byCell[cell]!];
+                              final placement = _grid.placementFor(photo, cell);
+                              final forced = placement.kind == 'hardGridLock';
+                              final selected = _selectedPhotoPaths.contains(
+                                photo.storedPath,
+                              );
+                              final issuePaths = _registrationIssues
+                                  .where(
+                                    (issue) =>
+                                        issue.fromPhotoPath == photo.storedPath ||
+                                        issue.toPhotoPath == photo.storedPath,
+                                  )
+                                  .toList();
+                              final label =
+                                  '${photo.originalName} · ${cell.row + 1},${cell.column + 1}';
+                              final issueSummary = issuePaths
+                                  .map(
+                                    (issue) =>
+                                        '${issue.rmsPx.toStringAsFixed(2)} px / ${issue.limitPx.toStringAsFixed(2)} px',
+                                  )
+                                  .join('\n');
+                              return Tooltip(
+                                message: [
+                                  label,
+                                  if (forced) '强制按网格放置',
+                                  if (issueSummary.isNotEmpty) issueSummary,
+                                ].join(' · '),
+                                child: GestureDetector(
+                                  key: ValueKey(
+                                    'grid-photo-select-${cell.row}-${cell.column}',
                                   ),
-                                ),
-                                if (forced)
-                                  Positioned.fill(
-                                    child: DecoratedBox(
-                                      decoration: BoxDecoration(
-                                        border: Border.all(
-                                          color: Colors.amber,
-                                          width: 3,
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _selectGridPhoto(
+                                    photo.storedPath,
+                                    extendSelection:
+                                        HardwareKeyboard.instance.isShiftPressed,
+                                  ),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      Container(
+                                        color: Colors.black12,
+                                        alignment: Alignment.center,
+                                        child: Image.file(
+                                          File(photo.storedPath),
+                                          key: ValueKey(
+                                            'photo-grid-image-${cell.row}-${cell.column}',
+                                          ),
+                                          fit: BoxFit.contain,
+                                          cacheWidth: 256,
+                                          errorBuilder: (_, _, _) =>
+                                              const Icon(Icons.broken_image),
                                         ),
                                       ),
-                                    ),
-                                  ),
-                                if (forced)
-                                  Positioned(
-                                    right: 0,
-                                    top: 0,
-                                    child: IconButton(
-                                      key: ValueKey(
-                                        'grid-lock-${cell.row}-${cell.column}',
-                                      ),
-                                      tooltip: StitchLocalizations.of(context)
-                                          .text(
-                                            placement.origin ==
-                                                    GridConstraintOrigin
-                                                        .legacyUnknown
-                                                ? '旧任务锁定位置来源未知；点按可解除锁定'
-                                                : '解除网格位置锁定',
+                                      Positioned(
+                                        left: 2,
+                                        bottom: 2,
+                                        child: Container(
+                                          color: Colors.black54,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 3,
                                           ),
-                                      visualDensity: VisualDensity.compact,
-                                      padding: EdgeInsets.zero,
-                                      constraints: BoxConstraints.tightFor(
-                                        width: lockButtonSize,
-                                        height: lockButtonSize,
+                                          child: Text(
+                                            '${cell.row + 1},${cell.column + 1}',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 9,
+                                            ),
+                                          ),
+                                        ),
                                       ),
-                                      onPressed: _editable
-                                          ? () async {
+                                      if (issuePaths.isNotEmpty)
+                                        Positioned(
+                                          left: 0,
+                                          top: 0,
+                                          child: Icon(
+                                            Icons.warning_amber_rounded,
+                                            key: ValueKey(
+                                              'grid-photo-issue-${cell.row}-${cell.column}',
+                                            ),
+                                            color: Colors.red.shade700,
+                                            size: 20,
+                                          ),
+                                        ),
+                                      if (forced)
+                                        Positioned.fill(
+                                          child: IgnorePointer(
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                border: Border.all(
+                                                  color: Colors.amber,
+                                                  width: 3,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      if (selected)
+                                        Positioned.fill(
+                                          child: IgnorePointer(
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                border: Border.all(
+                                                  color: Colors.blue,
+                                                  width: 3,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      if (forced)
+                                        Positioned(
+                                          right: 0,
+                                          top: 0,
+                                          child: IconButton(
+                                            key: ValueKey(
+                                              'grid-lock-${cell.row}-${cell.column}',
+                                            ),
+                                            tooltip: StitchLocalizations.of(
+                                              context,
+                                            ).text(
+                                              placement.origin ==
+                                                      GridConstraintOrigin
+                                                          .legacyUnknown
+                                                  ? '旧任务锁定位置来源未知；点按可解除锁定'
+                                                  : '解除网格位置锁定',
+                                            ),
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                            padding: EdgeInsets.zero,
+                                            constraints: BoxConstraints.tightFor(
+                                              width: lockButtonSize,
+                                              height: lockButtonSize,
+                                            ),
+                                            onPressed: _editable
+                                                ? () async {
+                                                    final updated = task.copyWith(
+                                                      grid: _grid.setPhotoLock(
+                                                        cell,
+                                                        photo.storedPath,
+                                                        locked: false,
+                                                      ),
+                                                    );
+                                                    await _persist(updated);
+                                                    _setGrid(updated.grid);
+                                                  }
+                                                : null,
+                                            icon: Icon(
+                                              Icons.push_pin,
+                                              color: Colors.amber,
+                                              size: lockIconSize,
+                                            ),
+                                          ),
+                                        ),
+                                      if (!forced && _editable)
+                                        Positioned(
+                                          right: 0,
+                                          top: 0,
+                                          child: IconButton(
+                                            key: ValueKey(
+                                              'grid-lock-${cell.row}-${cell.column}',
+                                            ),
+                                            tooltip: StitchLocalizations.of(
+                                              context,
+                                            ).text('锁定网格位置'),
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                            padding: EdgeInsets.zero,
+                                            constraints: BoxConstraints.tightFor(
+                                              width: lockButtonSize,
+                                              height: lockButtonSize,
+                                            ),
+                                            onPressed: () async {
                                               final updated = task.copyWith(
                                                 grid: _grid.setPhotoLock(
                                                   cell,
                                                   photo.storedPath,
-                                                  locked: false,
+                                                  locked: true,
                                                 ),
                                               );
                                               await _persist(updated);
                                               _setGrid(updated.grid);
-                                            }
-                                          : null,
-                                      icon: Icon(
-                                        Icons.push_pin,
-                                        color: Colors.amber,
-                                        size: lockIconSize,
-                                      ),
-                                    ),
-                                  ),
-                                if (!forced && _editable)
-                                  Positioned(
-                                    right: 0,
-                                    top: 0,
-                                    child: IconButton(
-                                      key: ValueKey(
-                                        'grid-lock-${cell.row}-${cell.column}',
-                                      ),
-                                      tooltip: StitchLocalizations.of(
-                                        context,
-                                      ).text('锁定网格位置'),
-                                      visualDensity: VisualDensity.compact,
-                                      padding: EdgeInsets.zero,
-                                      constraints: BoxConstraints.tightFor(
-                                        width: lockButtonSize,
-                                        height: lockButtonSize,
-                                      ),
-                                      onPressed: () async {
-                                        final updated = task.copyWith(
-                                          grid: _grid.setPhotoLock(
-                                            cell,
-                                            photo.storedPath,
-                                            locked: true,
+                                            },
+                                            icon: Icon(
+                                              Icons.push_pin_outlined,
+                                              size: lockIconSize,
+                                            ),
                                           ),
-                                        );
-                                        await _persist(updated);
-                                        _setGrid(updated.grid);
-                                      },
-                                      icon: Icon(
-                                        Icons.push_pin_outlined,
-                                        size: lockIconSize,
-                                      ),
-                                    ),
+                                        ),
+                                    ],
                                   ),
-                              ],
-                            ),
-                          );
-                        },
+                                ),
+                              );
+                            },
+                          ),
+                        ),
                       ),
                     ),
                   );

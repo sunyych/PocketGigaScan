@@ -99,13 +99,18 @@ void main() {
     const english = StitchLocalizations(Locale('en'));
     const chinese = StitchLocalizations(Locale('zh'));
     const warning =
-        '照片不会从网格移除；使用照片上的锁定按钮可固定其网格位置。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。点按照片不会更改锁定；长按可查看完整文件名。';
+        '照片不会从网格移除；照片上的锁定按钮可固定其网格位置。点按照片可选中一张，Shift+点按可添加或移除多张；“锁定所选照片的网格位置”可批量锁定。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。长按可查看完整文件名。';
 
     expect(chinese.text(warning), warning);
     expect(
       english.text(warning),
-      'Photos stay in the grid. Use the lock button on a photo to fix its grid position. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Tapping the photo itself does not change the lock; long-press to see the full filename.',
+      'Photos stay in the grid. Use a photo lock button to fix its grid position. Click a photo to select it; Shift+click adds or removes individual photos. Use “Lock selected photos to grid” to lock them together. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Long-press to see the full filename.',
     );
+    expect(english.text('上次配准的超标匹配关系'), 'Previous registration matches over the limit');
+    expect(chinese.text('上次配准的超标匹配关系'), '上次配准的超标匹配关系');
+    expect(english.text('不匹配'), 'Not match');
+    expect(chinese.text('不匹配'), '不匹配');
+    expect(english.text('上次诊断，已按网格锁定，待重算'), 'Previous diagnosis; locked to grid, pending restitch');
     expect(english.text('锁定网格位置'), 'Lock grid position');
     expect(english.text('解除网格位置锁定'), 'Unlock grid position');
     expect(

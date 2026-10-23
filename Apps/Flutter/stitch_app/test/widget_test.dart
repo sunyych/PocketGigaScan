@@ -1,8 +1,12 @@
 import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data' show ByteData;
+import 'dart:ui' show ImageByteFormat, PointerDeviceKind;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'package:flutter/services.dart' show FontLoader, LogicalKeyboardKey;
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:stitch_app/main.dart';
@@ -13,6 +17,8 @@ import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/services/registration_issues.dart';
+import 'package:stitch_app/services/spherical_request.dart';
 import 'support/empty_batch_queue_controller.dart';
 import 'package:stitch_app/services/power_service.dart';
 import 'support/chinese_test_app.dart';
@@ -125,6 +131,8 @@ class _MemoryTaskRepository extends TaskRepository {
   final loadAllStarted = Completer<void>();
   StitchTask? saved;
   StitchTask? duplicate;
+  int saveCount = 0;
+  int duplicateCount = 0;
   final Map<String, StitchTask> records = {};
 
   @override
@@ -136,6 +144,7 @@ class _MemoryTaskRepository extends TaskRepository {
 
   @override
   Future<void> save(StitchTask task) async {
+    saveCount++;
     if (!saveStarted.isCompleted) saveStarted.complete();
     await saveGate?.future;
     saved = task;
@@ -147,6 +156,7 @@ class _MemoryTaskRepository extends TaskRepository {
     StitchTask old, {
     bool autoExportOnCompletion = true,
   }) async {
+    duplicateCount++;
     duplicate = StitchTask(
       id: 'fresh-${old.id}',
       createdAt: DateTime.utc(2026, 1, 2),
@@ -172,6 +182,7 @@ class _MemoryTaskRepository extends TaskRepository {
       localTextureWarp: old.localTextureWarp,
       maxEdgeReprojectionRmsPixels: old.maxEdgeReprojectionRmsPixels,
     );
+    records[duplicate!.id] = duplicate!;
     return duplicate!;
   }
 }
@@ -207,6 +218,368 @@ Future<Finder> _lazyChildVisibleAfterScroll(
 }
 
 void main() {
+  testWidgets(
+    'failed native registration issues select and lock only chosen photos',
+    (tester) async {
+      tester.view.physicalSize = const Size(1440, 1100);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final temp = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('photo-grid-issues-'),
+      ))!;
+      addTearDown(() => tester.runAsync(() => temp.delete(recursive: true)));
+      final imageBytes = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOIWnAJAAMkAc2CFM/BAAAAAElFTkSuQmCC',
+      );
+      final photos = <ImportedPhoto>[];
+      for (var i = 0; i < 6; i++) {
+        final path = '${temp.path}/photo-$i.png';
+        await tester.runAsync(() => File(path).writeAsBytes(imageBytes));
+        photos.add(
+          ImportedPhoto(
+            originalName: [
+              '08_20.jpg',
+              '08_21.jpg',
+              '09_22.jpg',
+              '10_22.jpg',
+              '11_22.jpg',
+              '12_22.jpg',
+            ][i],
+            storedPath: path,
+            sha256: 'hash-$i',
+            width: 3840,
+            height: 2160,
+            originalOrder: i,
+            exifMake: 'fixture',
+          ),
+        );
+      }
+      final original = StitchTask(
+        id: 'failed-registration-task',
+        createdAt: DateTime.utc(2026),
+        sourceDirectory: temp.path,
+        outputDirectory: '${temp.path}/old-output',
+        photos: photos,
+        grid: const GridOptions(mode: GridMode.sequence, rows: 2, columns: 3),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 4,
+        phase: StitchPhase.failed,
+        nativeJobId: 'native-old-job',
+        error:
+            'REGISTRATION_FAILED: global matched-ray reprojection is 2.34px RMS',
+      );
+      final repository = _MemoryTaskRepository()
+        ..records[original.id] = original;
+      final issue = RegistrationIssue(
+        fromPhotoPath: photos[0].storedPath,
+        toPhotoPath: photos[1].storedPath,
+        fromName: photos[0].originalName,
+        toName: photos[1].originalName,
+        rmsPx: 29.96,
+        limitPx: 20,
+      );
+      final verticalIssue = RegistrationIssue(
+        fromPhotoPath: photos[0].storedPath,
+        toPhotoPath: photos[3].storedPath,
+        fromName: photos[0].originalName,
+        toName: photos[3].originalName,
+        rmsPx: 23.1,
+        limitPx: 20,
+      );
+      final previewFontPath = Platform.environment['GRID_PREVIEW_FONT'];
+      ThemeData? previewTheme;
+      if (previewFontPath != null && previewFontPath.isNotEmpty) {
+        final fontBytes = await tester.runAsync(
+          () => File(previewFontPath).readAsBytes(),
+        );
+        final fontLoader = FontLoader('GridPreviewFont')
+          ..addFont(Future.value(ByteData.sublistView(fontBytes!)));
+        await tester.runAsync(fontLoader.load);
+        previewTheme = ThemeData(fontFamily: 'GridPreviewFont');
+      }
+      await tester.pumpWidget(
+        RepaintBoundary(
+          key: const Key('photo-grid-visual-validation'),
+          child: MaterialApp(
+            locale: const Locale('zh'),
+            theme: previewTheme,
+            supportedLocales: StitchLocalizations.supportedLocales,
+            localizationsDelegates: const [
+              StitchLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            home: StitchHomePage(
+              initialTask: original,
+              jobApi: _WidgetJobApi(),
+              repository: repository,
+              registrationIssueLoader: (task) async =>
+                  task.id == original.id ? [issue, verticalIssue] : const [],
+              batchQueueController: EmptyBatchQueueController(
+                api: _WidgetJobApi(),
+                taskRepository: repository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _lazyChildVisibleAfterScroll(
+        tester,
+        find.textContaining('照片与网格映射'),
+        delta: 800,
+      );
+      final firstTile = find.byKey(const Key('grid-photo-select-0-0'));
+      final secondTile = find.byKey(const Key('grid-photo-select-0-1'));
+      await tester.ensureVisible(firstTile);
+      await tester.tap(firstTile);
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.ensureVisible(secondTile);
+      await tester.tap(secondTile);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pumpAndSettle();
+      expect(find.text('已选照片：2'), findsOneWidget);
+      expect(
+        find.textContaining('RMS 29.96 像素 / 上限 20.00 像素'),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(
+          Key(
+            'photo-grid-issue-${photos[0].storedPath}-${photos[1].storedPath}',
+          ),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('grid-lock-selected-action')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+
+      // Preserve a screenshot fixture for review of both neighbor orientations.
+      final issueHitTarget = find.byKey(
+        Key(
+          'photo-grid-issue-${photos[0].storedPath}-${photos[1].storedPath}',
+        ),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(10, 10));
+      await mouse.moveTo(const Offset(10, 10));
+      await mouse.moveTo(tester.getCenter(issueHitTarget));
+      await tester.pump(const Duration(milliseconds: 650));
+      await tester.pump(const Duration(milliseconds: 250));
+      tester
+          .state<TooltipState>(
+            find.byKey(
+              Key(
+                'photo-grid-issue-tooltip-${photos[0].storedPath}-${photos[1].storedPath}',
+              ),
+            ),
+          )
+          .ensureTooltipVisible();
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is RichText &&
+              widget.text.toPlainText().contains('08_20.jpg ↔ 08_21.jpg') &&
+              widget.text.toPlainText().contains('不匹配'),
+        ),
+        findsOneWidget,
+      );
+
+      final boundary = tester.renderObject<RenderRepaintBoundary>(
+        find.byKey(const Key('photo-grid-visual-validation')),
+      );
+      final screenshotPath =
+          '${Directory.current.path}/.local/photo-grid-issues.png';
+      await tester.runAsync(() async {
+        final screenshot = await boundary.toImage(pixelRatio: 1);
+        final png = await screenshot.toByteData(format: ImageByteFormat.png);
+        await Directory(
+          '${Directory.current.path}/.local',
+        ).create(recursive: true);
+        await File(screenshotPath).writeAsBytes(png!.buffer.asUint8List());
+        screenshot.dispose();
+      });
+
+      await tester.tap(find.byKey(const Key('grid-lock-selected-action')));
+      await tester.pumpAndSettle();
+      expect(repository.duplicate, isNotNull);
+      expect(original.grid.forceGridCells, isEmpty);
+      final initialCopy = repository.duplicate!;
+      expect(find.text('上次配准的超标匹配关系'), findsOneWidget);
+      final verticalPair = find.byKey(
+        Key(
+          'photo-grid-issue-list-${photos[0].storedPath}-${photos[3].storedPath}',
+        ),
+      );
+      expect(verticalPair, findsOneWidget);
+      await tester.ensureVisible(verticalPair);
+      await tester.tap(verticalPair);
+      await tester.pumpAndSettle();
+      expect(find.text('已选照片：2'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('grid-lock-selected-action')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      await tester.tap(find.byKey(const Key('grid-lock-selected-action')));
+      await tester.pumpAndSettle();
+      final copied = repository.saved!;
+      expect(copied.id, initialCopy.id);
+      expect(copied.phase, StitchPhase.imported);
+      expect(copied.nativeJobId, isNull);
+      expect(copied.grid.forceGridCells, {
+        const GridCell(0, 0),
+        const GridCell(0, 1),
+        const GridCell(1, 0),
+      });
+      expect(
+        copied.grid.lockedPhotoOrigins[photos[0].storedPath],
+        GridConstraintOrigin.operatorAction,
+      );
+      expect(
+        copied.grid.lockedPhotoOrigins[photos[1].storedPath],
+        GridConstraintOrigin.operatorAction,
+      );
+      expect(
+        copied.grid.lockedPhotoOrigins[photos[3].storedPath],
+        GridConstraintOrigin.operatorAction,
+      );
+      expect(copied.forceGridFallback, isFalse);
+      expect(copied.autoGridOverlap, isTrue);
+      final request = buildSphericalRequest(copied);
+      final tiles = request['tiles']! as List<Object?>;
+      final placementKinds = tiles
+          .map(
+            (tile) =>
+                ((tile! as Map<String, Object?>)['placementConstraint']!
+                    as Map<String, Object?>)['kind'],
+          )
+          .toList();
+      expect(placementKinds[0], 'hardGridLock');
+      expect(placementKinds[1], 'hardGridLock');
+      expect(placementKinds[2], 'gridPrior');
+      expect(placementKinds[3], 'hardGridLock');
+      expect(placementKinds.skip(4), everyElement('gridPrior'));
+      final placements = tiles
+          .map(
+            (tile) =>
+                (tile! as Map<String, Object?>)['placementConstraint']!
+                    as Map<String, Object?>,
+          )
+          .toList();
+      expect(placements[0]['origin'], 'operator');
+      expect(placements[1]['origin'], 'operator');
+      expect(placements[2]['origin'], 'systemFallback');
+      expect(placements[3]['origin'], 'operator');
+      expect(
+        placements.skip(4).map((p) => p['origin']),
+        everyElement('systemFallback'),
+      );
+    },
+  );
+
+  testWidgets('running task shows issues but disables grid lock mutations', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final photos = [
+      const ImportedPhoto(
+        originalName: '08_20.jpg',
+        storedPath: '08_20.jpg',
+        sha256: 'a',
+        width: 3840,
+        height: 2160,
+        originalOrder: 0,
+        exifMake: 'fixture',
+      ),
+      const ImportedPhoto(
+        originalName: '08_21.jpg',
+        storedPath: '08_21.jpg',
+        sha256: 'b',
+        width: 3840,
+        height: 2160,
+        originalOrder: 1,
+        exifMake: 'fixture',
+      ),
+    ];
+    final task = StitchTask(
+      id: 'running-grid-task',
+      createdAt: DateTime.utc(2026),
+      sourceDirectory: 'input',
+      outputDirectory: 'output',
+      photos: photos,
+      grid: const GridOptions(mode: GridMode.sequence, rows: 1, columns: 2),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 512,
+      workers: 2,
+      phase: StitchPhase.running,
+      nativeJobId: 'native-running-job',
+    );
+    final repository = _MemoryTaskRepository()..records[task.id] = task;
+    final issue = RegistrationIssue(
+      fromPhotoPath: photos[0].storedPath,
+      toPhotoPath: photos[1].storedPath,
+      fromName: photos[0].originalName,
+      toName: photos[1].originalName,
+      rmsPx: 29.96,
+      limitPx: 20,
+    );
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          initialTask: task,
+          jobApi: _RecoveringWidgetJobApi(),
+          repository: repository,
+          registrationIssueLoader: (_) async => [issue],
+          batchQueueController: EmptyBatchQueueController(
+            api: _WidgetJobApi(),
+            taskRepository: repository,
+          ),
+          foregroundWorkLock: _TestForegroundLock(),
+          mobileOverride: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final savesBeforeInteraction = repository.saveCount;
+    final duplicatesBeforeInteraction = repository.duplicateCount;
+    await _lazyChildVisibleAfterScroll(
+      tester,
+      find.textContaining('照片与网格映射'),
+      delta: 800,
+    );
+    await tester.tap(find.byKey(const Key('grid-photo-select-0-0')));
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.tap(find.byKey(const Key('grid-photo-select-0-1')));
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pumpAndSettle();
+    final lockButton = tester.widget<FilledButton>(
+      find.byKey(const Key('grid-lock-selected-action')),
+    );
+    expect(lockButton.onPressed, isNull);
+    expect(repository.duplicateCount, duplicatesBeforeInteraction);
+    expect(repository.saveCount, savesBeforeInteraction);
+  });
+
   testWidgets(
     'task progress is static before stitching in English and Chinese',
     (tester) async {
