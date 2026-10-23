@@ -17,6 +17,42 @@ import 'support/empty_batch_queue_controller.dart';
 import 'support/localization_surface_fakes.dart';
 
 void main() {
+  test('Windows task directory access denied errors are localized narrowly', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+    const raw =
+        r'PathAccessException: Creation failed, path=C:\Users\fixture-user\AppData\Roaming\com.lumia\Lumia Stitch\LumiaStitch\tasks\retry-task (OS Error: Access is denied, errno = 5)';
+    const chineseReason = 'Windows 拒绝创建本地任务文件夹。请检查任务存储位置的写入权限。';
+    const englishReason =
+        'Windows denied access while creating the local task folder. Check write permission for the task storage location.';
+
+    expect(chinese.text(raw), chineseReason);
+    expect(english.text(raw), englishReason);
+    const exactPathAccessException =
+        r'''PathAccessException: Creation failed, path = 'C:\Users\fixture-user\AppData\Roaming\com.lumia\Lumia Stitch\LumiaStitch\tasks\retry-task' (OS Error: Access is denied., errno = 5)''';
+    expect(chinese.text(exactPathAccessException), chineseReason);
+    expect(english.text(exactPathAccessException), englishReason);
+    const realFileSystemException = FileSystemException(
+      'Creation failed',
+      r'C:\Users\fixture-user\AppData\Roaming\com.lumia\Lumia Stitch\LumiaStitch\tasks\retry-task',
+      OSError('Access is denied.', 5),
+    );
+    expect(chinese.text(realFileSystemException.toString()), chineseReason);
+    expect(english.text(realFileSystemException.toString()), englishReason);
+    for (final prefix in ['导入失败：', '无法创建新任务副本：', '无法为配准修复创建重算副本：']) {
+      final chineseMessage = chinese.text('$prefix$raw');
+      final englishMessage = english.text('$prefix$raw');
+      expect(chineseMessage, startsWith('$prefix$chineseReason'));
+      expect(englishMessage, contains(englishReason));
+      expect(chineseMessage, isNot(contains('PathAccessException')));
+    }
+
+    const otherFilesystemError =
+        r'PathAccessException: Creation failed, path=C:\Users\fixture-user\AppData\Roaming\com.lumia\Lumia Stitch\LumiaStitch\tasks\id (OS Error: The system cannot find the path specified., errno = 3)';
+    expect(chinese.text(otherFilesystemError), otherFilesystemError);
+    expect(english.text(otherFilesystemError), otherFilesystemError);
+  });
+
   test('folder dialog messages are localized in both supported locales', () {
     const english = StitchLocalizations(Locale('en'));
     const chinese = StitchLocalizations(Locale('zh'));
