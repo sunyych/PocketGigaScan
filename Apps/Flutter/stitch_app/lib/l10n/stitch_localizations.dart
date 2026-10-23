@@ -1218,6 +1218,16 @@ class StitchLocalizations {
     '解除网格位置锁定': 'Unlock grid position',
     '旧任务锁定位置来源未知；点按可解除锁定': 'Legacy grid lock; origin unknown. Tap to unlock.',
     '上次配准的超标匹配关系': 'Previous registration matches over the limit',
+    '发现相邻照片配准误差超限':
+        'Adjacent photo registration errors are over the limit',
+    '是否按拍摄网格锁定以下问题位置并立即重新合成？原任务和原片会保留。':
+        'Lock the following problem positions to the capture grid and restitch now? The original task and photos will be kept.',
+    '暂不重试': 'Not now',
+    '锁定并重新合成': 'Lock and restitch',
+    '无法保存配准修复提示状态：':
+        'Could not save the registration repair prompt state: ',
+    '无法为配准修复创建重算副本：':
+        'Could not create a restitch copy for registration repair: ',
     '上次诊断，已按网格锁定，待重算': 'Previous diagnosis; locked to grid, pending restitch',
     '不匹配': 'Not match',
     '已选照片：': 'Selected photos: ',

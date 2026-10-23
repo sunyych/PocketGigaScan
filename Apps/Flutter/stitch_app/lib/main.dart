@@ -272,6 +272,9 @@ class _StitchHomePageState extends State<StitchHomePage>
   Set<String> _selectedPhotoPaths = {};
   List<RegistrationIssue> _registrationIssues = const [];
   int _registrationIssueGeneration = 0;
+  Timer? _registrationRepairPromptTimer;
+  String? _registrationRepairPromptTaskId;
+  final Set<String> _registrationRepairPromptSaveFailedTaskIds = {};
   Map<String, Object?>? _manifest;
   int? _viewerLevel;
   double _viewerScale = 1;
@@ -354,6 +357,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (mounted) setState(() {});
     unawaited(_syncForegroundLock());
     unawaited(_acknowledgeConfirmedQueueTimeouts());
+    _scheduleRegistrationRepairPrompt();
   }
 
   bool get _needsForegroundLock {
@@ -613,9 +617,216 @@ class _StitchHomePageState extends State<StitchHomePage>
       return;
     }
     setState(() {
-      _registrationIssues = issues.where((issue) => issue.exceedsLimit).toList();
+      _registrationIssues = issues
+          .where((issue) => issue.exceedsLimit)
+          .toList();
     });
+    unawaited(_maybeOfferRegistrationRepairPrompt());
   }
+
+  bool _isRegistrationRepairFailure(StitchTask task) {
+    final error = task.error?.toUpperCase() ?? '';
+    final stage = task.stage.toLowerCase();
+    return task.phase == StitchPhase.failed &&
+        (error.contains('REGISTRATION_FAILED') ||
+            (stage.contains('registration') && stage.contains('fail')));
+  }
+
+  void _scheduleRegistrationRepairPrompt() {
+    final task = _task;
+    if (!mounted ||
+        task == null ||
+        !_isRegistrationRepairFailure(task) ||
+        task.registrationRepairOffered ||
+        _registrationIssues.isEmpty ||
+        _background ||
+        _registrationRepairPromptTaskId != null ||
+        _registrationRepairPromptTimer != null) {
+      return;
+    }
+    _registrationRepairPromptTimer = Timer(
+      const Duration(milliseconds: 150),
+      () {
+        _registrationRepairPromptTimer = null;
+        unawaited(_maybeOfferRegistrationRepairPrompt());
+      },
+    );
+  }
+
+  Future<void> _maybeOfferRegistrationRepairPrompt() async {
+    final task = _task;
+    if (!mounted ||
+        task == null ||
+        !_isRegistrationRepairFailure(task) ||
+        task.registrationRepairOffered ||
+        _registrationRepairPromptSaveFailedTaskIds.contains(task.id) ||
+        _registrationRepairPromptTaskId != null ||
+        _registrationIssues.isEmpty) {
+      return;
+    }
+    if (!_batchOwnershipReady ||
+        _busy ||
+        _startOrResumeInFlight ||
+        _pollInFlight ||
+        _controlInFlight) {
+      _scheduleRegistrationRepairPrompt();
+      return;
+    }
+    if (_background || _isActivelyBatchOwned(task)) return;
+
+    final issues = List<RegistrationIssue>.unmodifiable(
+      _registrationIssues.where((issue) => issue.exceedsLimit),
+    );
+    final paths = task.photos.map((photo) => photo.storedPath).toList();
+    final pathToIndex = <String, int>{
+      for (var index = 0; index < paths.length; index++) paths[index]: index,
+    };
+    final endpointPaths = <String>{};
+    for (final issue in issues) {
+      if (!pathToIndex.containsKey(issue.fromPhotoPath) ||
+          !pathToIndex.containsKey(issue.toPhotoPath) ||
+          issue.fromPhotoPath == issue.toPhotoPath) {
+        return;
+      }
+      endpointPaths
+        ..add(issue.fromPhotoPath)
+        ..add(issue.toPhotoPath);
+    }
+    if (endpointPaths.isEmpty || _mappingError() != null) return;
+
+    final taskId = task.id;
+    final controlGeneration = _controlGeneration;
+    final issueGeneration = _registrationIssueGeneration;
+    final gridSnapshot = task.grid;
+    _registrationRepairPromptTaskId = taskId;
+    var ownsBusy = false;
+    String? copyId;
+    try {
+      final offered = task.copyWith(registrationRepairOffered: true);
+      try {
+        await _persist(
+          offered,
+          expectedGeneration: controlGeneration,
+          expectedTaskId: taskId,
+        );
+      } on Object catch (error) {
+        _registrationRepairPromptSaveFailedTaskIds.add(taskId);
+        if (mounted && _task?.id == taskId) {
+          setState(() {
+            _message =
+                '${StitchLocalizations.of(context).text('无法保存配准修复提示状态：')}$error';
+          });
+        }
+        return;
+      }
+      if (!mounted ||
+          !_isCurrentRegistrationRepairPrompt(
+            taskId,
+            controlGeneration,
+            issueGeneration,
+            paths,
+            gridSnapshot,
+          )) {
+        return;
+      }
+      if (!mounted) return;
+
+      final accepted = await showRegistrationRepairDialog(context, issues);
+      if (accepted != true ||
+          !_isCurrentRegistrationRepairPrompt(
+            taskId,
+            controlGeneration,
+            issueGeneration,
+            paths,
+            gridSnapshot,
+          ) ||
+          _busy ||
+          _startOrResumeInFlight ||
+          _background ||
+          !_batchOwnershipReady ||
+          _isActivelyBatchOwned(_task)) {
+        return;
+      }
+
+      final current = _task!;
+      var lockedGrid = current.grid;
+      for (var index = 0; index < current.photos.length; index++) {
+        final photo = current.photos[index];
+        if (endpointPaths.contains(photo.storedPath)) {
+          lockedGrid = lockedGrid.setPhotoLock(
+            _mappingCells[index],
+            photo.storedPath,
+            locked: true,
+          );
+        }
+      }
+      if (identical(lockedGrid, current.grid)) return;
+
+      setState(() {
+        _busy = true;
+        _message = null;
+      });
+      ownsBusy = true;
+      final prepared = current.copyWith(
+        grid: lockedGrid,
+        registrationRepairOffered: true,
+      );
+      var copy = await _repository.duplicateForNewRun(prepared);
+      copy = copy.copyWith(registrationRepairOffered: true);
+      copyId = copy.id;
+      if (!mounted ||
+          controlGeneration != _controlGeneration ||
+          _task?.id != taskId) {
+        return;
+      }
+      await _selectTaskImpl(copy);
+      if (!mounted || _task?.id != copy.id) return;
+      setState(() => _busy = false);
+      ownsBusy = false;
+      await _startOrResume(resume: false);
+    } on Object catch (error) {
+      if (mounted &&
+          (_task?.id == taskId ||
+              (copyId != null && _task?.id == copyId))) {
+        setState(() {
+          _busy = false;
+          _message =
+              '${StitchLocalizations.of(context).text('无法为配准修复创建重算副本：')}$error';
+        });
+      }
+    } finally {
+      if (ownsBusy && mounted && _busy) {
+        setState(() => _busy = false);
+      }
+      _registrationRepairPromptTaskId = null;
+      if (mounted) _scheduleRegistrationRepairPrompt();
+    }
+  }
+
+  bool _isCurrentRegistrationRepairPrompt(
+    String taskId,
+    int controlGeneration,
+    int issueGeneration,
+    List<String> paths,
+    GridOptions grid,
+  ) =>
+      mounted &&
+      controlGeneration == _controlGeneration &&
+      issueGeneration == _registrationIssueGeneration &&
+      _task?.id == taskId &&
+      _task!.registrationRepairOffered &&
+      _isRegistrationRepairFailure(_task!) &&
+      listEquals(
+        _task!.photos.map((photo) => photo.storedPath).toList(),
+        paths,
+      ) &&
+      _sameGridTopology(_task!.grid, grid) &&
+      _sameGridTopology(_grid, grid) &&
+      !_busy &&
+      !_startOrResumeInFlight &&
+      !_background &&
+      _batchOwnershipReady &&
+      !_isActivelyBatchOwned(_task);
 
   void _clearPhotoGridIssueState() {
     _registrationIssueGeneration++;
@@ -648,7 +859,8 @@ class _StitchHomePageState extends State<StitchHomePage>
     for (final issue in _registrationIssues) {
       final fromIndex = indexByPath[issue.fromPhotoPath];
       final toIndex = indexByPath[issue.toPhotoPath];
-      if (fromIndex == null || toIndex == null ||
+      if (fromIndex == null ||
+          toIndex == null ||
           fromIndex >= _mappingCells.length ||
           toIndex >= _mappingCells.length) {
         continue;
@@ -664,7 +876,10 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       final fromCenter = centerFor(fromCell);
       final toCenter = centerFor(toCell);
-      final direction = Offset(columnDelta.sign.toDouble(), rowDelta.sign.toDouble());
+      final direction = Offset(
+        columnDelta.sign.toDouble(),
+        rowDelta.sign.toDouble(),
+      );
       result.add(
         PhotoGridIssueConnection(
           issue: issue,
@@ -712,10 +927,9 @@ class _StitchHomePageState extends State<StitchHomePage>
       (photo) => photo.storedPath == path,
     );
     if (photoIndex < 0 || photoIndex >= _mappingCells.length) return false;
-    return _grid.placementFor(
-          task.photos[photoIndex],
-          _mappingCells[photoIndex],
-        ).kind ==
+    return _grid
+            .placementFor(task.photos[photoIndex], _mappingCells[photoIndex])
+            .kind ==
         'hardGridLock';
   }
 
@@ -804,9 +1018,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           });
         }
         setState(() {
-          _message = locked
-              ? '已创建重算副本，并锁定所选照片。'
-              : '已创建重算副本，并解除所选照片的网格锁定。';
+          _message = locked ? '已创建重算副本，并锁定所选照片。' : '已创建重算副本，并解除所选照片的网格锁定。';
         });
         await _refreshTasks();
       } else {
@@ -854,6 +1066,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         _batchOwnershipReadySignal.complete();
       }
       if (mounted) setState(() {});
+      _scheduleRegistrationRepairPrompt();
     }
     if (_mobile && _pendingRuntimeTimeoutJobIds.isNotEmpty) {
       await _processRuntimeTimeouts({
@@ -1505,6 +1718,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _background = _mobile && state != AppLifecycleState.resumed;
+    if (!_background) _scheduleRegistrationRepairPrompt();
     if (_background && _deviceTransfers.isNotEmpty) {
       for (final transfer in _deviceTransfers.values.where(
         (value) => value.state == DwarfDownloadState.downloading,
@@ -1582,6 +1796,8 @@ class _StitchHomePageState extends State<StitchHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _registrationRepairPromptTimer?.cancel();
+    _registrationRepairPromptTimer = null;
     widget.settingsController?.removeListener(_applySettingsDefaults);
     unawaited(_runtimeTimeoutSubscription?.cancel());
     if (widget.mobileRuntimeService == null) {
@@ -2102,6 +2318,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       await _startOrResumeGuarded(resume: resume);
     } finally {
       _startOrResumeInFlight = false;
+      _scheduleRegistrationRepairPrompt();
     }
   }
 
@@ -2994,10 +3211,7 @@ class _StitchHomePageState extends State<StitchHomePage>
           StitchPhase.paused,
           StitchPhase.exporting,
         }.contains(previous.phase) &&
-        {
-          StitchPhase.queued,
-          StitchPhase.running,
-        }.contains(updated.phase);
+        {StitchPhase.queued, StitchPhase.running}.contains(updated.phase);
     var mergedTimeline = (previous?.timeline ?? const StitchTimeline()).merge(
       updated.timeline,
     );
@@ -3274,6 +3488,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
     } finally {
       _pollInFlight = false;
+      _scheduleRegistrationRepairPrompt();
     }
     if (shouldAutoExport) await _batchOwnershipReadySignal.future;
     if (shouldAutoExport && _isCurrentSelection(controlGeneration, task.id)) {
@@ -5308,7 +5523,8 @@ class _StitchHomePageState extends State<StitchHomePage>
                               final issuePaths = _registrationIssues
                                   .where(
                                     (issue) =>
-                                        issue.fromPhotoPath == photo.storedPath ||
+                                        issue.fromPhotoPath ==
+                                            photo.storedPath ||
                                         issue.toPhotoPath == photo.storedPath,
                                   )
                                   .toList();
@@ -5333,8 +5549,9 @@ class _StitchHomePageState extends State<StitchHomePage>
                                   behavior: HitTestBehavior.opaque,
                                   onTap: () => _selectGridPhoto(
                                     photo.storedPath,
-                                    extendSelection:
-                                        HardwareKeyboard.instance.isShiftPressed,
+                                    extendSelection: HardwareKeyboard
+                                        .instance
+                                        .isShiftPressed,
                                   ),
                                   child: Stack(
                                     fit: StackFit.expand,
@@ -5417,31 +5634,36 @@ class _StitchHomePageState extends State<StitchHomePage>
                                             key: ValueKey(
                                               'grid-lock-${cell.row}-${cell.column}',
                                             ),
-                                            tooltip: StitchLocalizations.of(
-                                              context,
-                                            ).text(
-                                              placement.origin ==
-                                                      GridConstraintOrigin
-                                                          .legacyUnknown
-                                                  ? '旧任务锁定位置来源未知；点按可解除锁定'
-                                                  : '解除网格位置锁定',
-                                            ),
+                                            tooltip:
+                                                StitchLocalizations.of(
+                                                  context,
+                                                ).text(
+                                                  placement.origin ==
+                                                          GridConstraintOrigin
+                                                              .legacyUnknown
+                                                      ? '旧任务锁定位置来源未知；点按可解除锁定'
+                                                      : '解除网格位置锁定',
+                                                ),
                                             visualDensity:
                                                 VisualDensity.compact,
                                             padding: EdgeInsets.zero,
-                                            constraints: BoxConstraints.tightFor(
-                                              width: lockButtonSize,
-                                              height: lockButtonSize,
-                                            ),
+                                            constraints:
+                                                BoxConstraints.tightFor(
+                                                  width: lockButtonSize,
+                                                  height: lockButtonSize,
+                                                ),
                                             onPressed: _editable
                                                 ? () async {
-                                                    final updated = task.copyWith(
-                                                      grid: _grid.setPhotoLock(
-                                                        cell,
-                                                        photo.storedPath,
-                                                        locked: false,
-                                                      ),
-                                                    );
+                                                    final updated = task
+                                                        .copyWith(
+                                                          grid: _grid
+                                                              .setPhotoLock(
+                                                                cell,
+                                                                photo
+                                                                    .storedPath,
+                                                                locked: false,
+                                                              ),
+                                                        );
                                                     await _persist(updated);
                                                     _setGrid(updated.grid);
                                                   }
@@ -5467,10 +5689,11 @@ class _StitchHomePageState extends State<StitchHomePage>
                                             visualDensity:
                                                 VisualDensity.compact,
                                             padding: EdgeInsets.zero,
-                                            constraints: BoxConstraints.tightFor(
-                                              width: lockButtonSize,
-                                              height: lockButtonSize,
-                                            ),
+                                            constraints:
+                                                BoxConstraints.tightFor(
+                                                  width: lockButtonSize,
+                                                  height: lockButtonSize,
+                                                ),
                                             onPressed: () async {
                                               final updated = task.copyWith(
                                                 grid: _grid.setPhotoLock(

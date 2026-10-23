@@ -1,9 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:stitch_app/models/grid_options.dart';
+import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/services/task_repository.dart';
 
@@ -51,6 +53,65 @@ void main() {
       expect(
         (await repository.loadAll()).single.maxEdgeReprojectionRmsPixels,
         13,
+      );
+    },
+  );
+
+  test(
+    'duplicate new run preserves registration repair offer and inputs',
+    () async {
+      final photoFile = File(p.join(temp.path, 'shared-source.jpg'));
+      final photoBytes = [1, 2, 3, 4];
+      await photoFile.writeAsBytes(photoBytes);
+      final photo = ImportedPhoto(
+        originalName: 'shared-source.jpg',
+        storedPath: photoFile.path,
+        sha256: sha256.convert(photoBytes).toString(),
+        width: 10,
+        height: 8,
+        originalOrder: 0,
+      );
+      final grid = const GridOptions(
+        mode: GridMode.sequence,
+        rows: 1,
+        columns: 1,
+      );
+      final original = task('123459-abcd05').copyWith(
+        photos: [photo],
+        grid: grid,
+        phase: StitchPhase.failed,
+        registrationRepairOffered: true,
+        autoGridOverlap: false,
+        maxEdgeReprojectionRmsPixels: 18,
+      );
+      await repository.save(original);
+
+      final loadedOriginal = await repository.loadById(original.id);
+      expect(loadedOriginal?.registrationRepairOffered, isTrue);
+      final duplicate = await repository.duplicateForNewRun(loadedOriginal!);
+      final loadedDuplicate = await repository.loadById(duplicate.id);
+
+      expect(duplicate.id, isNot(original.id));
+      expect(duplicate.outputDirectory, isNot(original.outputDirectory));
+      expect(duplicate.sourceDirectory, original.sourceDirectory);
+      expect(duplicate.photos, hasLength(1));
+      expect(duplicate.photos.single, same(loadedOriginal.photos.single));
+      expect(duplicate.photos.single.storedPath, photo.storedPath);
+      expect(duplicate.photos.single.sha256, photo.sha256);
+      expect(duplicate.grid.toJson(), grid.toJson());
+      expect(duplicate.phase, StitchPhase.imported);
+      expect(duplicate.registrationRepairOffered, isTrue);
+      expect(duplicate.autoGridOverlap, isFalse);
+      expect(duplicate.maxEdgeReprojectionRmsPixels, 18);
+      expect(loadedDuplicate?.registrationRepairOffered, isTrue);
+      expect(loadedDuplicate?.grid.toJson(), grid.toJson());
+      expect(
+        (await repository.loadById(original.id))?.phase,
+        StitchPhase.failed,
+      );
+      expect(
+        (await repository.loadById(original.id))?.grid.toJson(),
+        grid.toJson(),
       );
     },
   );

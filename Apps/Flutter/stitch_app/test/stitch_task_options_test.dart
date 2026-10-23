@@ -160,6 +160,35 @@ void main() {
     },
   );
 
+  test('registration repair offer defaults false for legacy task JSON', () {
+    final legacy = fixture().toJson()..remove('registrationRepairOffered');
+
+    expect(StitchTask.fromJson(legacy).registrationRepairOffered, isFalse);
+  });
+
+  test('registration repair offer survives copy and JSON round trip', () {
+    final original = fixture().copyWith(
+      forceGridFallback: true,
+      autoGridOverlap: false,
+      gridHorizontalOverlap: 0.4,
+      cameraProfileId: 'profile-a',
+      maxEdgeReprojectionRmsPixels: 18,
+    );
+    final offered = original.copyWith(registrationRepairOffered: true);
+    final restored = StitchTask.fromJson(offered.toJson());
+
+    expect(original.registrationRepairOffered, isFalse);
+    expect(offered.registrationRepairOffered, isTrue);
+    expect(restored.registrationRepairOffered, isTrue);
+    expect(restored.id, original.id);
+    expect(restored.grid.toJson(), original.grid.toJson());
+    expect(restored.forceGridFallback, isTrue);
+    expect(restored.autoGridOverlap, isFalse);
+    expect(restored.gridHorizontalOverlap, 0.4);
+    expect(restored.cameraProfileId, 'profile-a');
+    expect(restored.maxEdgeReprojectionRmsPixels, 18);
+  });
+
   test(
     'large-job approval persists and is invalidated by job, grid, or photo changes',
     () {

@@ -315,6 +315,7 @@ class TaskRepository {
       protectPeople: old.protectPeople,
       smoothWater: old.smoothWater,
       maxEdgeReprojectionRmsPixels: old.maxEdgeReprojectionRmsPixels,
+      registrationRepairOffered: old.registrationRepairOffered,
     );
     await save(task);
     return task;

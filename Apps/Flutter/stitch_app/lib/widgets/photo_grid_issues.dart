@@ -187,6 +187,66 @@ class PhotoGridSelectionActions extends StatelessWidget {
   }
 }
 
+Future<bool?> showRegistrationRepairDialog(
+  BuildContext context,
+  List<RegistrationIssue> issues,
+) =>
+    showDialog<bool>(
+      context: context,
+      builder: (context) => RegistrationRepairConfirmationDialog(
+        issues: issues,
+      ),
+    );
+
+class RegistrationRepairConfirmationDialog extends StatelessWidget {
+  const RegistrationRepairConfirmationDialog({
+    super.key,
+    required this.issues,
+  });
+
+  final List<RegistrationIssue> issues;
+
+  @override
+  Widget build(BuildContext context) {
+    final localization = StitchLocalizations.of(context);
+    return AlertDialog(
+      key: const Key('registration-repair-confirmation'),
+      title: Text(localization.text('发现相邻照片配准误差超限')),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              localization.text(
+                '是否按拍摄网格锁定以下问题位置并立即重新合成？原任务和原片会保留。',
+              ),
+            ),
+            const SizedBox(height: 8),
+            for (final issue in issues)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Text(_issueMeasurement(localization, issue)),
+              ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const Key('registration-repair-decline'),
+          onPressed: () => Navigator.of(context).pop(false),
+          child: Text(localization.text('暂不重试')),
+        ),
+        FilledButton(
+          key: const Key('registration-repair-accept'),
+          onPressed: () => Navigator.of(context).pop(true),
+          child: Text(localization.text('锁定并重新合成')),
+        ),
+      ],
+    );
+  }
+}
+
 String _issueMeasurement(
   StitchLocalizations localization,
   RegistrationIssue issue,

@@ -64,6 +64,7 @@ class StitchTask {
     this.exportDirectory,
     this.publishedExportPath,
     this.publishError,
+    this.registrationRepairOffered = false,
   }) : assert(maxEdgeReprojectionRmsPixels >= 6),
        assert(maxEdgeReprojectionRmsPixels <= 24),
        assert(maxEdgeReprojectionRmsPixels * 2 % 1 == 0);
@@ -110,6 +111,8 @@ class StitchTask {
   final String? exportDirectory;
   final String? publishedExportPath;
   final String? publishError;
+  /// Prevents repeatedly offering the same automatic registration repair.
+  final bool registrationRepairOffered;
 
   bool get needsLargeJobConfirmation =>
       grid.rows > 6 || grid.columns > 6 || photos.length > 36;
@@ -200,6 +203,7 @@ class StitchTask {
     bool clearPublishedExportPath = false,
     String? publishError,
     bool clearPublishError = false,
+    bool? registrationRepairOffered,
   }) => StitchTask(
     id: id,
     createdAt: createdAt,
@@ -259,6 +263,8 @@ class StitchTask {
         ? null
         : publishedExportPath ?? this.publishedExportPath,
     publishError: clearPublishError ? null : publishError ?? this.publishError,
+    registrationRepairOffered:
+        registrationRepairOffered ?? this.registrationRepairOffered,
   );
 
   Map<String, Object?> toJson() => {
@@ -305,6 +311,7 @@ class StitchTask {
     'exportDirectory': exportDirectory,
     'publishedExportPath': publishedExportPath,
     'publishError': publishError,
+    'registrationRepairOffered': registrationRepairOffered,
   };
 
   factory StitchTask.fromJson(Map<String, Object?> json) {
@@ -394,6 +401,8 @@ class StitchTask {
       exportDirectory: json['exportDirectory'] as String?,
       publishedExportPath: json['publishedExportPath'] as String?,
       publishError: json['publishError'] as String?,
+      registrationRepairOffered:
+          json['registrationRepairOffered'] as bool? ?? false,
     );
   }
 
