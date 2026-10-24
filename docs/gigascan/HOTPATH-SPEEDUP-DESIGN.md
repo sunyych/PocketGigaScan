@@ -93,7 +93,7 @@ The combined per-worker geometry/score cache reserves 24 bytes per candidate pix
 
 Pixel qualification compares decoded RGBA bytes at matching level-zero tile coordinates and dimensions. Benchmark the same layout, worker count, memory budget, and output endpoint with the standard benchmark harness, then compare decoded RGBA output rather than compressed-file hashes. This renderer replay evaluates render cost and pixel parity only; it does not fix or validate registration quality.
 
-The focused native test log reports 32 passed and 2 ignored; the benchmark-script suite reports 6 passed, and the builder/mock-signing contracts passed. Full native and Flutter suites and package validation are still pending.
+Qualification completed for source commit `313eb2f81847754f5ecd0554e7495196556d8385`: the full native suite passed 251 tests with 3 ignored and no failures; focused renderer tests passed 32 with 2 ignored; benchmark harness tests passed 6; Flutter analysis reported no issues and all 364 Flutter tests passed. Windows build and signing-finalizer contracts passed, including mocked Authenticode coverage.
 
 ### Full-layout renderer replay
 
@@ -108,4 +108,6 @@ The completed reference/candidate pair used the same 312-source layout (SHA-256 
 
 The host wrapper measured wall time 1,064.594 s then 873.093 s, process CPU 3,072.375 s then 2,508.250 s, and peak sampled RSS 10,529,230,848 B then 10,554,507,264 B. RSS samples were taken every 250 ms. Both runs decoded 312 source images. Geometry-cache slots per tile decreased from 7 to 5, while cached source-tile count changed from 28,105 to 27,128. The candidate receipt counted 2,574,142,074 adjusted-ownership score reuses and 1,684,807,200 owner-validity geometry projections reused.
 
-The per-worker `ownershipPassMs`, `classificationPassMs`, and `blendPassMs` are cumulative across concurrent tile workers, not wall time and not additive phases. Reference→candidate values were 903,457.813→890,012.385 ms, 382,156.726→422,297.440 ms, and 1,256,219.886→543,806.294 ms respectively. This was one ordered pair with no other builds running concurrently; OS file cache was not cleared. These measurements establish this replay's result, not a universal speedup or a registration-quality fix. Full native/Flutter suites and package validation remain pending.
+The per-worker `ownershipPassMs`, `classificationPassMs`, and `blendPassMs` are cumulative worker time, not wall-clock durations; summing them does not yield elapsed wall time. Reference→candidate values were 903,457.813→890,012.385 ms, 382,156.726→422,297.440 ms, and 1,256,219.886→543,806.294 ms respectively. This was one ordered pair with no other builds running concurrently; OS file cache was not cleared. These measurements establish this replay's result, not a universal speedup or a registration-quality fix.
+
+The standard Windows build script completed in `-PrepareSigning` mode with exit code 0 and produced Windows version 1.5.1+30. Package validation confirmed that all packaged core DLL hashes match `650a34b99f1b95477a3f7601dcd9e6d01915544b72345fffeb534098034993e4`. This artifact is unsigned signing input, not a signed release; no installed application was changed. A fresh registration run, actual desktop UI run, and full end-to-end job were not performed.
