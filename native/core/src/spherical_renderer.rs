@@ -59,6 +59,25 @@ fn seam_ownership_bytes_per_cell() -> u64 {
     let unaligned = candidate_scratch + solver_and_result;
     ((unaligned + 15) & !15) as u64
 }
+
+fn geometry_cache_slot_bytes() -> crate::Result<u64> {
+    let arrays_per_pixel = 3 * std::mem::size_of::<f64>() as u64;
+    u64::from(TILE)
+        .checked_mul(u64::from(TILE))
+        .and_then(|pixels| pixels.checked_mul(arrays_per_pixel))
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of::<(usize, TileGeometryCache)>() as u64)
+        })
+        .ok_or_else(|| crate::Error::Invalid("geometry cache slot accounting overflowed".into()))
+}
+
+fn cache_source_quality_map(
+    source: &Source,
+    computed: Arc<SourceQualityMap>,
+) -> Arc<SourceQualityMap> {
+    let mut cached_quality = source.quality_map.lock().expect("source quality map lock");
+    cached_quality.get_or_insert(computed).clone()
+}
 static RENDERER_IDENTITY_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 static SRGB_F32_THRESHOLDS: OnceLock<[u32; 256]> = OnceLock::new();
 static SRGB_F32_BUCKET_BASE: OnceLock<Vec<u8>> = OnceLock::new();
@@ -841,7 +860,10 @@ fn build_global_ownership_map(
         }
         let source = &sources[source_index];
         let source_image = image::open(&source.path)?.into_rgba8();
-        let quality = SourceQualityMap::from_image(&source_image);
+        let quality = cache_source_quality_map(
+            source,
+            Arc::new(SourceQualityMap::from_image(&source_image)),
+        );
         for cy in 0..rows {
             if !checkpoint() {
                 return Err(crate::Error::Cancelled);
@@ -1039,6 +1061,7 @@ fn geometry_from_source_xy(source: &Source, x: f64, y: f64) -> (f64, f64, f64, f
 struct TileGeometryCache {
     xs: Vec<f64>,
     ys: Vec<f64>,
+    adjusted_ownership: Vec<f64>,
 }
 
 struct CandidateSourceIndices<'a> {
@@ -1078,6 +1101,7 @@ impl TileGeometryCache {
         Self {
             xs: vec![f64::NAN; count],
             ys: vec![f64::NAN; count],
+            adjusted_ownership: vec![f64::NAN; count],
         }
     }
 
@@ -1094,6 +1118,61 @@ impl TileGeometryCache {
         } else {
             Some(geometry_from_source_xy(source, x, y))
         }
+    }
+
+    fn store_adjusted_ownership(&mut self, index: usize, score: f64) {
+        self.adjusted_ownership[index] = score;
+    }
+
+    fn get_adjusted_ownership(&self, index: usize) -> Option<f64> {
+        let score = self.adjusted_ownership[index];
+        (!score.is_nan()).then_some(score)
+    }
+}
+
+#[derive(Debug)]
+struct OwnerValidity {
+    bits: Vec<u64>,
+}
+
+impl OwnerValidity {
+    fn new(pixel_count: usize) -> Self {
+        Self {
+            bits: vec![0; pixel_count.div_ceil(u64::BITS as usize)],
+        }
+    }
+
+    fn set(&mut self, index: usize, valid: bool) {
+        if valid {
+            self.bits[index / u64::BITS as usize] |= 1 << (index % u64::BITS as usize);
+        }
+    }
+
+    fn get(&self, index: usize) -> bool {
+        self.bits[index / u64::BITS as usize] & (1 << (index % u64::BITS as usize)) != 0
+    }
+}
+
+fn source_geometry_is_valid(
+    source_index: usize,
+    pixel_index: usize,
+    world: [f64; 3],
+    sources: &[Source],
+    tile_geometry: &[(usize, TileGeometryCache)],
+) -> (bool, bool) {
+    if let Some((_, geometry)) = tile_geometry
+        .iter()
+        .find(|(index, _)| *index == source_index)
+    {
+        (
+            geometry.get(&sources[source_index], pixel_index).is_some(),
+            true,
+        )
+    } else {
+        (
+            sample_geometry(&sources[source_index], world).is_some(),
+            false,
+        )
     }
 }
 
@@ -1394,12 +1473,31 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let tile_bytes_per_pixel = if blend_mode == BlendMode::Deghost {
         // accum[4] (16 bytes), adjusted and top-two raw ownership scores
         // (24 bytes), and the winning plus runner-up source indices (16 bytes).
-        // The 64-byte reserve leaves 8 bytes for alignment and Vec overhead.
+        // The 64-byte reserve leaves 8 bytes/pixel for alignment, Vec headers,
+        // and the packed ownership-validity bitset (1/8 byte/pixel).
         64
     } else {
         24
     };
     let tile_reserve = u64::from(TILE) * u64::from(TILE) * tile_bytes_per_pixel;
+    let owner_validity_reserve = if blend_mode == BlendMode::Deghost && ownership_aware {
+        let words = (u64::from(TILE) * u64::from(TILE)).div_ceil(u64::BITS as u64);
+        words
+            .checked_mul(std::mem::size_of::<u64>() as u64)
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<Vec<u64>>() as u64))
+            .ok_or_else(|| {
+                crate::Error::Invalid("owner validity bitset accounting overflowed".into())
+            })?
+    } else {
+        0
+    };
+    let owner_validity_scratch_margin =
+        tile_reserve.saturating_sub(u64::from(TILE) * u64::from(TILE) * 56);
+    if owner_validity_reserve > owner_validity_scratch_margin {
+        return Err(crate::Error::Invalid(
+            "owner validity bitset exceeds renderer tile scratch reserve".into(),
+        ));
+    }
     let source_quality_enabled = blend_mode == BlendMode::Deghost || protect_people;
     let source_quality_map_reserve = if source_quality_enabled {
         let per_source = SourceQualityMap::byte_len()
@@ -1490,13 +1588,7 @@ fn render_layout_tiles_with_options_internal_and_ownership(
         .ok_or_else(|| {
             crate::Error::Invalid("renderer active memory reservation overflowed".into())
         })?;
-    let geometry_slot_bytes = u64::from(TILE)
-        .checked_mul(u64::from(TILE))
-        .and_then(|pixels| pixels.checked_mul(2 * std::mem::size_of::<f64>() as u64))
-        .and_then(|bytes| {
-            bytes.checked_add(std::mem::size_of::<(usize, TileGeometryCache)>() as u64)
-        })
-        .ok_or_else(|| crate::Error::Invalid("geometry cache slot accounting overflowed".into()))?;
+    let geometry_slot_bytes = geometry_cache_slot_bytes()?;
     let geometry_headroom = budget_bytes
         .saturating_sub(active_reserve)
         .saturating_sub(cache_min_reserve);
@@ -1575,6 +1667,8 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let encode_micros = AtomicU64::new(0);
     let geometry_cached_sources = AtomicU64::new(0);
     let geometry_projection_reuses = AtomicU64::new(0);
+    let adjusted_ownership_reuses = AtomicU64::new(0);
+    let owner_geometry_reuses = AtomicU64::new(0);
     let ownership_micros = AtomicU64::new(0);
     let classification_micros = AtomicU64::new(0);
     let blend_micros = AtomicU64::new(0);
@@ -1627,6 +1721,8 @@ fn render_layout_tiles_with_options_internal_and_ownership(
                 let encode_micros = &encode_micros;
                 let geometry_cached_sources = &geometry_cached_sources;
                 let geometry_projection_reuses = &geometry_projection_reuses;
+                let adjusted_ownership_reuses = &adjusted_ownership_reuses;
+                let owner_geometry_reuses = &owner_geometry_reuses;
                 let ownership_micros = &ownership_micros;
                 let classification_micros = &classification_micros;
                 let blend_micros = &blend_micros;
@@ -1661,6 +1757,8 @@ fn render_layout_tiles_with_options_internal_and_ownership(
                         geometry_cache_source_slots,
                         &geometry_cached_sources,
                         &geometry_projection_reuses,
+                        &adjusted_ownership_reuses,
+                        &owner_geometry_reuses,
                         &ownership_micros,
                         &classification_micros,
                         &blend_micros,
@@ -1700,7 +1798,7 @@ fn render_layout_tiles_with_options_internal_and_ownership(
     let cache_guard = cache.state.lock().expect("decode cache lock");
     let render_ms = started.elapsed().as_secs_f64() * 1000.0;
     Ok(
-        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"seamOwnership":seam_diagnostics,"sceneRendering":{"enabled":scene_plan.is_some(),"protectPeople":protect_people,"smoothWater":smooth_water,"personComponents":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::component_count),"personObjects":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::object_count),"personPixels":scene_person_pixels.load(Ordering::Relaxed),"waterOverlapPixels":scene_water_pixels.load(Ordering::Relaxed),"objectCoverageFallbacks":scene_object_fallbacks.load(Ordering::Relaxed),"sceneBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::estimated_bytes),"sceneWorkerBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::worker_bytes)},"renderMs":render_ms}),
+        serde_json::json!({"width":width,"height":height,"tileSize":TILE,"tileBytesPerPixelReserved":tile_bytes_per_pixel,"rows":rows,"columns":cols,"completedTiles":completed,"backend":"cpu-rust-tiled","blendModel":blend_mode.model_name(),"workersRequested":workers_requested,"workersEffective":effective_workers,"peakConcurrentWorkers":peak_workers.load(Ordering::Relaxed),"workers":effective_workers,"sourceCacheEnabled":use_source_cache,"sourceCacheLimitBytes":cache_limit,"sourceCacheMinimumReserveBytes":cache_min_reserve,"peakSourceCacheBytes":cache_guard.peak_bytes,"sourceQualityMapBytesReserved":source_quality_map_reserve,"sourceQualityMapRefsPerWorkerBytesReserved":source_quality_refs_per_worker,"decodeSlotBytesReserved":decode_slot_bytes,"reservedDecodeSlots":effective_workers,"decodeSlotReserveBytes":decode_slot_reserve,"candidateListEnabled":candidate_list_enabled,"candidateIndexBytesPerWorkerReserved":if candidate_list_enabled { candidate_index_bytes_per_worker } else { 0 },"candidateIndexBytesReserved":candidate_list_reserve,"geometryCacheEnabled":geometry_cache_source_slots>0,"geometryCacheBytesPerWorkerReserved":geometry_cache_per_worker_cap,"geometryCacheBytesReserved":geometry_cache_reserve,"geometryCacheSourceSlotsPerTile":geometry_cache_source_slots,"estimatedActiveMemoryBytes":active_reserve+render_feature_reserve+cache_guard.peak_bytes,"memoryAccounting":"conservativeEstimate","sourceCacheHits":hits.load(Ordering::Relaxed),"sourceCacheMisses":misses.load(Ordering::Relaxed),"sourceDecodes":decodes.load(Ordering::Relaxed),"sourceDecodeWaits":cache.decode_waits.load(Ordering::Relaxed),"sourceDecodeErrors":cache.decode_errors.load(Ordering::Relaxed),"sourceDecodePeakInFlight":cache.peak_decode_slots.load(Ordering::Relaxed),"sourceDecodeMs":decode_micros.load(Ordering::Relaxed) as f64/1000.0,"tileEncodeMs":encode_micros.load(Ordering::Relaxed) as f64/1000.0,"sourceCandidateVisits":visits.load(Ordering::Relaxed),"geometryCachedSourceTileCount":geometry_cached_sources.load(Ordering::Relaxed),"geometryProjectionEvaluationsAvoided":geometry_projection_reuses.load(Ordering::Relaxed),"adjustedOwnershipScoresReused":adjusted_ownership_reuses.load(Ordering::Relaxed),"ownerGeometryValidityProjectionsReused":owner_geometry_reuses.load(Ordering::Relaxed),"ownershipPassMs":ownership_micros.load(Ordering::Relaxed) as f64/1000.0,"classificationPassMs":classification_micros.load(Ordering::Relaxed) as f64/1000.0,"blendPassMs":blend_micros.load(Ordering::Relaxed) as f64/1000.0,"finalOutputPassMs":output_micros.load(Ordering::Relaxed) as f64/1000.0,"schedule":"2d-block","scheduleBlockSize":4,"seamOwnership":seam_diagnostics,"sceneRendering":{"enabled":scene_plan.is_some(),"protectPeople":protect_people,"smoothWater":smooth_water,"personComponents":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::component_count),"personObjects":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::object_count),"personPixels":scene_person_pixels.load(Ordering::Relaxed),"waterOverlapPixels":scene_water_pixels.load(Ordering::Relaxed),"objectCoverageFallbacks":scene_object_fallbacks.load(Ordering::Relaxed),"sceneBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::estimated_bytes),"sceneWorkerBytesReserved":scene_plan.as_ref().map_or(0, scene_render::ScenePlan::worker_bytes)},"renderMs":render_ms}),
     )
 }
 
@@ -2035,6 +2133,8 @@ fn render_one_tile(
     geometry_cache_source_slots: usize,
     geometry_cached_sources: &AtomicU64,
     geometry_projection_reuses: &AtomicU64,
+    adjusted_ownership_reuses: &AtomicU64,
+    owner_geometry_reuses: &AtomicU64,
     ownership_micros: &AtomicU64,
     classification_micros: &AtomicU64,
     blend_micros: &AtomicU64,
@@ -2183,6 +2283,8 @@ fn render_one_tile(
     }
     let mut tile_cached_source_count = 0u64;
     let mut tile_projection_reuses = 0u64;
+    let mut tile_adjusted_ownership_reuses = 0u64;
+    let mut tile_owner_geometry_reuses = 0u64;
     if blend_mode == BlendMode::Deghost {
         let ownership_started = Instant::now();
         for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len())
@@ -2274,18 +2376,17 @@ fn render_one_tile(
             let quality = source_quality_maps[source_index]
                 .as_ref()
                 .expect("quality map prepared in geometry pass");
-            let cached_geometry = tile_geometry
+            let cached_geometry_index = tile_geometry
                 .iter()
-                .find(|(index, _)| *index == source_index)
-                .map(|(_, geometry)| geometry);
+                .position(|(index, _)| *index == source_index);
             for py in 0..th {
                 for px in 0..tw {
                     let (sy, cy) = x_rays[px as usize];
                     let (sp, cp) = y_rays[py as usize];
                     let world = [sy * cp, sp, cy * cp];
                     let index = (py * tw + px) as usize;
-                    let geometry = if let Some(cached) = cached_geometry {
-                        cached.get(source, index)
+                    let geometry = if let Some(cached_index) = cached_geometry_index {
+                        tile_geometry[cached_index].1.get(source, index)
                     } else {
                         sample_geometry(source, world)
                     };
@@ -2316,6 +2417,11 @@ fn render_one_tile(
                             if sharpness_aware { peer_sharp } else { 0.0 },
                             source.width.min(source.height),
                         );
+                        if let Some(cached_index) = cached_geometry_index {
+                            tile_geometry[cached_index]
+                                .1
+                                .store_adjusted_ownership(index, adjusted);
+                        }
                         let scores = max_adjusted_ownership.as_mut().unwrap();
                         scores[index] = scores[index].max(adjusted);
                     }
@@ -2336,6 +2442,38 @@ fn render_one_tile(
         tile_projection_reuses = 0;
     }
     let blend_started = Instant::now();
+    // The ownership prior asks whether the same map-selected source projects
+    // at each output pixel for every overlapping blend source. Cache that
+    // answer once per tile in a packed bitset. Its worst-case storage is
+    // 1/8 byte per pixel plus one Vec header, within the existing 8 B/pixel
+    // margin in the full 512x512 tile reservation (including edge tiles).
+    let owner_validity = ownership_map.map(|ownership_map| {
+        let mut validity = OwnerValidity::new(count);
+        for py in 0..th {
+            for px in 0..tw {
+                let index = (py * tw + px) as usize;
+                let (sy, cy) = x_rays[px as usize];
+                let (sp, cp) = y_rays[py as usize];
+                let world = [sy * cp, sp, cy * cp];
+                let scene_override = scene_blend_override(
+                    scene_plan.is_some_and(|plan| plan.identity.protect_people),
+                    scene_plan.is_some_and(|plan| plan.identity.smooth_water),
+                    scene_tile.person_owner.get(index).copied().flatten(),
+                    scene_tile.water_blend.get(index).copied().unwrap_or(0),
+                );
+                if scene_override == SceneBlendOverride::Base {
+                    let Some(owner) = ownership_map.owner_at(left + px, top + py) else {
+                        continue;
+                    };
+                    let (valid, cached) =
+                        source_geometry_is_valid(owner, index, world, sources, &tile_geometry);
+                    validity.set(index, valid);
+                    tile_owner_geometry_reuses += u64::from(cached);
+                }
+            }
+        }
+        validity
+    });
     for source_index in CandidateSourceIndices::new(candidate_sources.as_deref(), sources.len()) {
         if candidate_sources.is_none()
             && !candidate(
@@ -2389,35 +2527,43 @@ fn render_one_tile(
                         BlendMode::Feather => weight,
                         BlendMode::Deghost => {
                             let index = (py * tw + px) as usize;
-                            let quality = source_quality_maps[source_index]
-                                .as_ref()
-                                .expect("deghost quality map prepared in geometry pass");
-                            let (texture_energy, obstruction_confidence) =
-                                quality.sample(source.width, source.height, x, y);
-                            let sharpness = quality.sharpness(source.width, source.height, x, y);
-                            let (peer_ownership, peer_texture, peer_sharpness) =
-                                best_other_source_quality(
-                                    source_index,
-                                    index,
-                                    world,
-                                    sources,
-                                    &source_quality_maps,
-                                    &tile_geometry,
-                                    max_owner_source.as_ref().unwrap(),
-                                    second_owner_source.as_ref().unwrap(),
-                                    max_ownership.as_ref().unwrap(),
-                                    second_ownership.as_ref().unwrap(),
-                                );
-                            let adjusted = adjusted_ownership(
-                                ownership,
-                                peer_ownership,
-                                peer_texture,
-                                obstruction_confidence,
-                                texture_energy,
-                                sharpness,
-                                if sharpness_aware { peer_sharpness } else { 0.0 },
-                                source.width.min(source.height),
-                            );
+                            let cached_adjusted =
+                                cached.and_then(|geometry| geometry.get_adjusted_ownership(index));
+                            let adjusted = if let Some(adjusted) = cached_adjusted {
+                                tile_adjusted_ownership_reuses += 1;
+                                adjusted
+                            } else {
+                                let quality = source_quality_maps[source_index]
+                                    .as_ref()
+                                    .expect("deghost quality map prepared in geometry pass");
+                                let (texture_energy, obstruction_confidence) =
+                                    quality.sample(source.width, source.height, x, y);
+                                let sharpness =
+                                    quality.sharpness(source.width, source.height, x, y);
+                                let (peer_ownership, peer_texture, peer_sharpness) =
+                                    best_other_source_quality(
+                                        source_index,
+                                        index,
+                                        world,
+                                        sources,
+                                        &source_quality_maps,
+                                        &tile_geometry,
+                                        max_owner_source.as_ref().unwrap(),
+                                        second_owner_source.as_ref().unwrap(),
+                                        max_ownership.as_ref().unwrap(),
+                                        second_ownership.as_ref().unwrap(),
+                                    );
+                                adjusted_ownership(
+                                    ownership,
+                                    peer_ownership,
+                                    peer_texture,
+                                    obstruction_confidence,
+                                    texture_energy,
+                                    sharpness,
+                                    if sharpness_aware { peer_sharpness } else { 0.0 },
+                                    source.width.min(source.height),
+                                )
+                            };
                             deghost_weight(
                                 adjusted,
                                 max_adjusted_ownership.as_ref().unwrap()[index],
@@ -2454,11 +2600,9 @@ fn render_one_tile(
                         if let Some(ownership_map) = ownership_map {
                             let global_x = left + px;
                             let global_y = top + py;
-                            let owner_valid = ownership_map
-                                .owner_at(global_x, global_y)
-                                .is_some_and(|owner| {
-                                    sample_geometry(&sources[owner], world).is_some()
-                                });
+                            let owner_valid = owner_validity
+                                .as_ref()
+                                .is_some_and(|validity| validity.get(index));
                             let probability = if owner_valid {
                                 ownership_map.source_probability(
                                     source_index,
@@ -2484,6 +2628,8 @@ fn render_one_tile(
     }
     geometry_cached_sources.fetch_add(tile_cached_source_count, Ordering::Relaxed);
     geometry_projection_reuses.fetch_add(tile_projection_reuses, Ordering::Relaxed);
+    adjusted_ownership_reuses.fetch_add(tile_adjusted_ownership_reuses, Ordering::Relaxed);
+    owner_geometry_reuses.fetch_add(tile_owner_geometry_reuses, Ordering::Relaxed);
     blend_micros.fetch_add(
         blend_started.elapsed().as_micros() as u64,
         Ordering::Relaxed,
@@ -2763,7 +2909,12 @@ mod tests {
 
     #[test]
     fn geometry_cache_reservation_includes_vector_header_at_exact_budget_edges() {
-        let slot_bytes = 4 * 1024 * 1024 + 64;
+        let slot_bytes = geometry_cache_slot_bytes().unwrap();
+        assert_eq!(
+            slot_bytes,
+            512 * 512 * 3 * std::mem::size_of::<f64>() as u64
+                + std::mem::size_of::<(usize, TileGeometryCache)>() as u64
+        );
         let header_bytes = std::mem::size_of::<Vec<(usize, TileGeometryCache)>>() as u64;
         let per_worker_limit = GEOMETRY_CACHE_MAX_BYTES_PER_WORKER;
 
@@ -2803,6 +2954,91 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn owner_validity_uses_cached_geometry_and_missing_slots_fall_back() {
+        let source = cache_test_source(PathBuf::from("owner"));
+        let sources = vec![source];
+        let world = [0.0, 0.0, 1.0];
+        let mut cache = TileGeometryCache::new(2);
+        let supported = sample_geometry(&sources[0], world).unwrap();
+        cache.store(0, supported.0, supported.1);
+        let cached = source_geometry_is_valid(0, 0, world, &sources, &[(0, cache)]);
+        assert_eq!(cached, (true, true));
+
+        let invalid_cache = TileGeometryCache::new(1);
+        let invalid =
+            source_geometry_is_valid(0, 0, [0.0, 0.0, -1.0], &sources, &[(0, invalid_cache)]);
+        assert_eq!(invalid, (false, true));
+
+        let uncached_valid = source_geometry_is_valid(0, 0, world, &sources, &[]);
+        assert_eq!(uncached_valid, (true, false));
+        let uncached_invalid = source_geometry_is_valid(0, 0, [0.0, 0.0, -1.0], &sources, &[]);
+        assert_eq!(uncached_invalid, (false, false));
+
+        let mut bits = OwnerValidity::new(65);
+        bits.set(0, true);
+        bits.set(63, true);
+        bits.set(64, true);
+        assert!(bits.get(0));
+        assert!(bits.get(63));
+        assert!(bits.get(64));
+        assert!(!bits.get(1));
+    }
+
+    #[test]
+    fn global_ownership_prepass_populates_reusable_source_quality_map() {
+        let root = std::env::temp_dir().join(format!(
+            "lumia-quality-prepass-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("source.png");
+        RgbaImage::from_pixel(16, 16, Rgba([80, 90, 100, 255]))
+            .save(&path)
+            .unwrap();
+        let mut source = cache_test_source(path);
+        source.width = 16;
+        source.height = 16;
+        source.fx = 8.0;
+        source.fy = 8.0;
+        source.cx = 7.5;
+        source.cy = 7.5;
+        let sources = vec![source];
+        let _ownership =
+            build_global_ownership_map(16, 16, [-0.1, 0.1, -0.1, 0.1], &sources, || true).unwrap();
+        let prepass_quality = sources[0]
+            .quality_map
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .clone();
+        let cache = DecodeCache::new(0, 1);
+        let hits = AtomicU64::new(0);
+        let misses = AtomicU64::new(0);
+        let decodes = AtomicU64::new(0);
+        let decode_micros = AtomicU64::new(0);
+        let post_prepass_quality = source_quality_map(
+            0,
+            &sources[0],
+            &[16 * 16 * 4],
+            &cache,
+            &hits,
+            &misses,
+            &decodes,
+            &decode_micros,
+            false,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(&prepass_quality, &post_prepass_quality));
+        assert_eq!(decodes.load(Ordering::Relaxed), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -4729,6 +4965,8 @@ mod tests {
                         &counters[11],
                         &counters[12],
                         &counters[13],
+                        &counters[14],
+                        &counters[15],
                         true,
                         mode,
                         true,
@@ -5252,6 +5490,22 @@ mod tests {
         .unwrap();
         assert_eq!(shifted_deghost_cached["geometryCacheEnabled"], true);
         assert_eq!(shifted_deghost_fallback["geometryCacheEnabled"], false);
+        assert!(
+            shifted_deghost_cached["adjustedOwnershipScoresReused"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            shifted_deghost_fallback["adjustedOwnershipScoresReused"].as_u64(),
+            Some(0)
+        );
+        assert!(
+            shifted_deghost_cached["ownerGeometryValidityProjectionsReused"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert_eq!(shifted_deghost_cached["workersEffective"].as_u64(), Some(1));
         assert_eq!(
             shifted_deghost_fallback["workersEffective"].as_u64(),
@@ -5359,7 +5613,7 @@ mod tests {
     }
 
     #[test]
-    fn deghost_multi_source_is_stable_across_order_workers_and_tile_boundary() {
+    fn deghost_multi_source_cache_fallback_is_stable_across_order_workers_and_tile_boundary() {
         let root = std::env::temp_dir().join(format!(
             "lumia-deghost-order-{}-{}",
             std::process::id(),
@@ -5369,23 +5623,46 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let colors = [
-            [0, 0, 0, 255],
-            [64, 64, 64, 255],
-            [192, 192, 192, 255],
-            [255, 255, 255, 255],
-        ];
+        let colors = [32u8, 80, 160, 224];
         let mut tiles = Vec::new();
-        for (index, color) in colors.iter().enumerate() {
+        for (index, base) in colors.iter().enumerate() {
             let path = root.join(format!("source-{index}.png"));
-            RgbaImage::from_pixel(320, 320, Rgba(*color))
-                .save(&path)
-                .unwrap();
-            tiles.push(serde_json::json!({
-                "path":path.to_string_lossy(),"width":320,"height":320,
-                "fx":100.0,"fy":100.0,"cx":159.5,"cy":159.5,
+            let mut image = patterned_source(1200, 1200);
+            for pixel in image.pixels_mut() {
+                let pattern = pixel[0].saturating_sub(112);
+                let value = base.saturating_add(pattern / 3);
+                *pixel = Rgba([
+                    value,
+                    value.saturating_add(8),
+                    value.saturating_add(16),
+                    255,
+                ]);
+            }
+            for y in 580..=620 {
+                for x in 580..=620 {
+                    image.put_pixel(
+                        x,
+                        y,
+                        Rgba([*base, base.saturating_add(8), base.saturating_add(16), 255]),
+                    );
+                }
+            }
+            image.save(&path).unwrap();
+            let mut source = serde_json::json!({
+                "path":path.to_string_lossy(),"width":1200,"height":1200,
+                "fx":400.0,"fy":400.0,"cx":599.5,"cy":599.5,
                 "cameraToWorld":[1.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,1.0]
-            }));
+            });
+            if index == 0 {
+                source["sourcePlaneWarp"] = serde_json::json!({
+                    "columns":3,"rows":3,"offsets":[
+                        [-1.0,1.0],[0.0,1.0],[1.0,1.0],
+                        [-1.0,0.0],[0.0,0.0],[1.0,0.0],
+                        [-1.0,-1.0],[0.0,-1.0],[1.0,-1.0]
+                    ]
+                });
+            }
+            tiles.push(source);
         }
         let mut layout = serde_json::json!({
             "schemaVersion":1,"projection":"spherical","width":1025,"height":8,
@@ -5397,6 +5674,7 @@ mod tests {
         let original_dir = root.join("original");
         let reversed_dir = root.join("reversed");
         let parallel_dir = root.join("parallel");
+        let fallback_dir = root.join("fallback");
         let original = render_layout_tiles_with_options(
             &original_layout,
             &original_dir,
@@ -5412,6 +5690,9 @@ mod tests {
         let parallel =
             render_layout_tiles_with_options(&layout, &parallel_dir, 512, 8, true, |_, _| true)
                 .unwrap();
+        let fallback =
+            render_layout_tiles_with_options(&layout, &fallback_dir, 32, 1, true, |_, _| true)
+                .unwrap();
         assert_eq!(
             original["blendModel"],
             "sharpness-aware-peer-coupled-coarse-ownership-v2"
@@ -5424,14 +5705,37 @@ mod tests {
                 .unwrap()
                 > 0
         );
+        assert!(
+            original["geometryCacheSourceSlotsPerTile"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(original["adjustedOwnershipScoresReused"].as_u64().unwrap() > 0);
+        assert_eq!(fallback["geometryCacheEnabled"], false);
+        assert_eq!(fallback["geometryCacheSourceSlotsPerTile"], 0);
+        assert_eq!(fallback["adjustedOwnershipScoresReused"].as_u64(), Some(0));
         assert!(parallel["workersEffective"].as_u64().unwrap() > 1);
+        assert_eq!(fallback["workersEffective"].as_u64(), Some(1));
         assert_eq!(original["completedTiles"], reversed["completedTiles"]);
         assert_eq!(original["completedTiles"], parallel["completedTiles"]);
+        assert_eq!(original["completedTiles"], fallback["completedTiles"]);
         for col in 0..3 {
             let name = format!("level-0/0-{col}.png");
-            let original_bytes = fs::read(original_dir.join(&name)).unwrap();
-            assert_eq!(original_bytes, fs::read(reversed_dir.join(&name)).unwrap());
-            assert_eq!(original_bytes, fs::read(parallel_dir.join(&name)).unwrap());
+            let original_image = image::open(original_dir.join(&name)).unwrap().to_rgba8();
+            assert_eq!(
+                original_image,
+                image::open(reversed_dir.join(&name)).unwrap().to_rgba8()
+            );
+            assert_eq!(
+                original_image,
+                image::open(parallel_dir.join(&name)).unwrap().to_rgba8()
+            );
+            assert_eq!(
+                original_image,
+                image::open(fallback_dir.join(&name)).unwrap().to_rgba8(),
+                "multi-source cached and zero-slot fallback RGBA differ"
+            );
         }
         let left = image::open(original_dir.join("level-0/0-0.png"))
             .unwrap()

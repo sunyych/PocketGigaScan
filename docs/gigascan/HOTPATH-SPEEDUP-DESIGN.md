@@ -84,3 +84,28 @@ precision, attempts, failure trigger and combined elapsed time. A second failure
 stays failed with diagnostics. Version alignment cache identity to prevent old
 coarse layouts bypassing the new behavior. Localize its single timeline event.
 Targeted rematching remains future work requiring separate evidence.
+
+## 2026-10-24 exact renderer reuse work
+
+The independent Rust core now reuses each source's `SourceQualityMap` between the global ownership prepass and tile rendering, caches the exact classification score for reuse during blending, and stores per-tile owner validity in a bitset. These changes target repeated quality-map construction and repeated pixel qualification work while preserving the existing deghost formula, source geometry, and renderer identity. They do not change registration or its quality gates.
+
+The combined per-worker geometry/score cache reserves 24 bytes per candidate pixel: two f64 source coordinates (x/y) plus one f64 score. Under the existing 32 MiB per-worker cap, that budget can hold five source geometry/score slots for a 512×512 output tile (about 30 MiB); a sixth slot would exceed the cap. One worker processes one output tile at a time, and the worker cap remains unchanged. Sources without an admitted cache slot retain the original computation; unavailable score entries use the original calculation. A checked allocation failure returns an error rather than silently falling back. Owner-validity bits are tile-local and do not alter ownership values.
+
+Pixel qualification compares decoded RGBA bytes at matching level-zero tile coordinates and dimensions. Benchmark the same layout, worker count, memory budget, and output endpoint with the standard benchmark harness, then compare decoded RGBA output rather than compressed-file hashes. This renderer replay evaluates render cost and pixel parity only; it does not fix or validate registration quality.
+
+The focused native test log reports 32 passed and 2 ignored; the benchmark-script suite reports 6 passed, and the builder/mock-signing contracts passed. Full native and Flutter suites and package validation are still pending.
+
+### Full-layout renderer replay
+
+The completed reference/candidate pair used the same 312-source layout (SHA-256 `1614121131cc161d9571faa03ee58d1eb0750e255aa12d1d9c3acfa3cf2a5b76`), 81,024×22,140 output, four effective workers, 26,734 MiB budget, viewer pyramid, and lossless TIFF endpoint. All 6,996 level-zero tiles had identical decoded RGBA8 pixels, coordinates, and dimensions; both receipts report pixel SHA-256 `bccc7b55b08dbfe0fd44611dd137aa0172a68e3b868ba978d5fbcba8fca80597`.
+
+| Receipt phase | Reference | Candidate | Change |
+|---|---:|---:|---:|
+| Render | 888.117 s | 684.400 s | −22.94% |
+| Pyramid | 99.763 s | 105.064 s | +5.31% |
+| Lossless TIFF | 27.525 s | 28.056 s | +1.93% |
+| Total endpoint | 1,015.432 s | 817.565 s | −19.49% |
+
+The host wrapper measured wall time 1,064.594 s then 873.093 s, process CPU 3,072.375 s then 2,508.250 s, and peak sampled RSS 10,529,230,848 B then 10,554,507,264 B. RSS samples were taken every 250 ms. Both runs decoded 312 source images. Geometry-cache slots per tile decreased from 7 to 5, while cached source-tile count changed from 28,105 to 27,128. The candidate receipt counted 2,574,142,074 adjusted-ownership score reuses and 1,684,807,200 owner-validity geometry projections reused.
+
+The per-worker `ownershipPassMs`, `classificationPassMs`, and `blendPassMs` are cumulative across concurrent tile workers, not wall time and not additive phases. Reference→candidate values were 903,457.813→890,012.385 ms, 382,156.726→422,297.440 ms, and 1,256,219.886→543,806.294 ms respectively. This was one ordered pair with no other builds running concurrently; OS file cache was not cleared. These measurements establish this replay's result, not a universal speedup or a registration-quality fix. Full native/Flutter suites and package validation remain pending.
