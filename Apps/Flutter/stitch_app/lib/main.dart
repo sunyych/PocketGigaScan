@@ -2613,6 +2613,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   String _mimeType(ExportFormat format) => switch (format) {
     ExportFormat.png => 'image/png',
     ExportFormat.tiff => 'image/tiff',
+    ExportFormat.jpeg => 'image/jpeg',
     ExportFormat.jpegXl => 'image/jxl',
   };
 
@@ -3029,6 +3030,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       final mime = switch (task.exportFormat) {
         ExportFormat.png => 'image/png',
         ExportFormat.tiff => 'image/tiff',
+        ExportFormat.jpeg => 'image/jpeg',
         ExportFormat.jpegXl => 'image/jxl',
       };
       if (_android) {
@@ -3945,9 +3947,11 @@ class _StitchHomePageState extends State<StitchHomePage>
                 labelText: StitchLocalizations.of(
                   context,
                 ).text(task == null ? '默认输出格式' : '完成后自动导出格式'),
-                helperText: StitchLocalizations.of(
-                  context,
-                ).text('单任务合成完成后自动导出全分辨率整图。'),
+                helperText: StitchLocalizations.of(context).text(
+                  format == ExportFormat.jpeg
+                      ? 'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。'
+                      : '单任务合成完成后自动导出全分辨率整图。',
+                ),
               ),
               items: ExportFormat.values
                   .map(

@@ -385,6 +385,7 @@ class BatchQueueController extends ChangeNotifier {
             mimeType: switch (task.exportFormat) {
               ExportFormat.png => 'image/png',
               ExportFormat.tiff => 'image/tiff',
+              ExportFormat.jpeg => 'image/jpeg',
               ExportFormat.jpegXl => 'image/jxl',
             },
             suggestedName: p.basename(source),

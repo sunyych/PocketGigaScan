@@ -408,6 +408,17 @@ class OutputSourceLocator {
   }
 }
 
+/// Expected JPEG dimensions after native 65500-pixel compatibility scaling.
+(int, int) expectedJpegDimensions(int width, int height) {
+  const maximum = 65500;
+  if (width <= maximum && height <= maximum) return (width, height);
+  final scale = math.min(maximum / width, maximum / height);
+  return (
+    math.max(1, (width * scale).round()),
+    math.max(1, (height * scale).round()),
+  );
+}
+
 /// Independently reads the exported raster header. JPEG XL is intentionally
 /// unsupported here: without decoding its codestream or a recorded digest,
 /// pyramid dimensions alone cannot establish output/layout identity.
@@ -434,6 +445,58 @@ Future<(int, int)?> readExportDimensions(String path) async {
       final w = data.getUint32(16, Endian.big),
           h = data.getUint32(20, Endian.big);
       return w > 0 && h > 0 ? (w, h) : null;
+    }
+    if (ext.endsWith('.jpg') || ext.endsWith('.jpeg')) {
+      final soi = await raf.read(2);
+      if (soi.length != 2 || soi[0] != 0xff || soi[1] != 0xd8) return null;
+      for (var markerCount = 0; markerCount < 4096; markerCount++) {
+        if (raf.positionSync() > 1024 * 1024) return null;
+        var prefix = await raf.read(1);
+        while (prefix.length == 1 && prefix[0] != 0xff) {
+          prefix = await raf.read(1);
+        }
+        if (prefix.isEmpty) return null;
+        var markerBytes = await raf.read(1);
+        while (markerBytes.length == 1 && markerBytes[0] == 0xff) {
+          markerBytes = await raf.read(1);
+        }
+        if (markerBytes.isEmpty) return null;
+        final marker = markerBytes[0];
+        if (marker == 0xd9 || marker == 0xda) return null;
+        if (marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        final lengthBytes = await raf.read(2);
+        if (lengthBytes.length != 2) return null;
+        final length = (lengthBytes[0] << 8) | lengthBytes[1];
+        if (length < 2 || length > 65535) return null;
+        if (const {
+          0xc0,
+          0xc1,
+          0xc2,
+          0xc3,
+          0xc5,
+          0xc6,
+          0xc7,
+          0xc9,
+          0xca,
+          0xcb,
+          0xcd,
+          0xce,
+          0xcf,
+        }.contains(marker)) {
+          if (length < 8) return null;
+          final dimensions = await raf.read(6);
+          if (dimensions.length != 6 || dimensions[5] == 0) return null;
+          if (length < 8 + dimensions[5] * 3 ||
+              raf.positionSync() + length - 8 > raf.lengthSync()) {
+            return null;
+          }
+          final height = (dimensions[1] << 8) | dimensions[2];
+          final width = (dimensions[3] << 8) | dimensions[4];
+          return width > 0 && height > 0 ? (width, height) : null;
+        }
+        await raf.setPosition(raf.positionSync() + length - 2);
+      }
+      return null;
     }
     if (!ext.endsWith('.tif') && !ext.endsWith('.tiff')) return null;
     final header = await raf.read(16);

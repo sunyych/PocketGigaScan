@@ -1229,6 +1229,10 @@ void main() {
     );
     expect(selector.onChanged, isNotNull);
 
+    selector.onChanged!(ExportFormat.jpeg);
+    await tester.pump();
+    expect(repository.saved.last.exportFormat, ExportFormat.jpeg);
+
     selector.onChanged!(ExportFormat.jpegXl);
     await tester.pump();
     expect(repository.saved.last.exportFormat, ExportFormat.jpegXl);

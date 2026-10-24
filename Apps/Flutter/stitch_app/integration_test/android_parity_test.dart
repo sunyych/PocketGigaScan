@@ -193,6 +193,9 @@ void main() {
             case ExportFormat.png:
               expect(header.take(8), [137, 80, 78, 71, 13, 10, 26, 10]);
               break;
+            case ExportFormat.jpeg:
+              expect(header.take(2), [0xff, 0xd8]);
+              break;
             case ExportFormat.tiff:
               expect(
                 header.take(4),
@@ -364,6 +367,7 @@ void main() {
           final mimeType = switch (task.exportFormat) {
             ExportFormat.png => 'image/png',
             ExportFormat.tiff => 'image/tiff',
+            ExportFormat.jpeg => 'image/jpeg',
             ExportFormat.jpegXl => 'image/jxl',
           };
           await tester.pumpWidget(

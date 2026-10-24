@@ -424,6 +424,11 @@ fn export_format_for_path(destination: &Path) -> Option<&'static str> {
             Some("tiff")
         }
         Some(extension) if extension.eq_ignore_ascii_case("jxl") => Some("jxl"),
+        Some(extension)
+            if extension.eq_ignore_ascii_case("jpg") || extension.eq_ignore_ascii_case("jpeg") =>
+        {
+            Some("jpeg")
+        }
         _ => None,
     }
 }
@@ -454,7 +459,7 @@ pub fn handle(input: &str) -> Value {
 fn capabilities_value(limits: Limits) -> Value {
     let (active_jobs, reserved_workers, reserved_memory_mib) = job_resources::usage();
     let pending = job_resources::pending_limits();
-    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"sceneAnalysisAvailable":cfg!(lumia_scene_ort),"sceneModelId":scene_analysis::MODEL_ID,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jxl":crate::jxl_export::available()},"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
+    json!({"backend":"cpu-rust-tiled","gpuAvailable":false,"sceneAnalysisAvailable":cfg!(lumia_scene_ort),"sceneModelId":scene_analysis::MODEL_ID,"memoryBudgetKind":"reservation","systemMemory":job_resources::system_memory_mib().map(|(total,available)|json!({"totalMemoryMiB":total,"availableMemoryMiB":available})),"logicalCpuCount":job_resources::logical_cpus(),"maxWorkersPerJob":job_resources::MAX_WORKERS_PER_JOB,"maxConcurrentJobs":limits.max_concurrent_jobs,"maxConcurrentJobsLimit":job_resources::MAX_CONCURRENT_JOBS,"maxTotalMemoryBudgetMiB":job_resources::MAX_TOTAL_MEMORY_MIB,"totalCpuWorkers":limits.total_cpu_workers,"totalMemoryBudgetMiB":limits.total_memory_mib,"pendingLimits":pending.map(|value|json!({"totalCpuWorkers":value.total_cpu_workers,"totalMemoryBudgetMiB":value.total_memory_mib,"maxConcurrentJobs":value.max_concurrent_jobs})),"activeJobs":active_jobs,"reservedWorkers":reserved_workers,"reservedMemoryMiB":reserved_memory_mib,"exportFormats":{"png":true,"tiff":true,"jpeg":true,"jxl":crate::jxl_export::available()},"jpegQuality":90,"jpegMaximumDimension":65500,"jpegXlAvailable":crate::jxl_export::available(),"jpegXlEncoder":"libjxl-c-api-0.12.0","jpegXlLossless":false,"jpegXlDistance":1.0,"jpegXlQuality":90,"jpegXlAlphaDistance":0.0})
 }
 fn capabilities() -> Value {
     json!({"ok":true,"capabilities":capabilities_value(job_resources::limits())})
@@ -1897,7 +1902,7 @@ fn export(c: Command) -> Value {
     if export_format_for_path(&destination).is_none() {
         return fail(
             "INVALID_REQUEST",
-            "export destination extension must be .png, .tif, .tiff, or .jxl",
+            "export destination extension must be .png, .tif, .tiff, .jpg, .jpeg, or .jxl",
         );
     }
     if destination.exists() {
@@ -1983,10 +1988,10 @@ fn run_export_to(j: Arc<Control>, dest: PathBuf) {
         let manifest: Value =
             serde_json::from_slice(&bytes).map_err(|e| crate::Error::Invalid(e.to_string()))?;
         let mut checkpoint = |done: u32, total: u32| {
-            let checkpoint_stage = if export_format_for_path(&dest) == Some("jxl") {
-                "spool-jxl"
-            } else {
-                "export"
+            let checkpoint_stage = match export_format_for_path(&dest) {
+                Some("jxl") => "spool-jxl",
+                Some("jpeg") => "spool-jpeg",
+                _ => "export",
             };
             if j.checkpoint(
                 checkpoint_stage,
@@ -1999,7 +2004,11 @@ fn run_export_to(j: Arc<Control>, dest: PathBuf) {
         };
         let mut encode_checkpoint = |done: u32, total: u32| {
             if j.checkpoint(
-                "encode-jxl",
+                if export_format_for_path(&dest) == Some("jpeg") {
+                    "encode-jpeg"
+                } else {
+                    "encode-jxl"
+                },
                 Some(0.92 + 0.08 * done as f64 / total.max(1) as f64),
             ) {
                 Ok(())
@@ -2033,6 +2042,15 @@ fn run_export_to(j: Arc<Control>, dest: PathBuf) {
                 &mut checkpoint,
                 &mut commit,
             ),
+            Some("jpeg") => crate::jpeg_export::export_level0_jpeg(
+                &j.root,
+                &manifest,
+                &dest,
+                j.snapshot().memory_budget_mib,
+                &mut checkpoint,
+                &mut encode_checkpoint,
+                &mut commit,
+            ),
             Some("jxl") => {
                 j.update(|state| state.stage = "spool-jxl".into());
                 crate::jxl_export::export_level0_jxl(
@@ -2047,7 +2065,8 @@ fn run_export_to(j: Arc<Control>, dest: PathBuf) {
                 )
             }
             _ => Err(crate::Error::Invalid(
-                "export destination extension must be .png, .tif, .tiff, or .jxl".into(),
+                "export destination extension must be .png, .tif, .tiff, .jpg, .jpeg, or .jxl"
+                    .into(),
             )),
         }
     })();
@@ -2169,6 +2188,14 @@ mod tests {
             Some("png")
         );
         assert_eq!(export_format_for_path(Path::new("panorama")), Some("png"));
+        assert_eq!(
+            export_format_for_path(Path::new("panorama.jpg")),
+            Some("jpeg")
+        );
+        assert_eq!(
+            export_format_for_path(Path::new("panorama.JPEG")),
+            Some("jpeg")
+        );
         assert_eq!(
             export_format_for_path(Path::new("panorama.tif")),
             Some("tiff")
@@ -2540,6 +2567,9 @@ mod tests {
         assert_eq!(cap["capabilities"]["gpuAvailable"], false);
         assert_eq!(cap["capabilities"]["memoryBudgetKind"], "reservation");
         assert_eq!(cap["capabilities"]["maxConcurrentJobsLimit"], 8);
+        assert_eq!(cap["capabilities"]["exportFormats"]["jpeg"], true);
+        assert_eq!(cap["capabilities"]["jpegQuality"], 90);
+        assert_eq!(cap["capabilities"]["jpegMaximumDimension"], 65500);
         assert_eq!(cap["capabilities"]["jpegXlLossless"], false);
         assert_eq!(cap["capabilities"]["jpegXlDistance"], 1.0);
         assert_eq!(cap["capabilities"]["jpegXlQuality"], 90);

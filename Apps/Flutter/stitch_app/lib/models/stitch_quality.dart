@@ -1,6 +1,7 @@
 enum ExportFormat {
   png('PNG（无损）', 'png'),
   tiff('TIFF（无损，大图自动 BigTIFF）', 'tif'),
+  jpeg('JPEG（有损，质量 90）', 'jpg'),
   jpegXl('JPEG XL（有损）', 'jxl');
 
   const ExportFormat(this.label, this.extension);
@@ -10,6 +11,7 @@ enum ExportFormat {
   String get shortLabel => switch (this) {
     ExportFormat.png => 'PNG',
     ExportFormat.tiff => 'TIFF',
+    ExportFormat.jpeg => 'JPEG',
     ExportFormat.jpegXl => 'JPEG XL',
   };
   bool get supportedOnMobile => true;
@@ -17,6 +19,7 @@ enum ExportFormat {
 
   static ExportFormat fromSavedValue(Object? value) => switch (value) {
     'tiff' || 'tif' => ExportFormat.tiff,
+    'jpeg' || 'jpg' => ExportFormat.jpeg,
     'jpegXl' || 'jpeg-xl' || 'jxl' => ExportFormat.jpegXl,
     _ => ExportFormat.png,
   };
@@ -27,6 +30,9 @@ enum ExportFormat {
       return ExportFormat.tiff;
     }
     if (lower.endsWith('.jxl')) return ExportFormat.jpegXl;
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+      return ExportFormat.jpeg;
+    }
     return ExportFormat.png;
   }
 }

@@ -126,6 +126,13 @@ class _SettingsPageState extends State<SettingsPage> {
                 children: [
                   ListTile(
                     title: Text(l.outputFormat),
+                    subtitle: s.exportFormat == ExportFormat.jpeg
+                        ? Text(
+                            l.text(
+                              'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。',
+                            ),
+                          )
+                        : null,
                     trailing: DropdownButton<ExportFormat>(
                       value: s.exportFormat,
                       items: ExportFormat.values

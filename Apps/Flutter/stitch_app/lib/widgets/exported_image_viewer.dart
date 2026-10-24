@@ -312,7 +312,15 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         return null;
       }
     }
-    if (actual.$1 != pyramid.width || actual.$2 != pyramid.height) {
+    final isScaledJpeg =
+        p.extension(exportPath).toLowerCase() == '.jpg' ||
+        p.extension(exportPath).toLowerCase() == '.jpeg';
+    final expectedJpeg = isScaledJpeg
+        ? expectedJpegDimensions(pyramid.width, pyramid.height)
+        : null;
+    if ((!isScaledJpeg &&
+            (actual.$1 != pyramid.width || actual.$2 != pyramid.height)) ||
+        (isScaledJpeg && actual != expectedJpeg)) {
       _traceUnavailableReason = 'outputPreviewDimensionMismatch';
       return null;
     }
@@ -324,8 +332,8 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
       return null;
     }
     if (decodedManifest is! Map ||
-        decodedManifest['width'] != actual.$1 ||
-        decodedManifest['height'] != actual.$2) {
+        decodedManifest['width'] != pyramid.width ||
+        decodedManifest['height'] != pyramid.height) {
       _traceUnavailableReason = 'outputManifestDimensionMismatch';
       return null;
     }
@@ -392,9 +400,14 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
     final value = jsonDecode(await layoutFile.readAsString());
     if (value is! Map<String, Object?> ||
         value['projection'] != 'spherical' ||
-        value['width'] != actual.$1 ||
-        value['height'] != actual.$2) {
+        value['width'] != pyramid.width ||
+        value['height'] != pyramid.height) {
       _traceUnavailableReason = 'layoutDimensionMismatch';
+      return null;
+    }
+    if (isScaledJpeg &&
+        (actual.$1 != pyramid.width || actual.$2 != pyramid.height)) {
+      _traceUnavailableReason = 'jpegOutputScaled';
       return null;
     }
     return value;
@@ -1024,9 +1037,9 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
           if (widget.traceRecord != null)
             IconButton(
               key: const ValueKey('output-source-inspect-toggle'),
-              tooltip: StitchLocalizations.of(context).text(
-                _inspectMode ? '关闭来源检查' : '检查像素来源',
-              ),
+              tooltip: StitchLocalizations.of(
+                context,
+              ).text(_inspectMode ? '关闭来源检查' : '检查像素来源'),
               onPressed: _pyramid == null
                   ? null
                   : () => setState(() {
@@ -1148,6 +1161,9 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
 
   Widget _sourceInformation() {
     final expected = widget.expectedExportFingerprint;
+    final jpeg =
+        p.extension(widget.exportFilePath).toLowerCase() == '.jpg' ||
+        p.extension(widget.exportFilePath).toLowerCase() == '.jpeg';
     final text = _staleReason != null
         ? '输出文件已变化，关联分块预览已停用。请重新合成以生成匹配的预览。'
         : _error != null
@@ -1156,6 +1172,8 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
         ? widget.legacyTaskBindingVerified
               ? '旧任务没有导出指纹；核心记录确认此路径属于任务，但无法确认文件后来是否被外部修改。预览来自任务金字塔。'
               : '旧任务没有导出指纹，且核心未核验导出记录。预览来自保存任务的金字塔，可能与当前文件内容不同。'
+        : jpeg
+        ? '输出大小和修改时间与导出时记录一致（未做内容哈希）。预览来自本任务的 PNG 分块金字塔。'
         : '输出大小和修改时间与导出时记录一致（未做内容哈希）。预览来源：本任务的 PNG 分块金字塔（同一渲染像素）。';
     final warning = _staleReason != null || _error != null || expected == null;
     return Material(
@@ -1172,14 +1190,17 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
               style: Theme.of(context).textTheme.labelLarge,
             ),
             SelectableText(
-              StitchLocalizations.of(context).text(
-                '输出文件：${widget.exportFilePath}',
-              ),
+              StitchLocalizations.of(
+                context,
+              ).text('输出文件：${widget.exportFilePath}'),
               maxLines: 2,
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 4),
-            Text(text, style: Theme.of(context).textTheme.bodySmall),
+            Text(
+              '$text${jpeg ? '\n${StitchLocalizations.of(context).jpegPreviewNotice}' : ''}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           ],
         ),
       ),
@@ -1191,6 +1212,7 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
     return switch (extension) {
       '.png' => 'PNG',
       '.tif' || '.tiff' => 'TIFF / BigTIFF',
+      '.jpg' || '.jpeg' => 'JPEG',
       '.jxl' => 'JPEG XL',
       _ => StitchLocalizations.of(context).traceUnknownFormat(extension),
     };
