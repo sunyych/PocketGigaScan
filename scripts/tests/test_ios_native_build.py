@@ -71,8 +71,11 @@ class IosNativeBuildContractTests(unittest.TestCase):
         self.assertIn("-DCMAKE_OSX_ARCHITECTURES=\"$arch\"", NATIVE)
         self.assertIn("-DCMAKE_OSX_DEPLOYMENT_TARGET=\"$minimum_ios\"", NATIVE)
         self.assertIn("-DWITH_LAPACK=OFF", NATIVE)
-        self.assertIn("rustc --locked --release --target \"$target\" --lib", NATIVE)
-        self.assertIn("--crate-type staticlib", NATIVE)
+        self.assertIn(
+            'cargo "+$rust_version" rustc --locked --release --target "$target" --lib --crate-type staticlib',
+            NATIVE,
+        )
+        self.assertNotIn('--lib -- \\\n      --crate-type staticlib', NATIVE)
         self.assertIn("LC_BUILD_VERSION", NATIVE)
         self.assertIn("LC_VERSION_MIN_IPHONEOS", NATIVE)
         self.assertIn("expected '$expected_platform'", NATIVE)

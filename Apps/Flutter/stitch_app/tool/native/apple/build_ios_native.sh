@@ -398,8 +398,7 @@ build_variant() {
     export MACOSX_DEPLOYMENT_TARGET="$minimum_ios"
     export IPHONEOS_DEPLOYMENT_TARGET="$minimum_ios"
     export CARGO_TARGET_DIR="$cache/cargo-target"
-    cargo "+$rust_version" rustc --locked --release --target "$target" --lib -- \
-      --crate-type staticlib
+    cargo "+$rust_version" rustc --locked --release --target "$target" --lib --crate-type staticlib
   )
   [[ -f "$core_archive" ]] || { echo "Cargo did not produce $core_archive." >&2; exit 66; }
   verify_archive "$core_archive" "$arch" "$platform_id"
