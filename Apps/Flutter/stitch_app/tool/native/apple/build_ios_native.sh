@@ -204,6 +204,33 @@ PY
 }
 hydrate_jxl_source
 
+# Xcode does not emit an archive for libjxl's object-only `jxl` target. Keep
+# this build-only workaround in the iOS dependency cache, never in shared
+# source trees: give the target one harmless translation unit so Xcode creates
+# the public libjxl.a that the upstream install rule expects.
+patch_ios_libjxl_archive_anchor() {
+  python3 - "$sources/libjxl/lib/jxl.cmake" <<'PY'
+from pathlib import Path
+import sys
+
+cmake_file = Path(sys.argv[1])
+anchor = cmake_file.with_name("jxl_ios_archive_anchor.cc")
+original = "add_library(jxl ${JPEGXL_INTERNAL_OBJECTS})"
+patched = 'add_library(jxl ${JPEGXL_INTERNAL_OBJECTS} "${CMAKE_CURRENT_LIST_DIR}/jxl_ios_archive_anchor.cc")'
+anchor_contents = "// iOS Xcode archive anchor for the object-only public jxl target.\n"
+contents = cmake_file.read_text(encoding="utf-8")
+if patched in contents:
+    if contents.count(patched) != 1 or not anchor.is_file() or anchor.read_text(encoding="utf-8") != anchor_contents:
+        raise SystemExit("Unexpected or incomplete iOS libjxl archive-anchor patch.")
+    raise SystemExit(0)
+if contents.count(original) != 1 or anchor.exists():
+    raise SystemExit("Pinned libjxl source does not match the expected archive-anchor patch context.")
+cmake_file.write_text(contents.replace(original, patched), encoding="utf-8")
+anchor.write_text(anchor_contents, encoding="utf-8")
+PY
+}
+patch_ios_libjxl_archive_anchor
+
 opencv_modules=()
 opencv_libraries=()
 opencv_system_libraries=()
@@ -282,7 +309,8 @@ build_dependencies_for_target() {
     -DJPEGXL_ENABLE_FUZZERS=OFF -DJPEGXL_ENABLE_DEVTOOLS=OFF \
     -DJPEGXL_ENABLE_TCMALLOC=OFF -DJPEGXL_ENABLE_SKCMS=ON -DJPEGXL_VERSION="$jxl_version" \
     -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-  cmake --build "$jxl_build" --config Release --target install --parallel "$build_jobs"
+  cmake --build "$jxl_build" --config Release --parallel "$build_jobs"
+  cmake --install "$jxl_build" --config Release
 
   for name in "${opencv_libraries[@]}"; do
     [[ -f "$opencv_sdk/lib/lib${name}.a" ]] || { echo "OpenCV SDK is missing static archive lib${name}.a for $suffix." >&2; exit 66; }
@@ -497,7 +525,7 @@ write_linker_config
 copy_licenses
 manifest="$native_root/build-manifest.json"
 manifest_tmp="$manifest.tmp"
-python3 - "$lock" "$manifest_tmp" "$source_commit" "$minimum_ios" "$include_intel" "$xcode_version" "$device_out" "$simulator_out" "${variants[@]}" <<'PY'
+python3 - "$lock" "$manifest_tmp" "$source_commit" "$minimum_ios" "$include_intel" "$xcode_version" "$device_out" "$simulator_out" "$sources/libjxl/lib/jxl.cmake" "$sources/libjxl/lib/jxl_ios_archive_anchor.cc" "${variants[@]}" <<'PY'
 import hashlib
 import json
 import sys
@@ -505,6 +533,7 @@ from pathlib import Path
 
 lock_path, output, revision, minimum, intel, xcode = sys.argv[1:7]
 device, simulator = Path(sys.argv[7]), Path(sys.argv[8])
+patched_cmake, archive_anchor = Path(sys.argv[9]), Path(sys.argv[10])
 lock = json.loads(Path(lock_path).read_text(encoding="utf-8"))
 def digest(path: Path) -> str:
     sha = hashlib.sha256()
@@ -524,7 +553,7 @@ def archives(root: Path) -> dict[str, str]:
         result[name] = digest(path)
     return result
 variants = []
-for raw in sys.argv[9:]:
+for raw in sys.argv[11:]:
     kind, arch, sdk, target, suffix, platform, sdk_version, staging = raw.split("|", 7)
     variants.append({"kind": kind, "architecture": arch, "sdk": sdk,
                      "sdkVersion": sdk_version, "target": target, "archivePlatform": platform,
@@ -541,7 +570,10 @@ payload = {
     "opencv": {"version": lock["opencv"]["version"], "sha256": lock["opencv"]["sha256"]},
     "libjxl": {"version": lock["libjxl"]["version"],
                "sources": [{"name": item["name"], "sha256": item["sha256"]}
-                           for item in lock["libjxl"]["sources"]]},
+                           for item in lock["libjxl"]["sources"]],
+               "sourcePatches": [{"name": "ios-xcode-object-only-jxl-archive-anchor",
+                                  "files": {"lib/jxl.cmake": digest(patched_cmake),
+                                            "lib/jxl_ios_archive_anchor.cc": digest(archive_anchor)}}]},
     "variants": variants,
     "simulatorIncludesIntel": intel == "true",
     "deviceArchives": archives(device),

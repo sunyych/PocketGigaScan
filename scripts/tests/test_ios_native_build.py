@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -89,6 +90,63 @@ class IosNativeBuildContractTests(unittest.TestCase):
             "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
             configuration.group(0),
         )
+
+    def test_libjxl_ios_cache_patches_object_only_xcode_archive_target(self) -> None:
+        self.assertIn('original = "add_library(jxl ${JPEGXL_INTERNAL_OBJECTS})"', NATIVE)
+        self.assertIn(
+            'patched = \'add_library(jxl ${JPEGXL_INTERNAL_OBJECTS} "${CMAKE_CURRENT_LIST_DIR}/jxl_ios_archive_anchor.cc")\'',
+            NATIVE,
+        )
+        self.assertIn("patch_ios_libjxl_archive_anchor", NATIVE)
+        self.assertRegex(
+            NATIVE,
+            r'cmake --build "\$jxl_build" --config Release --parallel "\$build_jobs"\s+cmake --install "\$jxl_build" --config Release',
+        )
+        self.assertIn('"sourcePatches": [{"name": "ios-xcode-object-only-jxl-archive-anchor"', NATIVE)
+        self.assertIn('digest(patched_cmake)', NATIVE)
+        self.assertIn('digest(archive_anchor)', NATIVE)
+        self.assertIn('cmake --install "$jxl_build" --config Release', NATIVE)
+        self.assertNotIn('cmake --build "$jxl_build" --config Release --target install', NATIVE)
+
+    def test_libjxl_ios_archive_anchor_patch_is_idempotent_and_fails_closed(self) -> None:
+        match = re.search(
+            r'(?ms)^patch_ios_libjxl_archive_anchor\(\) \{\n  python3 - "\$sources/libjxl/lib/jxl\.cmake" <<\'PY\'\n(.*?)\nPY\n\}',
+            NATIVE,
+        )
+        self.assertIsNotNone(match)
+        patch_program = match.group(1)
+        original = "add_library(jxl ${JPEGXL_INTERNAL_OBJECTS})\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            cmake_file = Path(temporary) / "jxl.cmake"
+            anchor = cmake_file.with_name("jxl_ios_archive_anchor.cc")
+
+            def apply_patch() -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [sys.executable, "-c", patch_program, str(cmake_file)],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            cmake_file.write_text(original, encoding="utf-8")
+            first = apply_patch()
+            self.assertEqual(first.returncode, 0, first.stderr)
+            patched = cmake_file.read_text(encoding="utf-8")
+            self.assertIn('"${CMAKE_CURRENT_LIST_DIR}/jxl_ios_archive_anchor.cc"', patched)
+            self.assertTrue(anchor.is_file())
+            self.assertEqual(apply_patch().returncode, 0)
+
+            cmake_file.write_text("unexpected upstream change\n", encoding="utf-8")
+            anchor.unlink()
+            rejected_context = apply_patch()
+            self.assertNotEqual(rejected_context.returncode, 0)
+            self.assertIn("expected archive-anchor patch context", rejected_context.stderr)
+
+            cmake_file.write_text(patched, encoding="utf-8")
+            anchor.write_text("wrong anchor\n", encoding="utf-8")
+            rejected_anchor = apply_patch()
+            self.assertNotEqual(rejected_anchor.returncode, 0)
+            self.assertIn("Unexpected or incomplete", rejected_anchor.stderr)
 
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
