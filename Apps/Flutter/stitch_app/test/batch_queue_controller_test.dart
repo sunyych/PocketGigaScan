@@ -497,7 +497,9 @@ void main() {
           horizontalFovDegrees: 45,
         );
       }
-      await _waitUntil(() => api.active == 2);
+      // Drive the queue synchronously after settings changes. The periodic
+      // timer is intentionally not part of this scheduler contract test.
+      await controller.tick();
       expect(api.active, 2);
       expect(api.maxActive, 2);
       expect(api.jobs.values.map((job) => job.workers).toList(), [4, 4]);
@@ -509,11 +511,7 @@ void main() {
       for (final job in api.jobs.values.toList()) {
         await api.finishRender(job.id);
       }
-      await _waitUntil(
-        () =>
-            api.jobs.values.where((job) => job.operation == 'export').length ==
-            2,
-      );
+      await controller.tick();
       expect(
         api.jobs.values.where((job) => job.operation == 'export'),
         hasLength(2),
@@ -533,30 +531,28 @@ void main() {
               .toList()) {
         await api.finishExport(job.id);
       }
-      await _waitUntil(
-        () =>
-            controller.queues.single.items
-                .where((item) => item.state == BatchItemState.completed)
-                .length ==
-            2,
-      );
+      await controller.tick();
       expect(
         controller.queues.single.items.where(
           (item) => item.state == BatchItemState.completed,
         ),
         hasLength(2),
       );
-      await _waitUntil(() => api.jobs.length == 3 && api.active == 1);
+      expect(api.jobs.length, 3);
+      expect(api.active, 1);
       final third = api.jobs.values.singleWhere(
         (job) => job.state == 'running',
       );
       await api.finishRender(third.id);
-      await _waitUntil(() => third.operation == 'export');
+      await controller.tick();
+      expect(third.operation, 'export');
       await api.finishExport(third.id);
-      await _waitUntil(
-        () => controller.queues.single.items.every(
+      await controller.tick();
+      expect(
+        controller.queues.single.items.every(
           (item) => item.state == BatchItemState.completed,
         ),
+        isTrue,
       );
     },
   );
