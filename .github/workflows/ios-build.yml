@@ -73,6 +73,22 @@ jobs:
             --cache-dir .build/ios-core-cache \
             --output-dir .build/ios-artifacts
 
+      - name: Diagnose failed iOS app links
+        if: failure() && steps.build-ios.outcome == 'failure'
+        working-directory: Apps/Flutter/stitch_app
+        shell: bash
+        run: |
+          set +e
+          xcodebuild -project ios/Runner.xcodeproj -target Runner \
+            -configuration Debug -sdk iphonesimulator -showBuildSettings 2>&1 \
+            | grep -E ' (ENABLE_DEBUG_DYLIB|ARCHS|SDKROOT|LIBRARY_SEARCH_PATHS|OTHER_LDFLAGS) =' || true
+          core=ios/Native/iphonesimulator/liblumia_gigascan_core.a
+          if [[ -f "$core" ]]; then
+            nm -gU "$core" | grep -E ' _lumia_gigascan_(abi_version|free|is_available|job_json)$' || true
+          else
+            echo "Simulator native core archive is missing: $core"
+          fi
+
       - name: Run NativeJobApi smoke on an available iOS simulator
         working-directory: Apps/Flutter/stitch_app
         shell: bash

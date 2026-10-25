@@ -286,12 +286,29 @@ class IosNativeBuildContractTests(unittest.TestCase):
             "lumia_gigascan_is_available",
         )
         self.assertIn('for symbol in ' + " ".join(symbols), NATIVE)
+        project = (ROOT / "Apps/Flutter/stitch_app/ios/Runner.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        debug_target = re.search(
+            r"(?ms)^\s*97C147061CF9000F007C117D /\* Debug \*/ = \{\n.*?^\s*buildSettings = \{\n(.*?)^\s*\};\n\s*name = Debug;",
+            project,
+        )
+        release_target = re.search(
+            r"(?ms)^\s*97C147071CF9000F007C117D /\* Release \*/ = \{\n.*?^\s*buildSettings = \{\n(.*?)^\s*\};\n\s*name = Release;",
+            project,
+        )
+        self.assertIsNotNone(debug_target)
+        self.assertIsNotNone(release_target)
+        self.assertIn("ENABLE_DEBUG_DYLIB = NO;", debug_target.group(1))
+        self.assertNotIn("ENABLE_DEBUG_DYLIB", release_target.group(1))
         self.assertIn('symbol_flags+=" -Wl,-u,_${symbol}"', NATIVE)
         self.assertIn("-Wl,-force_load", NATIVE)
         self.assertIn("-Wl,-export_dynamic", NATIVE)
         self.assertIn("NativeCore.generated.xcconfig", NATIVE)
         self.assertIn("build-manifest.json", NATIVE)
         self.assertIn("licenses/", NATIVE)
+        workflow = (ROOT / ".github/workflows/ios-build.yml").read_text(encoding="utf-8")
+        self.assertIn("Diagnose failed iOS app links", workflow)
+        self.assertIn("xcodebuild -project ios/Runner.xcodeproj -target Runner", workflow)
+        self.assertIn("nm -gU", workflow)
 
     def test_builder_limits_recursive_deletes_to_owned_cache(self) -> None:
         self.assertIn(".pocketgigascan-ios-native-cache", NATIVE)
