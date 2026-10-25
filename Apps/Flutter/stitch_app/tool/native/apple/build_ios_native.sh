@@ -431,7 +431,7 @@ archive_names=(liblumia_gigascan_core.a)
 archive_names+=("${opencv_libraries[@]}" "${jxl_libraries[@]}")
 for platform_dir in "$device_out" "$simulator_out"; do
   for name in "${archive_names[@]}"; do
-    output_archive="$platform_dir/lib${name#lib}.a"
+    output_archive="$platform_dir/lib${name}.a"
     [[ "$name" == liblumia_gigascan_core.a ]] && output_archive="$platform_dir/$name"
     [[ ! -e "$output_archive" ]] || rm -f "$output_archive"
   done
@@ -562,7 +562,7 @@ def digest(path: Path) -> str:
     return sha.hexdigest()
 archive_names = ["liblumia_gigascan_core.a"]
 for library in (lock["opencvLibraries"] + lock["jpegXlLibraries"]):
-    archive_names.append("lib" + (library[3:] if library.startswith("lib") else library) + ".a")
+    archive_names.append("lib" + library + ".a")
 def archives(root: Path) -> dict[str, str]:
     result = {}
     for name in archive_names:

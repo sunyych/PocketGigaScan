@@ -232,6 +232,52 @@ class IosNativeBuildContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("rust_target=aarch64-apple-ios", result.stdout)
 
+    def test_native_manifest_maps_library_names_to_exact_archive_filenames(self) -> None:
+        self.assertIn('output_archive="$platform_dir/lib${name}.a"', NATIVE)
+        self.assertIn('archive_names.append("lib" + library + ".a")', NATIVE)
+        match = re.search(
+            r'(?ms)^python3 - "\$lock" "\$manifest_tmp".*?<<\'PY\'\n(.*?)\nPY\n',
+            NATIVE,
+        )
+        self.assertIsNotNone(match)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock_path = root / "lock.json"
+            lock_path.write_text(json.dumps(LOCK), encoding="utf-8")
+            device, simulator = root / "device", root / "simulator"
+            licenses = root / "licenses"
+            for directory in (device, simulator, licenses):
+                directory.mkdir()
+            archive_names = ["liblumia_gigascan_core.a"] + [
+                "lib" + name + ".a"
+                for name in LOCK["opencvLibraries"] + LOCK["jpegXlLibraries"]
+            ]
+            for directory in (device, simulator):
+                for name in archive_names:
+                    (directory / name).write_bytes(("fixture:" + name).encode())
+            licenses.joinpath("test-license.txt").write_text("fixture", encoding="utf-8")
+            patched_cmake = root / "jxl.cmake"
+            archive_anchor = root / "jxl_ios_archive_anchor.cc"
+            patched_cmake.write_text("patched fixture", encoding="utf-8")
+            archive_anchor.write_text("anchor fixture", encoding="utf-8")
+            output = root / "build-manifest.json"
+            result = subprocess.run(
+                [
+                    sys.executable, "-c", match.group(1), str(lock_path), str(output),
+                    "a" * 40, "13.0", "false", "Xcode fixture", str(device),
+                    str(simulator), str(patched_cmake), str(archive_anchor),
+                    "device|arm64|iphoneos|aarch64-apple-ios|iphoneos|IOS|18.0|cache-staging/iphoneos",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads(output.read_text(encoding="utf-8"))
+            for name in ("liblibjpeg-turbo.a", "liblibpng.a", "libzlib.a"):
+                self.assertIn(name, manifest["deviceArchives"])
+                self.assertIn(name, manifest["simulatorArchives"])
+
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
             "lumia_gigascan_abi_version",
