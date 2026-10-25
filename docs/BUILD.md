@@ -58,11 +58,17 @@ saved tasks. Ordinary mobile stitching remains available.
 
 The Mac test app uses ad-hoc signing for local testing and is not notarized.
 Dependency hashes, licenses, architecture, bundled dylib paths, signatures,
-and native smoke checks are validated during packaging. A successful build
-is separate from running the app and inspecting real final exports on a Mac.
-Hosted run 38817678302 qualifies version 1.5.1+30: 241 native tests
-(3 optional ignored), 340 Flutter tests, 12 packaging contracts, and packaged
-model/render/PNG/TIFF/JXL checks pass. See the [platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+and native smoke checks are validated during packaging. Hosted run
+[40224304131](https://github.com/sunyych/PocketGigaScan/actions/runs/40224304131)
+qualifies version 1.5.2+31 on macOS 14+ arm64: 367 Flutter tests, 252 native
+tests (3 optional ignored), 16 portable package contracts, packaged scene-model
+inference and PNG/TIFF/JPEG/JPEG XL exports passed. Its 263-entry ZIP manifest
+was fully hash-validated; ZIP SHA-256 is
+`d7136c602ec565e83e7a15a2fafb27d0026371eca4f3d8bc0e808cf21ca1ae52`. The
+artifact is ad-hoc signed, not notarized. This qualifies the build and package,
+not a user's real-photo panorama review. Earlier run 38817678302 remains
+historical evidence for version 1.5.1+30. See [Apple build details](../Apps/Flutter/stitch_app/APPLE-BUILD.md)
+and the [older platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
 
 ## Android
 
@@ -109,16 +115,15 @@ See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
 [Android qualification](gigascan/evidence/ANDROID-STITCH-2026-10-05.md) and
 [DWARF camera-transfer evidence](gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md).
 
-## iOS (native-free runner)
+## iOS native build (hosted validation pending)
 
-The hosted [iOS build workflow](../.github/workflows/ios-build.yml) builds the
-existing Flutter runner with Flutter 3.44.2 on a macOS 15 Apple Silicon runner.
-It compiles a Release device bundle with `--no-codesign` and a Debug simulator
-bundle. The uploaded `.app` bundles are unsigned validation artifacts. The
-current runner does not link the Rust stitching engine, so this build does not
-qualify native iOS stitching, Apple signing, installation or TestFlight. The
-shared Dart DWARF transfer flow is present, but physical iOS camera-transfer
-behavior has not been qualified.
+The iOS source now includes a pinned Rust/OpenCV/JPEG XL native-core builder and
+the hosted [iOS build workflow](../.github/workflows/ios-build.yml) builds the
+device Release and simulator Debug bundles with `--no-codesign`. The workflow
+checks the linked FFI symbols and runs a synthetic job/export smoke on the
+simulator. Hosted Apple qualification for the current source is still pending;
+physical iOS camera-transfer behavior, signing, installation, and TestFlight
+remain unqualified. See [iOS build instructions](../scripts/README-ios-build.md).
 
 See [four-platform build evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
 for the exact hosted run and artifact checksums.

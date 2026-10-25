@@ -13,7 +13,7 @@ Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workf
 produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
 runtime and licenses. See [Mac build and test instructions](Apps/Flutter/stitch_app/APPLE-BUILD.md)
 and [platform qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
-The current shared app version is 1.5.2+31. The recorded macOS package qualification is historical evidence for version 1.5.1+30; it does not qualify the current version. Physical Mac launch/import/resume and real-photo visual acceptance remain unqualified.
+The current shared app version is 1.5.2+31. Hosted run [40224304131](https://github.com/sunyych/PocketGigaScan/actions/runs/40224304131) qualifies the macOS 14+ arm64 Release package at source `445bdb04b6b8ae379b62e1008f5685ac538b2235`; it is ad-hoc signed and not notarized. Physical Mac launch/import/resume and real-photo visual acceptance remain unqualified. The earlier 1.5.1+30 qualification is retained as historical evidence in the [Apple build record](Apps/Flutter/stitch_app/APPLE-BUILD.md).
 
 The iOS Flutter runner is built on a hosted Mac by the
 [iOS build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/ios-build.yml).

@@ -136,10 +136,19 @@ The macOS CI is configured for GitHub's `macos-15` Apple Silicon runner. It
 downloads and verifies the fixed model asset, then builds the arm64 app and
 runs the packaged core FFI, 512x512 ONNX CPU inference, Mach-O
 architecture/minimum-version, signature, and dependency-closure checks on Mac.
-Hosted run 38817678302 qualifies version 1.5.1+30 at source
-commit `96c6ae5`: the normal Release app, all 340 Flutter / 241 native tests
-(3 optional native fixtures ignored), 12 packaging contracts, and packaged
-model/render/PNG/TIFF/JXL checks pass. The resulting ZIP and its relative
-checksum file are available in that run's `PocketGigaScan-macos-arm64-96c6ae5...`
-artifact. Those checks do not replace launch/import/resume and visual review of
-a real panorama on a user's Mac.
+
+Hosted run [40224304131](https://github.com/sunyych/PocketGigaScan/actions/runs/40224304131)
+qualifies version **1.5.2+31**, source commit `445bdb04b6b8ae379b62e1008f5685ac538b2235`,
+on macOS 14+ arm64. The normal Release package passed 367 Flutter tests, 252
+native tests (3 optional fixtures ignored), and 16 portable package contracts.
+The packaged runtime verifier passed scene-model inference and PNG, TIFF, JPEG,
+and JPEG XL exports. All 263 entries in the downloaded ZIP manifest passed
+hash validation. ZIP SHA-256:
+`d7136c602ec565e83e7a15a2fafb27d0026371eca4f3d8bc0e808cf21ca1ae52`.
+The test package is ad-hoc signed and not notarized. These checks do not replace
+launch/import/resume and visual review of a real panorama on a user's Mac.
+
+Earlier hosted run 38817678302 qualifies version 1.5.1+30 at source commit
+`96c6ae5`: 340 Flutter tests, 241 native tests (3 optional fixtures ignored),
+12 packaging contracts, and packaged model/render/PNG/TIFF/JXL checks passed.
+Its artifact remains historical evidence for that version.
