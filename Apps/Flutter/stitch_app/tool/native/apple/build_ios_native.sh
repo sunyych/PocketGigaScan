@@ -231,6 +231,24 @@ PY
 }
 patch_ios_libjxl_archive_anchor
 
+# OpenCV installs bundled third-party archives under its documented install
+# tree; resolve only these two locations rather than searching the SDK.
+opencv_archive_path() {
+  local sdk="$1" name="$2" archive
+  archive="$sdk/lib/lib${name}.a"
+  if [[ -f "$archive" ]]; then
+    printf '%s\n' "$archive"
+    return 0
+  fi
+  archive="$sdk/lib/opencv4/3rdparty/lib${name}.a"
+  if [[ -f "$archive" ]]; then
+    printf '%s\n' "$archive"
+    return 0
+  fi
+  echo "OpenCV SDK is missing static archive lib${name}.a under lib/ or lib/opencv4/3rdparty/." >&2
+  return 1
+}
+
 opencv_modules=()
 opencv_libraries=()
 opencv_system_libraries=()
@@ -313,7 +331,7 @@ build_dependencies_for_target() {
   cmake --install "$jxl_build" --config Release
 
   for name in "${opencv_libraries[@]}"; do
-    [[ -f "$opencv_sdk/lib/lib${name}.a" ]] || { echo "OpenCV SDK is missing static archive lib${name}.a for $suffix." >&2; exit 66; }
+    opencv_archive_path "$opencv_sdk" "$name" >/dev/null || exit 66
   done
   for name in "${jxl_libraries[@]}"; do
     [[ -f "$jxl_sdk/lib/lib${name}.a" ]] || { echo "libjxl SDK is missing static archive lib${name}.a for $suffix." >&2; exit 66; }
@@ -364,7 +382,7 @@ declare -a variants=()
 
 build_variant() {
   local kind="$1" arch="$2" sdk="$3" target="$4" suffix="$5" platform_id="$6"
-  local opencv_sdk jxl_sdk core_archive output_dir
+  local opencv_sdk jxl_sdk core_archive output_dir archive_path
   build_dependencies_for_target "$kind" "$arch" "$sdk" "$suffix"
   opencv_sdk="$IOS_OPENCV_SDK"
   jxl_sdk="$IOS_JXL_SDK"
@@ -373,7 +391,7 @@ build_variant() {
     cd "$core"
     export OPENCV_DIR="$opencv_sdk"
     export OPENCV_INCLUDE_PATHS="$opencv_sdk/include/opencv4"
-    export OPENCV_LINK_PATHS="$opencv_sdk/lib"
+    export OPENCV_LINK_PATHS="$opencv_sdk/lib:$opencv_sdk/lib/opencv4/3rdparty"
     export OPENCV_LINK_LIBS="$(serialize_link_libraries "${opencv_libraries[@]}" "${opencv_system_libraries[@]}")"
     export LUMIA_JXL_SDK="$jxl_sdk"
     export LUMIA_JXL_LINK_PATHS="$jxl_sdk/lib"
@@ -386,7 +404,8 @@ build_variant() {
   [[ -f "$core_archive" ]] || { echo "Cargo did not produce $core_archive." >&2; exit 66; }
   verify_archive "$core_archive" "$arch" "$platform_id"
   for name in "${opencv_libraries[@]}"; do
-    verify_archive "$opencv_sdk/lib/lib${name}.a" "$arch" "$platform_id"
+    archive_path="$(opencv_archive_path "$opencv_sdk" "$name")" || exit 66
+    verify_archive "$archive_path" "$arch" "$platform_id"
   done
   for name in "${jxl_libraries[@]}"; do
     verify_archive "$jxl_sdk/lib/lib${name}.a" "$arch" "$platform_id"
@@ -395,7 +414,8 @@ build_variant() {
   mkdir -p "$output_dir"
   cp "$core_archive" "$output_dir/liblumia_gigascan_core.a"
   for name in "${opencv_libraries[@]}"; do
-    cp "$opencv_sdk/lib/lib${name}.a" "$output_dir/"
+    archive_path="$(opencv_archive_path "$opencv_sdk" "$name")" || exit 66
+    cp "$archive_path" "$output_dir/"
   done
   for name in "${jxl_libraries[@]}"; do cp "$jxl_sdk/lib/lib${name}.a" "$output_dir/"; done
   assert_cache_target "$output_dir/.probe"

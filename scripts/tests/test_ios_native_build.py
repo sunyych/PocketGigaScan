@@ -148,6 +148,44 @@ class IosNativeBuildContractTests(unittest.TestCase):
             self.assertNotEqual(rejected_anchor.returncode, 0)
             self.assertIn("Unexpected or incomplete", rejected_anchor.stderr)
 
+    def test_opencv_archive_resolution_uses_only_two_known_install_paths(self) -> None:
+        self.assertIn('export OPENCV_LINK_PATHS="$opencv_sdk/lib:$opencv_sdk/lib/opencv4/3rdparty"', NATIVE)
+        self.assertIn('verify_archive "$archive_path" "$arch" "$platform_id"', NATIVE)
+        self.assertIn('cp "$archive_path" "$output_dir/"', NATIVE)
+        self.assertIn('opencv_archive_path "$opencv_sdk" "$name" >/dev/null || exit 66', NATIVE)
+        self.assertNotIn('find "$opencv_sdk"', NATIVE)
+
+    @unittest.skipIf(sys.platform == "win32", "Bash fixture execution is validated on macOS CI")
+    def test_opencv_archive_resolver_fixture_covers_root_third_party_and_missing(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("Bash is required to execute the archive resolver fixture")
+        match = re.search(r"(?ms)^opencv_archive_path\(\) \{\n.*?^\}", NATIVE)
+        self.assertIsNotNone(match)
+        with tempfile.TemporaryDirectory() as temporary:
+            sdk = Path(temporary)
+            (sdk / "lib").mkdir()
+            (sdk / "lib" / "opencv4" / "3rdparty").mkdir(parents=True)
+            root_archive = sdk / "lib" / "libopencv_core.a"
+            third_party_archive = sdk / "lib" / "opencv4" / "3rdparty" / "liblibjpeg-turbo.a"
+            root_archive.write_bytes(b"fixture")
+            third_party_archive.write_bytes(b"fixture")
+
+            def resolve(name: str) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(
+                    [bash, "-c", match.group(0) + '\nopencv_archive_path "$1" "$2"',
+                     "opencv-archive-fixture", str(sdk), name],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+
+            self.assertEqual(resolve("opencv_core").stdout.strip(), str(root_archive))
+            self.assertEqual(resolve("libjpeg-turbo").stdout.strip(), str(third_party_archive))
+            missing = resolve("missing")
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn("missing static archive", missing.stderr)
+
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
             "lumia_gigascan_abi_version",
