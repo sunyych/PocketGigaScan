@@ -137,6 +137,7 @@ __pycache__/
 
 # Four-platform build integration
 !/.github/workflows/ios-build.yml
+!/.github/workflows/ios-simulator-replay.yml
 !/docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md
 
 # iOS build verification tools

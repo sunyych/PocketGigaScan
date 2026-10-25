@@ -1,0 +1,173 @@
+name: iOS simulator app replay
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Actions run ID containing the already-built iOS artifact
+        required: true
+        type: string
+        default: '40231943118'
+      artifact_name:
+        description: Exact uploaded artifact name
+        required: true
+        type: string
+        default: PocketGigaScan-iOS-5905ef90298352e70201106087bbee35ff945425
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  simulator-replay:
+    name: Replay the prebuilt simulator app
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Download the selected run artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: .replay/download
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Verify package and prepare a test-only app copy
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name=PocketGigaScan-iOS-simulator-debug-unsigned
+          zip=".replay/download/ios-artifacts/$package_name.zip"
+          sidecar="$zip.sha256"
+          test -s "$zip"
+          test -s "$sidecar"
+          (cd .replay/download/ios-artifacts && shasum -a 256 -c "$package_name.zip.sha256")
+          python3 - "$zip" <<'PY'
+          import sys
+          import zipfile
+          from pathlib import PurePosixPath
+
+          archive = zipfile.ZipFile(sys.argv[1])
+          names = archive.namelist()
+          root = "PocketGigaScan-iOS-simulator-debug-unsigned"
+          for name in names:
+              path = PurePosixPath(name)
+              if path.is_absolute() or ".." in path.parts or not path.parts or path.parts[0] != root:
+                  raise SystemExit(f"Unexpected package path: {name!r}")
+          if not any(name.endswith("/Runner.app/Info.plist") for name in names):
+              raise SystemExit("Package does not contain Runner.app/Info.plist")
+          PY
+          mkdir -p .replay/unpacked
+          ditto -x -k --sequesterRsrc --rsrc "$zip" .replay/unpacked
+          app=".replay/unpacked/$package_name/Runner.app"
+          test -d "$app"
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+          [[ "$bundle_id" == com.lumiaiq.pocketgigascan ]]
+          printf 'app_path=%s\nbundle_id=%s\n' "$app" "$bundle_id" >> "$GITHUB_OUTPUT"
+
+      - name: Select and boot a fresh iPhone simulator
+        id: simulator
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          set -euo pipefail
+          device_info="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); xs=[x for group in d["devices"].values() for x in group if x.get("isAvailable") and x["name"].startswith("iPhone")]; x=next((x for x in xs if x["state"]=="Shutdown"), xs[0] if xs else None); print(x["udid"],x["state"]) if x else sys.exit("No available iPhone simulator.")')"
+          read -r simulator_id device_state <<<"$device_info"
+          printf 'simulator_id=%s\n' "$simulator_id" >> "$GITHUB_OUTPUT"
+          if [[ "$device_state" != Shutdown ]]; then xcrun simctl shutdown "$simulator_id" >/dev/null 2>&1 || true; fi
+          xcrun simctl erase "$simulator_id"
+          xcrun simctl boot "$simulator_id"
+          xcrun simctl bootstatus "$simulator_id" -b
+
+      - name: Install and replay the prebuilt app with startup capture
+        id: replay
+        timeout-minutes: 5
+        shell: bash
+        env:
+          SIMULATOR_ID: ${{ steps.simulator.outputs.simulator_id }}
+          APP_PATH: ${{ steps.package.outputs.app_path }}
+          BUNDLE_ID: ${{ steps.package.outputs.bundle_id }}
+        run: |
+          set -uo pipefail
+          diag=ios-simulator-replay/diagnostics
+          mkdir -p "$diag/crashes"
+          result=0
+          live_log_pid=
+          stop_live_log() {
+            if [[ -n "$live_log_pid" ]]; then kill "$live_log_pid" >/dev/null 2>&1 || true; wait "$live_log_pid" 2>/dev/null || true; fi
+          }
+          capture_screenshot() {
+            local label="$1" path="$diag/simulator-$1.png" log="$diag/screenshot-$1.log"
+            xcrun simctl io "$SIMULATOR_ID" screenshot "$path" > "$log" 2>&1 || true
+            [[ -s "$path" ]] || printf 'Screenshot file is missing or empty.\n' >> "$log"
+          }
+          trap stop_live_log EXIT
+
+          xcrun simctl spawn "$SIMULATOR_ID" log show --last 2m --style compact \
+            --predicate 'process == "Runner" OR process == "Runner.debug.dylib" OR senderImagePath ENDSWITH "/Flutter"' \
+            > "$diag/unified-before-launch.log" 2>&1 || true
+          xcrun simctl spawn "$SIMULATOR_ID" log stream --style json --level debug \
+            --predicate 'process == "Runner" OR process == "Runner.debug.dylib" OR senderImagePath ENDSWITH "/Flutter"' \
+            > "$diag/unified-live.jsonl" 2>&1 &
+          live_log_pid=$!
+
+          if ! codesign --verify --deep --strict "$APP_PATH" > "$diag/codesign.log" 2>&1; then
+            codesign --force --deep --sign - "$APP_PATH" >> "$diag/codesign.log" 2>&1 || result=$?
+          fi
+          if [[ "$result" -eq 0 ]]; then
+            codesign --verify --deep --strict --verbose=2 "$APP_PATH" >> "$diag/codesign.log" 2>&1 || result=$?
+          fi
+          if [[ "$result" -eq 0 ]]; then
+            xcrun simctl install "$SIMULATOR_ID" "$APP_PATH" > "$diag/install.log" 2>&1 || result=$?
+          fi
+          if [[ "$result" -eq 0 ]]; then
+            xcrun simctl launch --terminate-running-process "$SIMULATOR_ID" "$BUNDLE_ID" \
+              > "$diag/launch.log" 2>&1 || result=$?
+          fi
+
+          if [[ "$result" -eq 0 ]]; then
+            sleep 2
+            capture_screenshot 02s
+            xcrun simctl spawn "$SIMULATOR_ID" launchctl list > "$diag/launchctl-02s.txt" 2>&1 || true
+            ps -axo pid,ppid,lstart,stat,command | grep -E 'CoreSimulator|Simulator\.app|Runner|PocketGigaScan|simctl' | grep -v grep > "$diag/host-processes-02s.txt" || true
+            xcrun simctl get_app_container "$SIMULATOR_ID" "$BUNDLE_ID" app > "$diag/app-container.txt" 2>&1 || true
+            sleep 13
+            capture_screenshot 15s
+            sleep 15
+            capture_screenshot 30s
+            xcrun simctl spawn "$SIMULATOR_ID" launchctl list > "$diag/launchctl-30s.txt" 2>&1 || true
+            ps -axo pid,ppid,lstart,stat,command | grep -E 'CoreSimulator|Simulator\.app|Runner|PocketGigaScan|simctl' | grep -v grep > "$diag/host-processes-30s.txt" || true
+          fi
+
+          xcrun simctl spawn "$SIMULATOR_ID" log show --last 20m --style compact \
+            --predicate 'process == "Runner" OR process == "Runner.debug.dylib" OR senderImagePath ENDSWITH "/Flutter"' \
+            > "$diag/unified-startup-20m.log" 2>&1 || true
+          for crash_root in \
+            "$HOME/Library/Logs/DiagnosticReports" \
+            "$HOME/Library/Developer/CoreSimulator/Devices/$SIMULATOR_ID/data/Library/Logs/CrashReporter"; do
+            [[ -d "$crash_root" ]] || continue
+            while IFS= read -r -d '' file; do
+              cp -p "$file" "$diag/crashes/$(printf '%s' "$file" | shasum -a 256 | cut -c1-10)-$(basename "$file")" || true
+            done < <(find "$crash_root" -type f \( -iname 'Runner*.ips' -o -iname 'Runner*.crash' -o -iname '*PocketGigaScan*.ips' \) -mmin -45 -print0 2>/dev/null)
+          done
+          printf 'replay_exit=%s\n' "$result" >> "$GITHUB_OUTPUT"
+          exit "$result"
+
+      - name: Shut down replay simulator
+        if: always() && steps.simulator.outputs.simulator_id != ''
+        timeout-minutes: 2
+        shell: bash
+        env:
+          SIMULATOR_ID: ${{ steps.simulator.outputs.simulator_id }}
+        run: xcrun simctl shutdown "$SIMULATOR_ID" >/dev/null 2>&1 || true
+
+      - name: Upload simulator replay diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: iOS-simulator-replay-${{ inputs.run_id }}-${{ github.run_id }}
+          path: ios-simulator-replay/diagnostics/**
+          if-no-files-found: warn
+          retention-days: 14
