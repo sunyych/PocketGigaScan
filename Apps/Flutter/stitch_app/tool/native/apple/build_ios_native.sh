@@ -460,6 +460,8 @@ fi
 write_linker_config() {
   local config="$app/ios/Flutter/NativeCore.generated.xcconfig"
   local temp="$config.tmp" opencv_flags="" jxl_flags="" symbol_flags="" name symbol
+  local simulator_archs=arm64
+  if [[ "$include_intel" == true ]]; then simulator_archs="arm64 x86_64"; fi
   for name in "${opencv_libraries[@]}"; do opencv_flags+=" -l${name}"; done
   opencv_flags+=" -lz"
   for name in "${jxl_libraries[@]}"; do jxl_flags+=" -l${name}"; done
@@ -468,6 +470,7 @@ write_linker_config() {
   done
   cat > "$temp" <<XCCONFIG
 LUMIA_NATIVE_APPLE_ENABLED = YES
+ARCHS[sdk=iphonesimulator*] = $simulator_archs
 LIBRARY_SEARCH_PATHS[sdk=iphoneos*] = \$(inherited) "\$(PROJECT_DIR)/Native/iphoneos"
 OTHER_LDFLAGS[sdk=iphoneos*] = \$(inherited) -Wl,-force_load,"\$(PROJECT_DIR)/Native/iphoneos/liblumia_gigascan_core.a" -Wl,-export_dynamic$symbol_flags$opencv_flags$jxl_flags -lc++ -framework Accelerate -framework AVFoundation -framework CoreGraphics -framework CoreImage -framework CoreMedia -framework CoreVideo -framework Foundation -framework ImageIO -framework QuartzCore -framework UIKit -framework VideoToolbox
 LIBRARY_SEARCH_PATHS[sdk=iphonesimulator*] = \$(inherited) "\$(PROJECT_DIR)/Native/iphonesimulator"

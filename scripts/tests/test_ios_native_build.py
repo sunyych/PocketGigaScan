@@ -278,6 +278,46 @@ class IosNativeBuildContractTests(unittest.TestCase):
                 self.assertIn(name, manifest["deviceArchives"])
                 self.assertIn(name, manifest["simulatorArchives"])
 
+    def test_linker_config_simulator_arches_match_included_archive_slices(self) -> None:
+        self.assertIn("ARCHS[sdk=iphonesimulator*] = $simulator_archs", NATIVE)
+        self.assertIn('if [[ "$include_intel" == true ]]; then simulator_archs="arm64 x86_64"; fi', NATIVE)
+        bash = shutil.which("bash")
+        if sys.platform == "win32" or not bash:
+            self.skipTest("Bash linker-config fixture is executed on macOS CI")
+        match = re.search(r"(?ms)^write_linker_config\(\) \{\n.*?^\}", NATIVE)
+        serialize = re.search(r"(?ms)^serialize_link_libraries\(\) \{\n.*?^\}", NATIVE)
+        self.assertIsNotNone(match)
+        self.assertIsNotNone(serialize)
+        with tempfile.TemporaryDirectory() as temporary:
+            app = Path(temporary) / "app"
+            flutter = app / "ios" / "Flutter"
+            flutter.mkdir(parents=True)
+            script_prefix = "\n".join((
+                f'app="{app}"',
+                'opencv_libraries=(opencv_core libjpeg-turbo)',
+                'jxl_libraries=(jxl jxl_cms)',
+            ))
+            for include_intel, expected_arches, archive_slices in (
+                ("false", "arm64", ["arm64"]),
+                ("true", "arm64 x86_64", ["arm64", "x86_64"]),
+            ):
+                script = "\n".join((
+                    script_prefix,
+                    f'include_intel="{include_intel}"',
+                    serialize.group(0),
+                    match.group(0),
+                    'write_linker_config',
+                ))
+                result = subprocess.run(
+                    [bash, "-c", script], capture_output=True, text=True, check=False
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = (flutter / "NativeCore.generated.xcconfig").read_text(encoding="utf-8")
+                found = re.search(r"^ARCHS\[sdk=iphonesimulator\*\] = (.+)$", config, re.MULTILINE)
+                self.assertIsNotNone(found)
+                self.assertEqual(found.group(1), expected_arches)
+                self.assertEqual(found.group(1).split(), archive_slices)
+
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
             "lumia_gigascan_abi_version",
