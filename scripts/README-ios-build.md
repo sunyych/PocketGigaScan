@@ -7,7 +7,7 @@ The `ios-build.yml` workflow runs on GitHub's `macos-15` runner with Flutter 3.4
 
 Each ZIP contains the corresponding `Runner.app` bundle and a `native-evidence/` directory with the exact native build manifest and dependency license/notice files. The workflow also uploads a JSON build manifest, a README, and a SHA-256 sidecar for each ZIP. The packager checks the bundle ID against `com.lumiaiq.pocketgigascan`, checks the app version and build number against `pubspec.yaml`, confirms the device or simulator platform and arm64 executable slice, verifies that Xcode compiled the `AppIcon` catalog into `Assets.car`, validates the native archive SHA-256 entries and license files, and inspects the built app executable with `nm` for the Rust FFI ABI exports `lumia_gigascan_abi_version`, `lumia_gigascan_job_json`, `lumia_gigascan_free`, and `lumia_gigascan_is_available`. Codec capabilities in the manifest are the native build's declared contract; CI separately confirms runtime capabilities and exports with a synthetic 128×96 single-tile job through the public `NativeJobApi`, including PNG/TIFF/JPEG and JXL when available.
 
-These are unsigned build-verification packages, not installable IPAs. The workflow definition includes ABI and simulator smoke checks, but the Apple workflow is still pending; do not treat those checks as passed until the run completes successfully. Even a passing simulator smoke would not qualify image quality on real photographs. Apple code signing, TestFlight distribution, and physical-device installation are not qualified by this workflow.
+These are unsigned build-verification packages, not installable IPAs. Hosted run [40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118) built and linked both the iPhoneOS arm64 Release app and arm64 simulator Debug app; ABI, architecture, manifest, hash, and license package checks passed. Run [40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200) also built both apps, but its simulator smoke timed out waiting for Flutter's VM Service port before the Dart test started; it gives no native job/export result. A separate ordinary-app replay on an arm64 simulator, run [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847), showed the native-engine-loaded UI and process survival at 2, 15, and 30 seconds. A separate unified-log record showed the Dart VM Service listening; this replay did not test a native job or export. The smoke workflow now builds and launches the same integration-test app directly, then attaches the driver to the process-reported VM Service URI. See [current four-platform build evidence](../docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md); the [2026-10-17 record](../docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md) remains historical. Apple code signing, TestFlight, physical iPhone use, and real-photo image quality are separate unqualified checks.
 
 ## Build locally on a Mac
 
@@ -94,5 +94,18 @@ xcodebuild -workspace Apps/Flutter/stitch_app/ios/Runner.xcworkspace \
 ```
 
 Replace `ABCDE12345` with the Team ID selected in Xcode. Do not treat a successful unsigned CI artifact as an App Store or TestFlight release; signing, provisioning, archive validation, and a real-device run remain separate checks.
+
+### Run the native smoke on an already-booted simulator
+
+On a Mac with Xcode, resolve the pinned Flutter dependencies, boot an iOS simulator, and pass its UDID from the repository root. The helper verifies the simulator is booted, builds the existing integration test as the app entrypoint, launches it normally, then attaches `flutter drive` after reading the VM Service URI from that Runner process. Build, URI discovery, and test execution each have a bounded 480, 90, and 240 second budget. Sanitized output is written to `.build/ios-smoke.log`; the VM authentication URI is not written there.
+
+```sh
+cd Apps/Flutter/stitch_app
+flutter pub get --enforce-lockfile
+cd ../../..
+SIMULATOR_ID=<booted-simulator-udid> scripts/run-ios-native-smoke.sh
+```
+
+This describes how to run the smoke; it is not evidence that it passed on a user's Mac.
 
 `integration_test/ios_native_smoke_test.dart` creates its own small JPEG from a generated color pattern in the app temporary directory. It does not read user photos, invoke image pickers, or load scene-analysis models. The test uses a nominal 1×1 grid only to exercise the native job lifecycle without requiring feature matching; its output is a contract smoke, not a panorama quality test.

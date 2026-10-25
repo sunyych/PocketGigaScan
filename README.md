@@ -1,6 +1,6 @@
 # PocketGigaScan
 
-PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. The iOS source now includes a native Rust/OpenCV/JPEG XL build route and a simulator job/export smoke test; hosted Apple validation for the current source is pending. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
+PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. The iOS source includes a native Rust/OpenCV/JPEG XL build route; hosted device and simulator app builds and package checks pass. The latest simulator job/export smoke timed out waiting for Flutter's VM Service port before the Dart test began; a revised direct-launch-and-attach workflow is prepared for a follow-up run. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
 
 ## Download
 
@@ -12,17 +12,27 @@ The macOS test client targets Apple silicon (M1 or later), macOS 14 or newer.
 Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/macos-build.yml)
 produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
 runtime and licenses. See [Mac build and test instructions](Apps/Flutter/stitch_app/APPLE-BUILD.md)
-and [platform qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+and [current four-platform evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md).
 The current shared app version is 1.5.2+31. Hosted run [40224304131](https://github.com/sunyych/PocketGigaScan/actions/runs/40224304131) qualifies the macOS 14+ arm64 Release package at source `445bdb04b6b8ae379b62e1008f5685ac538b2235`; it is ad-hoc signed and not notarized. Physical Mac launch/import/resume and real-photo visual acceptance remain unqualified. The earlier 1.5.1+30 qualification is retained as historical evidence in the [Apple build record](Apps/Flutter/stitch_app/APPLE-BUILD.md).
 
 The iOS Flutter runner is built on a hosted Mac by the
 [iOS build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/ios-build.yml).
-The workflow now builds and links the pinned Rust/OpenCV/JPEG XL core before
-Flutter, checks the required FFI symbols, and runs a synthetic NativeJobApi
-simulator smoke test. Its device and simulator bundles are unsigned validation
-artifacts, not signed install or TestFlight releases. The current source has not
-yet completed its hosted Apple run. Four-platform build limits and hashes are in the
-[qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+Run [40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118)
+built and package-verified the unsigned device Release and arm64 simulator Debug
+apps. Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
+on an arm64 simulator showed the native-engine-loaded UI and process survival
+at 2, 15, and 30 seconds; a separate log showed the VM Service listening.
+In [run 40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200),
+the simulator smoke timed out waiting for Flutter's VM Service port before the
+Dart test began; it does not show whether the native job succeeds or fails. The
+next workflow launches the test app directly and attaches the existing driver
+to the process-reported VM Service URI.
+The bundles are unsigned; signing, TestFlight, and physical iPhone use are
+separate qualification boundaries.
+Four-platform build limits and hashes are in the
+[current qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md);
+the [2026-10-17 record](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
+is retained as historical evidence.
 See the [iOS build instructions](scripts/README-ios-build.md) for the Mac command
 and unsigned-package boundary.
 
@@ -104,4 +114,4 @@ for measured limits and the distinction between local crops and full-panorama ac
 
 [Build instructions](docs/BUILD.md) · [Tests](docs/gigascan/STITCH-TESTING.md) · [Architecture and platform boundaries](docs/RESTRUCTURE.md)
 
-The application is licensed under Apache-2.0. Current Flutter, Rust, native-codec and model notices are documented in [third-party notices](THIRD-PARTY-NOTICES.md) and included by the platform packaging workflows. Remote camera capture/control is outside its scope. Android camera transfer is documented in [PG-062 evidence](docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md); the shared iOS transfer flow has not been physically qualified. iOS native stitching is integrated in source, with hosted Apple validation pending.
+The application is licensed under Apache-2.0. Current Flutter, Rust, native-codec and model notices are documented in [third-party notices](THIRD-PARTY-NOTICES.md) and included by the platform packaging workflows. Remote camera capture/control is outside its scope. Android camera transfer is documented in [PG-062 evidence](docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md); the shared iOS transfer flow has not been physically qualified. iOS native stitching is integrated in source and hosted build/package checks pass; the simulator job/export smoke remains unverified.

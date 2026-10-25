@@ -67,8 +67,9 @@ was fully hash-validated; ZIP SHA-256 is
 `d7136c602ec565e83e7a15a2fafb27d0026371eca4f3d8bc0e808cf21ca1ae52`. The
 artifact is ad-hoc signed, not notarized. This qualifies the build and package,
 not a user's real-photo panorama review. Earlier run 38817678302 remains
-historical evidence for version 1.5.1+30. See [Apple build details](../Apps/Flutter/stitch_app/APPLE-BUILD.md)
-and the [older platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+historical evidence for version 1.5.1+30. See [Apple build details](../Apps/Flutter/stitch_app/APPLE-BUILD.md),
+[current four-platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md),
+and [older platform evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
 
 ## Android
 
@@ -115,15 +116,24 @@ See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
 [Android qualification](gigascan/evidence/ANDROID-STITCH-2026-10-05.md) and
 [DWARF camera-transfer evidence](gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md).
 
-## iOS native build (hosted validation pending)
+## iOS native build
 
-The iOS source now includes a pinned Rust/OpenCV/JPEG XL native-core builder and
-the hosted [iOS build workflow](../.github/workflows/ios-build.yml) builds the
-device Release and simulator Debug bundles with `--no-codesign`. The workflow
-checks the linked FFI symbols and runs a synthetic job/export smoke on the
-simulator. Hosted Apple qualification for the current source is still pending;
-physical iOS camera-transfer behavior, signing, installation, and TestFlight
-remain unqualified. See [iOS build instructions](../scripts/README-ios-build.md).
+The iOS source includes a pinned Rust/OpenCV/JPEG XL native-core builder. Hosted
+run [40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118)
+built and linked the unsigned iPhoneOS arm64 Release and simulator arm64 Debug
+apps and passed FFI, architecture, manifest, archive-hash, and license checks.
+Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
+on an arm64 simulator showed the native-engine-loaded UI and process survival
+at 2, 15, and 30 seconds; a separate unified-log record showed the Dart VM
+Service listening. That replay did not exercise native job/export. Run
+[40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200)
+built both apps, but its simulator smoke timed out waiting for Flutter's VM
+Service port before the Dart test started. It gives no result for the synthetic
+native job/export. The workflow now launches the test app directly and attaches
+its driver to the process-reported VM Service URI. Signing, installation, TestFlight, physical iPhone
+camera-transfer behavior, and real-photo quality are separate unqualified
+checks. See [iOS build instructions](../scripts/README-ios-build.md).
 
-See [four-platform build evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
-for the exact hosted run and artifact checksums.
+See [current four-platform build evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md)
+and [historical 2026-10-17 evidence](gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
+for build boundaries and artifact checksums.

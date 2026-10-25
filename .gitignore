@@ -94,6 +94,7 @@ __pycache__/
 !/docs/gigascan/evidence/WINDOWS-IMPORT-2026-10-07.md
 !/docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md
 /scripts/*
+!/scripts/run-ios-native-smoke.sh
 !/scripts/build-dwarf-stitch-windows.ps1
 !/scripts/complete-dwarf-stitch-windows-signing.ps1
 !/scripts/test-complete-dwarf-stitch-windows-signing.Tests.ps1
@@ -139,6 +140,7 @@ __pycache__/
 !/.github/workflows/ios-build.yml
 !/.github/workflows/ios-simulator-replay.yml
 !/docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md
+!/docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md
 
 # iOS build verification tools
 !/scripts/package_ios_build.py

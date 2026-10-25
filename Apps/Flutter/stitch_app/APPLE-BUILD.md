@@ -47,9 +47,26 @@ OpenCV 4.13.0, libjxl 0.12.0 and the Rust core for iPhoneOS arm64 and Apple
 Silicon iOS Simulator arm64. It stages static archives, licenses, a native build
 manifest and `NativeCore.generated.xcconfig`; the config is included in Debug and
 Release Xcode builds. The package verifier checks the built app's four FFI ABI
-exports and archive hashes. CI separately runs a synthetic `NativeJobApi` job
-and format-export smoke on an iOS simulator. These artifacts are unsigned; the
-current source has not yet passed hosted Apple or physical-device validation.
+exports and archive hashes. Hosted run
+[40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118)
+successfully built and linked the iPhoneOS arm64 Release and arm64 simulator
+Debug apps; ABI exports, architecture, manifests, archive hashes, and license
+checks passed. Independent simulator replay
+[40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
+confirmed on an arm64 simulator that the ordinary app process stayed alive at
+2, 15, and 30 seconds and the UI displayed “Native stitching engine loaded.” A
+separate unified-log record showed the Dart VM Service listening; this replay
+did not exercise native job/export. Run
+[40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200)
+has built both apps, but its simulator smoke timed out waiting for Flutter's VM
+Service port before the Dart test started. It gives no native job/export
+result. The workflow now launches the same integration-test app directly and
+attaches its driver to the process-reported VM Service URI. The app artifacts
+are unsigned. Signing, TestFlight, physical iPhone behavior, and
+real-photo quality are separate unqualified checks.
+See [current four-platform build evidence](../../../docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md);
+the [2026-10-17 record](../../../docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md)
+is retained as historical evidence.
 
 ## Standalone macOS client
 
