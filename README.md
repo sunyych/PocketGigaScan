@@ -1,6 +1,6 @@
 # PocketGigaScan
 
-PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. The iOS source includes a native Rust/OpenCV/JPEG XL build route; hosted device and simulator app builds and package checks pass. The latest simulator job/export smoke timed out waiting for Flutter's VM Service port before the Dart test began; a revised direct-launch-and-attach workflow is prepared for a follow-up run. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
+PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. iOS device and simulator builds and package checks pass, and simulator replay confirms the native engine loads in the ordinary app. The latest native job and four-format export checks passed, but Flutter marked the integration test failed during semantics cleanup; a rerun with semantics disabled is pending. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
 
 ## Download
 
@@ -17,17 +17,15 @@ The current shared app version is 1.5.2+31. Hosted run [40224304131](https://git
 
 The iOS Flutter runner is built on a hosted Mac by the
 [iOS build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/ios-build.yml).
-Run [40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118)
+Run [40240345529](https://github.com/sunyych/PocketGigaScan/actions/runs/40240345529)
 built and package-verified the unsigned device Release and arm64 simulator Debug
-apps. Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
+apps. The two-tile native job and four-format exports passed; the test then
+failed at framework cleanup because a `SemanticsHandle` remained active. The
+test now disables semantics generation because it makes no UI semantics
+assertions; rerun validation is pending.
+Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
 on an arm64 simulator showed the native-engine-loaded UI and process survival
-at 2, 15, and 30 seconds; a separate log showed the VM Service listening.
-In [run 40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200),
-the simulator smoke timed out waiting for Flutter's VM Service port before the
-Dart test began; it does not show whether the native job succeeds or fails. The
-next workflow launches the test app directly and attaches the existing driver
-to the process-reported VM Service URI.
-The bundles are unsigned; signing, TestFlight, and physical iPhone use are
+at 2, 15, and 30 seconds. The bundles are unsigned; signing, TestFlight, and physical iPhone use are
 separate qualification boundaries.
 Four-platform build limits and hashes are in the
 [current qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md);

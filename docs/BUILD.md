@@ -119,18 +119,16 @@ See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
 ## iOS native build
 
 The iOS source includes a pinned Rust/OpenCV/JPEG XL native-core builder. Hosted
-run [40231943118](https://github.com/sunyych/PocketGigaScan/actions/runs/40231943118)
+run [40240345529](https://github.com/sunyych/PocketGigaScan/actions/runs/40240345529)
 built and linked the unsigned iPhoneOS arm64 Release and simulator arm64 Debug
 apps and passed FFI, architecture, manifest, archive-hash, and license checks.
+Its two-tile `NativeJobApi` job and PNG/TIFF/JPEG/JPEG XL exports passed. The
+Flutter integration test failed only during framework cleanup because a
+`SemanticsHandle` remained active; the test now disables semantics generation
+since it makes no UI semantics assertions, and a verifying rerun is pending.
 Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
 on an arm64 simulator showed the native-engine-loaded UI and process survival
-at 2, 15, and 30 seconds; a separate unified-log record showed the Dart VM
-Service listening. That replay did not exercise native job/export. Run
-[40235960200](https://github.com/sunyych/PocketGigaScan/actions/runs/40235960200)
-built both apps, but its simulator smoke timed out waiting for Flutter's VM
-Service port before the Dart test started. It gives no result for the synthetic
-native job/export. The workflow now launches the test app directly and attaches
-its driver to the process-reported VM Service URI. Signing, installation, TestFlight, physical iPhone
+at 2, 15, and 30 seconds. Signing, installation, TestFlight, physical iPhone
 camera-transfer behavior, and real-photo quality are separate unqualified
 checks. See [iOS build instructions](../scripts/README-ios-build.md).
 

@@ -163,6 +163,8 @@ void main() {
       });
     },
     timeout: const Timeout(Duration(minutes: 10)),
+    // This FFI/filesystem smoke has no UI semantics assertions.
+    semanticsEnabled: false,
   );
 }
 
