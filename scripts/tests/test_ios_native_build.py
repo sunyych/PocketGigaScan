@@ -78,6 +78,18 @@ class IosNativeBuildContractTests(unittest.TestCase):
         self.assertIn('lipo "$archive" -verify_arch "$expected_arch"', NATIVE)
         self.assertNotIn("ade", LOCK["opencvLibraries"])
 
+    def test_libjxl_xcode_tools_are_plain_unsigned_cross_compiled_executables(self) -> None:
+        configuration = re.search(
+            r'(?ms)^  cmake -S "\$sources/libjxl".*?^  cmake --build "\$jxl_build"',
+            NATIVE,
+        )
+        self.assertIsNotNone(configuration)
+        self.assertIn("-DCMAKE_MACOSX_BUNDLE=OFF", configuration.group(0))
+        self.assertIn(
+            "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
+            configuration.group(0),
+        )
+
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
             "lumia_gigascan_abi_version",
