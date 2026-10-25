@@ -252,6 +252,10 @@ run_bounded "$drive_timeout_seconds" drive \
   bash -c 'cd "$1" && flutter drive --verbose --no-pub --device-id "$2" --use-existing-app "$3" --driver="$4" --target="$5" --timeout="$6"' \
   _ "$app_dir" "$SIMULATOR_ID" "$vm_uri" "$driver" "$target" "$drive_timeout_seconds"
 drive_status=$?
+xcrun simctl spawn "$SIMULATOR_ID" log show --last 20m --style compact --debug \
+  --predicate "processIdentifier == $launched_pid" \
+  > "$private_dir/runner-final.raw.log" 2>&1 || true
+sanitize_append "$private_dir/runner-final.raw.log"
 if (( drive_status != 0 )); then
   result=1
   exit "$result"

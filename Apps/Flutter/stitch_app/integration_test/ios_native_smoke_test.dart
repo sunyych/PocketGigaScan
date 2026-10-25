@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path/path.dart' as p;
@@ -17,7 +18,7 @@ void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
-    'iOS links NativeJobApi and runs a synthetic nominal tile',
+    'iOS links NativeJobApi and runs a synthetic nominal 1x2 grid',
     (tester) async {
       await tester.runAsync(() async {
         if (!Platform.isIOS) return;
@@ -33,6 +34,7 @@ void main() {
         expect(formats['png'], isTrue);
         expect(formats['tiff'], isTrue);
         expect(formats['jpeg'], isTrue);
+        expect(formats['jxl'], isTrue);
 
         final temp = await getTemporaryDirectory();
         final root = Directory(
@@ -48,28 +50,37 @@ void main() {
         await sourceDirectory.create();
         await outputDirectory.create();
         await exportDirectory.create();
-        final source = File(p.join(sourceDirectory.path, 'synthetic.jpg'));
-        await source.writeAsBytes(_makeSyntheticJpeg());
-
-        final photo = ImportedPhoto(
-          originalName: p.basename(source.path),
-          storedPath: source.path,
-          sha256: '',
-          width: 128,
-          height: 96,
-          originalOrder: 0,
-        );
+        final sources = [
+          File(p.join(sourceDirectory.path, 'synthetic-00.jpg')),
+          File(p.join(sourceDirectory.path, 'synthetic-01.jpg')),
+        ];
+        final jpegBytes = _makeSyntheticJpeg();
+        for (final source in sources) {
+          await source.writeAsBytes(jpegBytes);
+        }
+        final photos = sources.indexed
+            .map(
+              (entry) => ImportedPhoto(
+                originalName: p.basename(entry.$2.path),
+                storedPath: entry.$2.path,
+                sha256: '',
+                width: 128,
+                height: 96,
+                originalOrder: entry.$1,
+              ),
+            )
+            .toList(growable: false);
         final task = StitchTask(
           id: 'ios-native-smoke',
           createdAt: DateTime.now(),
           sourceDirectory: sourceDirectory.path,
           outputDirectory: outputDirectory.path,
-          photos: [photo],
+          photos: photos,
           grid: GridOptions(
             mode: GridMode.sequence,
             rows: 1,
-            columns: 1,
-            forceGridCells: {GridCell(0, 0)},
+            columns: 2,
+            forceGridCells: {const GridCell(0, 0), const GridCell(0, 1)},
           ),
           horizontalFovDegrees: 60,
           memoryBudgetMiB: 128,
@@ -105,10 +116,12 @@ void main() {
                   )
                   as Map<String, Object?>;
           final tiles = layout['tiles']! as List<Object?>;
-          expect(tiles, hasLength(1));
-          final tile = tiles.single! as Map<String, Object?>;
-          expect(tile['row'], 0);
-          expect(tile['column'], 0);
+          expect(tiles, hasLength(2));
+          final tileCells = tiles.map((value) {
+            final tile = value! as Map<String, Object?>;
+            return '${tile['row']},${tile['column']}';
+          }).toSet();
+          expect(tileCells, {'0,0', '0,1'});
           final report = layout['report']! as Map<String, Object?>;
           expect(report['nominalGridOnlyNeedsVisualReview'], isTrue);
           expect(report['qualityStatus'], 'needs-visual-review');
@@ -120,12 +133,7 @@ void main() {
             'jpeg': (bytes) => _startsWith(bytes, const [0xff, 0xd8, 0xff]),
             'jxl': _isJxl,
           };
-          for (final format in [
-            'png',
-            'tiff',
-            'jpeg',
-            if (formats['jxl'] == true) 'jxl',
-          ]) {
+          for (final format in ['png', 'tiff', 'jpeg', 'jxl']) {
             final destination = File(
               p.join(exportDirectory.path, 'ios-native-smoke.$format'),
             );
@@ -133,7 +141,8 @@ void main() {
             current = await _waitForTerminalState(api, jobId, current);
             expect(current['state'], 'completed', reason: '$format: $current');
             expect(await destination.exists(), isTrue, reason: format);
-            expect(await destination.length(), greaterThan(32), reason: format);
+            final byteLength = await destination.length();
+            expect(byteLength, greaterThan(32), reason: format);
             final handle = await destination.open();
             late final Uint8List header;
             try {
@@ -146,6 +155,7 @@ void main() {
               isTrue,
               reason: 'invalid $format header',
             );
+            debugPrint('iOS native smoke export: $format $byteLength bytes');
           }
         } finally {
           await root.delete(recursive: true);
