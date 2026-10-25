@@ -1,9 +1,9 @@
 # Apple native build
 
-The Flutter project can still build without the Rust panorama core. In that
-mode the app reports native processing as unavailable. Apple native processing
-is opt-in for iOS. The standalone macOS client builder and its pinned
-dependencies are documented below.
+This document covers the native iOS build and the standalone macOS package. The
+iOS source now has a pinned native-core builder; current CI and physical-device
+validation status is summarized in [the iOS build instructions](../../../scripts/README-ios-build.md).
+The standalone macOS client builder and its pinned dependencies are documented below.
 
 The default core is this repository's `native/core`; no sibling checkout is
 required. The script uses Rust 1.88.0 and locked Cargo dependencies. Install that
@@ -30,26 +30,26 @@ dependencies required by your OpenCV build to `LUMIA_APPLE_EXTRA_LIBS` as
 space-separated library names. The script passes the complete list to Cargo
 and the iOS app linker and fails before building if a required input is absent.
 
-For iOS, provide static OpenCV builds for the device and each simulator
-architecture. The script verifies the expected architecture in every archive
-and combines the two simulator core/library slices for Xcode:
+## iOS app
+
+On a Mac with Xcode command-line tools, Flutter 3.44.2 and Rust 1.88.0, build
+the native core, unsigned device Release app, simulator Debug app and validation
+packages from the repository root:
 
 ```sh
-export OPENCV_IOS_DEVICE_ROOT=/opt/opencv/ios-device
-export OPENCV_IOS_SIMULATOR_ARM64_ROOT=/opt/opencv/ios-simulator-arm64
-export OPENCV_IOS_SIMULATOR_X86_64_ROOT=/opt/opencv/ios-simulator-x86_64
-export LUMIA_APPLE_EXTRA_LIBS='jpeg png tiff webp'
-bash tool/native/apple/build_apple_native.sh ios
-flutter build ios --no-codesign
+scripts/build-stitch-ios.sh \
+  --cache-dir .build/ios-core-cache \
+  --output-dir .build/ios-artifacts
 ```
 
-The script builds `aarch64-apple-ios`, `aarch64-apple-ios-sim`, and
-`x86_64-apple-ios`, stages the forced static core archive and OpenCV archives
-under `ios/Native`, and writes an optional `ios/Flutter/NativeCore.generated.xcconfig`.
-That config applies `-force_load` and `-export_dynamic` so the process lookup
-used by Dart FFI retains the core C ABI symbols. `Debug.xcconfig` and
-`Release.xcconfig` include it only when present, preserving the native-free
-Flutter build when staging has not been run.
+The wrapper calls `tool/native/apple/build_ios_native.sh`, which builds pinned
+OpenCV 4.13.0, libjxl 0.12.0 and the Rust core for iPhoneOS arm64 and Apple
+Silicon iOS Simulator arm64. It stages static archives, licenses, a native build
+manifest and `NativeCore.generated.xcconfig`; the config is included in Debug and
+Release Xcode builds. The package verifier checks the built app's four FFI ABI
+exports and archive hashes. CI separately runs a synthetic `NativeJobApi` job
+and format-export smoke on an iOS simulator. These artifacts are unsigned; the
+current source has not yet passed hosted Apple or physical-device validation.
 
 ## Standalone macOS client
 

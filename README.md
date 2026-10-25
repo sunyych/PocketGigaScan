@@ -1,6 +1,6 @@
 # PocketGigaScan
 
-PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. The existing iOS runner builds for devices and simulators without the native stitching library. Physical iOS camera-transfer behavior, signing and native iOS stitching remain unqualified. Product boundaries and build evidence are documented below.
+PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. The iOS source now includes a native Rust/OpenCV/JPEG XL build route and a simulator job/export smoke test; hosted Apple validation for the current source is pending. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
 
 ## Download
 
@@ -13,14 +13,18 @@ Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workf
 produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
 runtime and licenses. See [Mac build and test instructions](Apps/Flutter/stitch_app/APPLE-BUILD.md)
 and [platform qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
-The qualified test build is version 1.5.1+30. Physical Mac launch/import/resume and real-photo visual acceptance remain unqualified.
+The current shared app version is 1.5.2+31. The recorded macOS package qualification is historical evidence for version 1.5.1+30; it does not qualify the current version. Physical Mac launch/import/resume and real-photo visual acceptance remain unqualified.
 
-The existing iOS Flutter runner is built on a hosted Mac by the
+The iOS Flutter runner is built on a hosted Mac by the
 [iOS build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/ios-build.yml).
-It produces unsigned device and simulator app bundles without native stitching
-linkage. These bundles are build-validation artifacts, not signed install or
-TestFlight releases. Four-platform build limits and hashes are in the
+The workflow now builds and links the pinned Rust/OpenCV/JPEG XL core before
+Flutter, checks the required FFI symbols, and runs a synthetic NativeJobApi
+simulator smoke test. Its device and simulator bundles are unsigned validation
+artifacts, not signed install or TestFlight releases. The current source has not
+yet completed its hosted Apple run. Four-platform build limits and hashes are in the
 [qualification evidence](docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-17.md).
+See the [iOS build instructions](scripts/README-ios-build.md) for the Mac command
+and unsigned-package boundary.
 
 ## Code signing policy
 
@@ -91,6 +95,8 @@ for measured limits and the distinction between local crops and full-panorama ac
 | `native/core` | Vendored independent Rust/OpenCV stitching and export engine |
 | `scripts/build-dwarf-stitch-windows.ps1` | Source build, verification and complete Windows ZIP |
 | `scripts/build-stitch-macos.sh` | Apple silicon source build, offline model and test ZIP verification |
+| `scripts/build-stitch-ios.sh` | Pinned iOS native core, unsigned device/simulator apps and package checks |
+| `Apps/Flutter/stitch_app/tool/native/apple/build_ios_native.sh` | Pinned iOS OpenCV/libjxl and Rust archive builder |
 | `scripts/build-stitch-android-core.ps1` | Pinned ARM64/optional x86_64 native source build and license staging |
 | `justfile` | Current product build/check recipes |
 | `branding` | Original icon source and generator |
@@ -98,4 +104,4 @@ for measured limits and the distinction between local crops and full-panorama ac
 
 [Build instructions](docs/BUILD.md) · [Tests](docs/gigascan/STITCH-TESTING.md) · [Architecture and platform boundaries](docs/RESTRUCTURE.md)
 
-The application is licensed under Apache-2.0. Current Flutter, Rust, native-codec and model notices are documented in [third-party notices](THIRD-PARTY-NOTICES.md) and included by the platform packaging workflows. Remote camera capture/control is outside its scope. Android camera transfer is documented in [PG-062 evidence](docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md); the shared iOS transfer flow has not been physically qualified, and iOS stitching remains unlinked.
+The application is licensed under Apache-2.0. Current Flutter, Rust, native-codec and model notices are documented in [third-party notices](THIRD-PARTY-NOTICES.md) and included by the platform packaging workflows. Remote camera capture/control is outside its scope. Android camera transfer is documented in [PG-062 evidence](docs/gigascan/evidence/DWARF-MOBILE-IMPORT-2026-10-07.md); the shared iOS transfer flow has not been physically qualified. iOS native stitching is integrated in source, with hosted Apple validation pending.

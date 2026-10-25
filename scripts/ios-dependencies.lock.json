@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "minimumIOS": "13.0",
+  "flutter": {
+    "version": "3.44.2",
+    "revision": "c9a6c484230f8b5e408ec57be1ef71dee1e77020"
+  },
+  "rust": {
+    "version": "1.88.0",
+    "deviceTarget": "aarch64-apple-ios",
+    "simulatorArm64Target": "aarch64-apple-ios-sim",
+    "simulatorX86_64Target": "x86_64-apple-ios"
+  },
+  "opencv": {
+    "version": "4.13.0",
+    "url": "https://github.com/opencv/opencv/archive/refs/tags/4.13.0.tar.gz",
+    "sha256": "1d40ca017ea51c533cf9fd5cbde5b5fe7ae248291ddf2af99d4c17cf8e13017d"
+  },
+  "libjxl": {
+    "version": "0.12.0",
+    "sources": [
+      {
+        "name": "libjxl",
+        "url": "https://github.com/libjxl/libjxl/archive/v0.12.0.tar.gz",
+        "sha256": "03e9be69a30be4011f559da75328b6d7cea8ad921fabfbd551ce10bf45cdc992",
+        "marker": "CMakeLists.txt"
+      },
+      {
+        "name": "brotli",
+        "url": "https://github.com/google/brotli/archive/028fb5a23661f123017c060daa546b55cf4bde29.tar.gz",
+        "sha256": "0afe09a53c8bad9861c8dd1fc1284308d54f19d2979ba3541cfdcc9b05fe360f",
+        "marker": "c/include/brotli/decode.h"
+      },
+      {
+        "name": "highway",
+        "url": "https://github.com/google/highway/archive/457c891775a7397bdb0376bb1031e6e027af1c48.tar.gz",
+        "sha256": "5124b0501c98d9930dbb065bfa1a5bbbd59ce0f12facb7e1e33aaef01a5f1f1a",
+        "marker": "CMakeLists.txt"
+      },
+      {
+        "name": "skcms",
+        "url": "https://github.com/google/skcms/archive/96d9171c94b937a1b5f0293de7309ac16311b722.tar.gz",
+        "sha256": "9bb4b5bba0b7c04f6c2bce9ff713d61e23c9a20c4945161ae16290498ad74627",
+        "marker": "skcms.cc"
+      }
+    ]
+  },
+  "opencvModules": [
+    "opencv_stitching",
+    "opencv_calib3d",
+    "opencv_features2d",
+    "opencv_flann",
+    "opencv_imgcodecs",
+    "opencv_imgproc",
+    "opencv_core",
+    "opencv_photo"
+  ],
+  "opencvLibraries": [
+    "opencv_stitching",
+    "opencv_calib3d",
+    "opencv_features2d",
+    "opencv_flann",
+    "opencv_imgcodecs",
+    "opencv_imgproc",
+    "opencv_core",
+    "opencv_photo",
+    "libjpeg-turbo",
+    "libpng",
+    "zlib"
+  ],
+  "opencvSystemLibraries": ["z"],
+  "jpegXlLibraries": [
+    "jxl",
+    "jxl_cms",
+    "hwy",
+    "brotlienc",
+    "brotlidec",
+    "brotlicommon"
+  ],
+  "licenses": [
+    {"name": "OpenCV", "source": "opencv-4.13.0", "patterns": ["LICENSE*", "COPYING*", "NOTICE*", "PATENTS*", "README*"]},
+    {"name": "libjxl", "source": "libjxl-0.12.0", "patterns": ["LICENSE*", "COPYING*", "NOTICE*", "PATENTS*"]},
+    {"name": "Brotli", "source": "brotli-028fb5a23661f123017c060daa546b55cf4bde29", "patterns": ["LICENSE*", "COPYING*", "NOTICE*"]},
+    {"name": "Highway", "source": "highway-457c891775a7397bdb0376bb1031e6e027af1c48", "patterns": ["LICENSE*", "COPYING*", "NOTICE*"]},
+    {"name": "skcms", "source": "skcms-96d9171c94b937a1b5f0293de7309ac16311b722", "patterns": ["LICENSE*", "COPYING*", "NOTICE*"]}
+  ]
+}

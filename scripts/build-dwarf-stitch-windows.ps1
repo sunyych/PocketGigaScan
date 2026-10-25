@@ -467,7 +467,7 @@ function Get-BuildPlan {
         rustVersion = $pin.rustVersion
         minimumVisualStudioVersion = '18.0'
         minimumMsvcToolsetVersion = '14.50'
-        nativeOutputs = @('png', 'tiff', 'jxl')
+        nativeOutputs = @('png', 'tiff', 'jpeg', 'jxl')
         releaseExecutable = Join-Path $releaseDir 'PocketGigaScan.exe'
         zip = $archivePath
         signingInputZip = $signingInputPath
@@ -528,6 +528,15 @@ function Save-VerifiedArchive([string]$Url, [string]$Destination, [string]$Expec
     }
 }
 
+function Assert-CoreExportCapabilities([object]$Capabilities) {
+    $formats = $Capabilities.exportFormats
+    if ($formats.png -ne $true -or $formats.tiff -ne $true -or $formats.jpeg -ne $true -or $formats.jxl -ne $true -or
+        $Capabilities.jpegXlAvailable -ne $true) {
+        throw 'Release core lacks PNG/TIFF/JPEG/JPEG XL capabilities.'
+    }
+    return $Capabilities
+}
+
 function Get-CoreCapabilities([string]$DllDirectory) {
     $probeSource = @'
 using System;
@@ -552,10 +561,10 @@ public static class PocketGigaScanCoreProbe {
         $responseText = [Runtime.InteropServices.Marshal]::PtrToStringUTF8($responsePointer)
         $response = $responseText | ConvertFrom-Json
         if ($response.ok -ne $true) { throw "Rust core capabilities request failed: $responseText" }
-        $formats = $response.capabilities.exportFormats
-        if ($formats.png -ne $true -or $formats.tiff -ne $true -or $formats.jxl -ne $true -or
-            $response.capabilities.jpegXlAvailable -ne $true) {
-            throw "Release core lacks PNG/TIFF/JPEG XL capabilities: $responseText"
+        try {
+            Assert-CoreExportCapabilities $response.capabilities | Out-Null
+        } catch {
+            throw "$($_.Exception.Message) Core response: $responseText"
         }
         return $response.capabilities
     } finally {
@@ -872,7 +881,7 @@ $manifest = [ordered]@{
         files = $vcRuntimeInventory
     }
     flutterArchiveSha256 = $pin.flutterSha256
-    formats = @('PNG', 'TIFF', 'JPEG XL')
+    formats = @('PNG', 'TIFF', 'JPEG', 'JPEG XL')
     capabilities = $capabilities
     rustRegistryLicenseInventory = $rustLicenseInventory
     sourceCommit = (git -c "safe.directory=$repo" -C $repo rev-parse HEAD).Trim()

@@ -44,6 +44,12 @@ $verifiedCoreCopyAst = $builderAst.Find({
 }, $true)
 Assert-True ($null -ne $verifiedCoreCopyAst) 'Builder must verify and safely stage the freshly built native core DLL.'
 Invoke-Expression $verifiedCoreCopyAst.Extent.Text
+$coreExportCapabilitiesAst = $builderAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Assert-CoreExportCapabilities'
+}, $true)
+Assert-True ($null -ne $coreExportCapabilitiesAst) 'Builder must require every declared native export format.'
+Invoke-Expression $coreExportCapabilitiesAst.Extent.Text
 $saveVerifiedArchiveAst = $builderAst.Find({
     param($node)
     $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Save-VerifiedArchive'
@@ -298,6 +304,19 @@ Assert-True $missingNestedEntryRejected 'ZIP validator accepted a missing nested
 Remove-Item -LiteralPath $zipTestRoot -Recurse -Force
 
 $plan = (& $builderPath -PlanOnly | ConvertFrom-Json)
+$validCoreFormats = [pscustomobject]@{
+    exportFormats = [pscustomobject]@{ png = $true; tiff = $true; jpeg = $true; jxl = $true }
+    jpegXlAvailable = $true
+}
+Assert-True ((Assert-CoreExportCapabilities $validCoreFormats).exportFormats.jpeg -eq $true) 'Core export contract rejected the current PNG/TIFF/JPEG/JPEG XL capability set.'
+$missingJpegRejected = $false
+try {
+    Assert-CoreExportCapabilities ([pscustomobject]@{
+        exportFormats = [pscustomobject]@{ png = $true; tiff = $true; jpeg = $false; jxl = $true }
+        jpegXlAvailable = $true
+    }) | Out-Null
+} catch { $missingJpegRejected = $_.Exception.Message -match 'JPEG' }
+Assert-True $missingJpegRejected 'Core export contract accepted a missing JPEG capability.'
 Assert-True ($plan.product -eq 'PocketGigaScan' -and $plan.subtitle -eq 'DWARF Stitch') 'Plan product branding changed unexpectedly.'
 Assert-True ($plan.flutterVersion -eq '3.44.2') 'Flutter pin changed unexpectedly.'
 Assert-True ($plan.flutterCommit -eq 'c9a6c484230f8b5e408ec57be1ef71dee1e77020') 'Flutter commit pin changed unexpectedly.'
@@ -308,12 +327,14 @@ Assert-True ($plan.libjxlVersion -eq '0.12.0' -and $plan.libjxlSha256 -eq '3025d
 Assert-True ($plan.onnxRuntimeVersion -eq '1.31.0' -and $plan.onnxRuntimeSha256 -eq '3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195') 'ONNX Runtime SDK pin or checksum changed unexpectedly.'
 Assert-True ($plan.sceneModelId -eq 'openmmlab/upernet-convnext-tiny@876ffc56b819a829448f7e81e9f8606deef6fb65') 'Scene model revision changed unexpectedly.'
 Assert-True ($plan.djxlSha256 -eq '6970ce73de51e046b39bd5f28fc7bc5da64e9f6505c11194319f43d8849d2bf4') 'Independent djxl verification tool pin changed unexpectedly.'
-Assert-True (@($plan.nativeOutputs) -join ',' -eq 'png,tiff,jxl') 'Build plan does not retain PNG, TIFF, and JPEG XL formats.'
+Assert-True (@($plan.nativeOutputs) -join ',' -eq 'png,tiff,jpeg,jxl') 'Build plan does not retain PNG, TIFF, JPEG, and JPEG XL formats.'
 Assert-True ([IO.Path]::GetFileName($plan.releaseExecutable) -eq 'PocketGigaScan.exe') 'Windows executable name changed unexpectedly.'
 Assert-True ([IO.Path]::GetFileName($plan.zip) -eq 'PocketGigaScan-Windows-x64.zip') 'Windows ZIP name changed unexpectedly.'
 
 $cmake = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/CMakeLists.txt') -Raw
 $builderText = Get-Content -LiteralPath $builderPath -Raw
+Assert-True ($builderText -match "formats = @\('PNG', 'TIFF', 'JPEG', 'JPEG XL'\)") 'Windows package manifest does not list standard JPEG export.'
+Assert-True ($builderText -match 'Assert-CoreExportCapabilities \$response\.capabilities') 'Windows capability probe does not validate native JPEG support.'
 $runner = Get-Content -LiteralPath (Join-Path $repo 'Apps/Flutter/stitch_app/windows/runner/CMakeLists.txt') -Raw
 Assert-True ($builderText -match "'VERSION_NUMBER'" -and $builderText -match '\$ortSdkVersionPath.*ortVersion') 'Builder does not verify the extracted ONNX Runtime SDK version.'
 Assert-True ($builderText -match '\$vswhereOutput = @\(& \$vswhere' -and

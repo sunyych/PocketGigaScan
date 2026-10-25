@@ -7,6 +7,7 @@ import ctypes
 import hashlib
 import json
 import math
+import os
 import plistlib
 import platform
 import re
@@ -20,6 +21,62 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "scripts" / "scene-model-export.lock.json"
+
+
+def resolve_source_revision(root: Path = ROOT) -> str | None:
+    github_sha = os.environ.get("GITHUB_SHA", "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", github_sha):
+        return github_sha.lower()
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        revision = result.stdout.strip()
+        if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision):
+            return revision.lower()
+    except (OSError, subprocess.CalledProcessError):
+        pass
+
+    revision_file = root / "SOURCE-REVISION"
+    try:
+        revision = revision_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", revision):
+        return revision.lower()
+    return None
+
+
+def bundle_version(info: dict) -> dict[str, str]:
+    marketing = info.get("CFBundleShortVersionString")
+    build = info.get("CFBundleVersion")
+    if not isinstance(marketing, str) or not marketing.strip() or not isinstance(build, str) or not build.strip():
+        raise ValueError("Bundle Info.plist is missing its marketing or build version")
+    return {"marketing": marketing, "build": build}
+
+
+def require_export_capabilities(capabilities: dict) -> None:
+    formats = capabilities.get("exportFormats")
+    missing = [name for name in ("png", "tiff", "jpeg", "jxl") if not isinstance(formats, dict) or formats.get(name) is not True]
+    if missing:
+        raise RuntimeError("Packaged core lacks export formats: " + ", ".join(missing))
+    if capabilities.get("jpegXlAvailable") is not True:
+        raise RuntimeError("Packaged core lacks JPEG XL capability")
+
+
+def verify_jpeg_with_sips(path: Path) -> tuple[int, int]:
+    if not path.read_bytes().startswith(b"\xff\xd8\xff"):
+        raise ValueError("Unexpected JPEG output header")
+    details = run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)])
+    width = re.search(r"(?m)^\s*pixelWidth:\s*(\d+)\s*$", details)
+    height = re.search(r"(?m)^\s*pixelHeight:\s*(\d+)\s*$", details)
+    if not width or not height or int(width.group(1)) <= 0 or int(height.group(1)) <= 0:
+        raise ValueError("macOS sips could not decode the exported JPEG dimensions")
+    return int(width.group(1)), int(height.group(1))
 
 
 def sha256(path: Path) -> str:
@@ -130,6 +187,7 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
     contents = bundle / "Contents"
     info_path = contents / "Info.plist"
     info = plistlib.loads(info_path.read_bytes())
+    version = bundle_version(info)
     if info.get("CFBundleIdentifier") != "com.lumiaiq.pocketgigascan":
         raise ValueError("macOS bundle identifier is not com.lumiaiq.pocketgigascan")
     if info.get("LSMinimumSystemVersion") != "14.0":
@@ -184,7 +242,7 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
     if "com.apple.security.app-sandbox" in entitlements:
         raise ValueError("Release package must be non-sandboxed for user-selected local photo import/export")
     if not smoke:
-        return {"bundle": str(bundle), "model": model, "dylibCount": len(dylibs)}
+        return {"bundle": str(bundle), "version": version, "model": model, "dylibCount": len(dylibs)}
 
     library = ctypes.CDLL(str(core))
     library.lumia_gigascan_abi_version.restype = ctypes.c_uint32
@@ -230,8 +288,9 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
     with tempfile.TemporaryDirectory(prefix="PocketGigaScan-场景-🧩-macOS-smoke-") as temporary:
         capabilities = call({"command": "capabilities"}).get("capabilities", {})
         memory = capabilities.get("systemMemory") or {}
-        if not capabilities.get("sceneAnalysisAvailable") or not capabilities.get("jpegXlAvailable"):
-            raise RuntimeError("Packaged core lacks scene-analysis or JPEG XL capability")
+        if not capabilities.get("sceneAnalysisAvailable"):
+            raise RuntimeError("Packaged core lacks scene-analysis capability")
+        require_export_capabilities(capabilities)
         if not isinstance(memory.get("totalMemoryMiB"), int) or not isinstance(memory.get("availableMemoryMiB"), int):
             raise RuntimeError("Packaged core did not report valid macOS system memory")
         configured = call({
@@ -285,8 +344,8 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
         if not all(source.get("maskSha256") and source.get("maskPath") for source in semantic["sources"]):
             raise ValueError("Scene analysis did not persist source mask artifacts")
 
-        export_signatures = {"png": (b"\x89PNG\r\n\x1a\n",), "tiff": (b"II*\x00", b"MM\x00*"), "jxl": (b"\xff\x0a", b"\x00\x00\x00\x0cJXL \r\n\x87\n")}
-        for extension in ("png", "tiff", "jxl"):
+        export_signatures = {"png": (b"\x89PNG\r\n\x1a\n",), "tiff": (b"II*\x00", b"MM\x00*"), "jpeg": (b"\xff\xd8\xff",), "jxl": (b"\xff\x0a", b"\x00\x00\x00\x0cJXL \r\n\x87\n")}
+        for extension in ("png", "tiff", "jpeg", "jxl"):
             target = root / f"result.{extension}"
             call({"command": "export", "jobId": job_id, "destination": str(target)})
             while True:
@@ -302,7 +361,9 @@ def verify_bundle(bundle: Path, smoke: bool) -> dict:
             expected = export_signatures[extension]
             if not any(header.startswith(signature) for signature in expected):
                 raise ValueError(f"Unexpected {extension} output header: {header!r}")
-    return {"bundle": str(bundle), "model": model, "dylibCount": len(dylibs), "ffiAbi": 1, "sceneInference": "public job JSON render passed", "exports": ["PNG", "TIFF", "JXL"]}
+            if extension == "jpeg":
+                verify_jpeg_with_sips(target)
+    return {"bundle": str(bundle), "version": version, "model": model, "dylibCount": len(dylibs), "ffiAbi": 1, "sceneInference": "public job JSON render passed", "exports": ["PNG", "TIFF", "JPEG", "JPEG XL"]}
 
 
 def write_package_manifest(package: Path, lock_path: Path) -> dict:
@@ -320,11 +381,15 @@ def write_package_manifest(package: Path, lock_path: Path) -> dict:
         "architecture": lock["architecture"],
         "minimumMacOS": lock["minimumMacOS"],
         "bundleIdentifier": "com.lumiaiq.pocketgigascan",
+        "version": bundle_result["version"],
         "distribution": "local ad-hoc signed developer test build; not notarized",
         "dependencies": lock,
         "sceneModel": {"path": "PocketGigaScan.app/Contents/Resources/models/scene-model-v1.onnx", "sha256": bundle_result["model"]["sha256"], "sizeBytes": bundle_result["model"]["sizeBytes"]},
         "files": files,
     }
+    revision = resolve_source_revision()
+    if revision is not None:
+        manifest["sourceRevision"] = revision
     (package / "build-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return manifest
 

@@ -69,7 +69,61 @@ class MacBuildContractTests(unittest.TestCase):
         self.assertLess(self.verifier.index('"command": "configureResources"'), self.verifier.index('"command": "start"'))
         self.assertIn('"totalMemoryBudgetMiB": 2048', self.verifier)
         self.assertIn('"jxl"', self.verifier)
+        self.assertIn('"jpeg"', self.verifier)
+        self.assertIn('"JPEG"', self.verifier)
+        self.assertIn('verify_jpeg_with_sips', self.verifier)
         self.assertNotIn("lumia_scene_open", self.verifier)
+
+    def test_package_export_capabilities_require_jpeg(self) -> None:
+        formats = {"png": True, "tiff": True, "jpeg": True, "jxl": True}
+        VERIFIER.require_export_capabilities({"exportFormats": formats, "jpegXlAvailable": True})
+        formats.pop("jpeg")
+        with self.assertRaisesRegex(RuntimeError, "jpeg"):
+            VERIFIER.require_export_capabilities({"exportFormats": formats, "jpegXlAvailable": True})
+
+    def test_jpeg_smoke_uses_signature_and_independent_sips_decode(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            image = Path(temporary) / "result.jpeg"
+            image.write_bytes(b"\xff\xd8\xfffixture")
+            with patch.object(VERIFIER, "run", return_value=f"{image}:\n  pixelWidth: 640\n  pixelHeight: 480\n") as mocked:
+                self.assertEqual(VERIFIER.verify_jpeg_with_sips(image), (640, 480))
+            self.assertEqual(mocked.call_args.args[0][:5], ["sips", "-g", "pixelWidth", "-g", "pixelHeight"])
+            image.write_bytes(b"not jpeg")
+            with self.assertRaisesRegex(ValueError, "JPEG output header"):
+                VERIFIER.verify_jpeg_with_sips(image)
+
+    def test_source_revision_uses_available_provenance_or_is_omitted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.dict(VERIFIER.os.environ, {"GITHUB_SHA": "A" * 40}, clear=True):
+                self.assertEqual(VERIFIER.resolve_source_revision(root), "a" * 40)
+            with patch.dict(VERIFIER.os.environ, {}, clear=True), patch.object(
+                VERIFIER.subprocess, "run", side_effect=FileNotFoundError
+            ):
+                self.assertIsNone(VERIFIER.resolve_source_revision(root))
+                (root / "SOURCE-REVISION").write_text("B" * 64, encoding="utf-8")
+                self.assertEqual(VERIFIER.resolve_source_revision(root), "b" * 64)
+
+    def test_package_manifest_records_bundle_versions_and_available_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = Path(temporary)
+            (package / "PocketGigaScan.app").mkdir()
+            bundle_result = {
+                "model": {"sha256": "a" * 64, "sizeBytes": 12},
+                "version": {"marketing": "1.5.2", "build": "31"},
+                "dylibCount": 1,
+            }
+            with patch.object(VERIFIER, "verify_bundle", return_value=bundle_result), patch.object(
+                VERIFIER, "resolve_source_revision", return_value="b" * 40
+            ):
+                manifest = VERIFIER.write_package_manifest(package, ROOT / "scripts/macos-dependencies.lock.json")
+            self.assertEqual(manifest["version"], {"marketing": "1.5.2", "build": "31"})
+            self.assertEqual(manifest["sourceRevision"], "b" * 40)
+            with patch.object(VERIFIER, "verify_bundle", return_value=bundle_result), patch.object(
+                VERIFIER, "resolve_source_revision", return_value=None
+            ):
+                without_revision = VERIFIER.write_package_manifest(package, ROOT / "scripts/macos-dependencies.lock.json")
+            self.assertNotIn("sourceRevision", without_revision)
 
     def test_clean_source_native_build_avoids_host_codec_libraries(self) -> None:
         for flag in ("-DBUILD_JPEG=ON", "-DBUILD_PNG=ON", "-DBUILD_ZLIB=ON"):

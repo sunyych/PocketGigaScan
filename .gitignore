@@ -143,3 +143,9 @@ __pycache__/
 !/scripts/package_ios_build.py
 !/scripts/README-ios-build.md
 !/scripts/tests/test_ios_build.py
+
+# Functional iOS native core build and verification
+!/scripts/build-stitch-ios.sh
+!/scripts/ios-dependencies.lock.json
+!/scripts/tests/test_ios_native_build.py
+!/Apps/Flutter/stitch_app/tool/native/apple/build_ios_native.sh
