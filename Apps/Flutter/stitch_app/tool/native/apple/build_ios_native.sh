@@ -175,7 +175,7 @@ download_source "OpenCV $opencv_version" "$opencv_url" "$opencv_sha" "$opencv_ar
 extract_source "$opencv_archive" "$opencv_source" modules/core/include/opencv2/core/version.hpp
 
 hydrate_jxl_source() {
-  local index=0 name url sha marker archive destination
+  local index=0 name url sha marker archive destination dependency
   while IFS=$'\t' read -r name url sha marker; do
     archive="$downloads/$name.tar.gz"
     destination="$sources/$name"
@@ -287,7 +287,7 @@ serialize_link_libraries() {
 
 build_dependencies_for_target() {
   local platform="$1" arch="$2" sdk="$3" suffix="$4"
-  local sdk_path opencv_build opencv_sdk jxl_build jxl_sdk jxl_version
+  local sdk_path opencv_build opencv_sdk jxl_build jxl_sdk jxl_version target name
   sdk_path="$(xcrun --sdk "$sdk" --show-sdk-path)"
   [[ -d "$sdk_path" ]] || { echo "Xcode SDK is unavailable: $sdk" >&2; exit 69; }
   IOS_SDK_VERSION="$(xcrun --sdk "$sdk" --show-sdk-version)"
@@ -382,7 +382,7 @@ declare -a variants=()
 
 build_variant() {
   local kind="$1" arch="$2" sdk="$3" target="$4" suffix="$5" platform_id="$6"
-  local opencv_sdk jxl_sdk core_archive output_dir archive_path
+  local opencv_sdk jxl_sdk core_archive output_dir archive_path name
   build_dependencies_for_target "$kind" "$arch" "$sdk" "$suffix"
   opencv_sdk="$IOS_OPENCV_SDK"
   jxl_sdk="$IOS_JXL_SDK"
@@ -460,7 +460,7 @@ fi
 
 write_linker_config() {
   local config="$app/ios/Flutter/NativeCore.generated.xcconfig"
-  local temp="$config.tmp" opencv_flags="" jxl_flags="" symbol_flags=""
+  local temp="$config.tmp" opencv_flags="" jxl_flags="" symbol_flags="" name symbol
   for name in "${opencv_libraries[@]}"; do opencv_flags+=" -l${name}"; done
   opencv_flags+=" -lz"
   for name in "${jxl_libraries[@]}"; do jxl_flags+=" -l${name}"; done
@@ -478,7 +478,7 @@ XCCONFIG
 }
 
 copy_licenses() {
-  local license_root="$native_root/licenses"
+  local license_root="$native_root/licenses" source_root
   local count=0
   for source_root in "$opencv_source" "$sources/libjxl" "$sources/brotli" "$sources/highway" "$sources/skcms"; do
     local label

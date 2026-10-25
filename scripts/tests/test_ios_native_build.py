@@ -186,6 +186,49 @@ class IosNativeBuildContractTests(unittest.TestCase):
             self.assertNotEqual(missing.returncode, 0)
             self.assertIn("missing static archive", missing.stderr)
 
+    @unittest.skipIf(sys.platform == "win32", "Bash fixture execution is validated on macOS CI")
+    def test_dependency_builder_preserves_callers_rust_target(self) -> None:
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("Bash is required to execute the build dependency fixture")
+        assert_function = re.search(r"(?ms)^assert_cache_target\(\) \{\n.*?^\}", NATIVE)
+        dependency_function = re.search(
+            r"(?ms)^build_dependencies_for_target\(\) \{\n.*?^\}", NATIVE
+        )
+        self.assertIsNotNone(assert_function)
+        self.assertIsNotNone(dependency_function)
+        with tempfile.TemporaryDirectory() as temporary:
+            cache = Path(temporary) / "cache"
+            cache.mkdir()
+            sdk_path = Path(temporary) / "ios-sdk"
+            sdk_path.mkdir()
+            script = "\n".join((
+                assert_function.group(0),
+                dependency_function.group(0),
+                f'cache="{cache}"',
+                f'builds="{cache}/dependencies/build"',
+                f'sdks="{cache}/dependencies/sdk"',
+                f'sources="{cache}/dependencies/sources"',
+                f'opencv_source="{cache}/dependencies/sources/opencv"',
+                'minimum_ios="13.0"',
+                'build_jobs=2',
+                'opencv_modules=()',
+                'opencv_libraries=()',
+                'jxl_libraries=()',
+                'xcrun() { if [[ "$*" == *--show-sdk-path* ]]; then printf "%s\\n" "$fixture_sdk"; else printf "18.0\\n"; fi; }',
+                'cmake() { return 0; }',
+                'lock_value() { printf "0.12.0\\n"; }',
+                f'fixture_sdk="{sdk_path}"',
+                'target="aarch64-apple-ios"',
+                'build_dependencies_for_target device arm64 iphoneos iphoneos',
+                'printf "rust_target=%s\\n" "$target"',
+            ))
+            result = subprocess.run(
+                [bash, "-c", script], capture_output=True, text=True, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("rust_target=aarch64-apple-ios", result.stdout)
+
     def test_builder_exports_all_dynamic_library_process_symbols(self) -> None:
         symbols = (
             "lumia_gigascan_abi_version",
