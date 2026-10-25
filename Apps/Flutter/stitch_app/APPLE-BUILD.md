@@ -55,12 +55,10 @@ checks passed. Independent simulator replay
 [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
 showed on an arm64 simulator that the ordinary app process stayed alive at 2,
 15, and 30 seconds and displayed “Native stitching engine loaded.” The latest
-hosted run [40240345529](https://github.com/sunyych/PocketGigaScan/actions/runs/40240345529)
-passed device and simulator build/package checks; its two-tile native job and
-PNG/TIFF/JPEG/JPEG XL exports also passed. The Flutter integration test failed
-during framework cleanup because a `SemanticsHandle` remained active. The test
-now disables semantics generation because it has no UI semantics assertions;
-a verifying rerun is pending. The app artifacts are unsigned.
+hosted run [40241795440](https://github.com/sunyych/PocketGigaScan/actions/runs/40241795440)
+passed device and simulator build/package checks, and the complete simulator
+integration smoke passed, including the two-tile native job and PNG/TIFF/JPEG/
+JPEG XL exports. The app artifacts are unsigned.
 Signing, TestFlight, physical iPhone behavior, and
 real-photo quality are separate unqualified checks.
 See [current four-platform build evidence](../../../docs/gigascan/evidence/FOUR-PLATFORM-BUILD-2026-10-25.md);

@@ -119,13 +119,11 @@ See [Android design](gigascan/ANDROID-STITCH-DESIGN.md) and
 ## iOS native build
 
 The iOS source includes a pinned Rust/OpenCV/JPEG XL native-core builder. Hosted
-run [40240345529](https://github.com/sunyych/PocketGigaScan/actions/runs/40240345529)
+run [40241795440](https://github.com/sunyych/PocketGigaScan/actions/runs/40241795440)
 built and linked the unsigned iPhoneOS arm64 Release and simulator arm64 Debug
 apps and passed FFI, architecture, manifest, archive-hash, and license checks.
-Its two-tile `NativeJobApi` job and PNG/TIFF/JPEG/JPEG XL exports passed. The
-Flutter integration test failed only during framework cleanup because a
-`SemanticsHandle` remained active; the test now disables semantics generation
-since it makes no UI semantics assertions, and a verifying rerun is pending.
+The complete arm64 simulator integration smoke passed, including the two-tile
+`NativeJobApi` job and PNG/TIFF/JPEG/JPEG XL exports.
 Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
 on an arm64 simulator showed the native-engine-loaded UI and process survival
 at 2, 15, and 30 seconds. Signing, installation, TestFlight, physical iPhone

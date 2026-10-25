@@ -1,6 +1,6 @@
 # PocketGigaScan
 
-PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. iOS device and simulator builds and package checks pass, and simulator replay confirms the native engine loads in the ordinary app. The latest native job and four-format export checks passed, but Flutter marked the integration test failed during semantics cleanup; a rerun with semantics disabled is pending. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
+PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built with Flutter and a Rust/OpenCV engine. It can connect to a DWARF camera over its local network, list panorama packages and download original photos for local stitching; Android has real camera and phone evidence. Windows has a published build; the Android ARM64 package passes host and packaging checks; and the Apple silicon macOS package passes source Release, offline inference and export checks. iOS device and simulator builds/package checks pass, and the arm64 simulator NativeJobApi smoke passes the two-tile render and PNG/TIFF/JPEG/JPEG XL exports. Physical iOS camera-transfer behavior, signing and real-device use remain unqualified. Product boundaries and build evidence are documented below.
 
 ## Download
 
@@ -17,12 +17,10 @@ The current shared app version is 1.5.2+31. Hosted run [40224304131](https://git
 
 The iOS Flutter runner is built on a hosted Mac by the
 [iOS build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/ios-build.yml).
-Run [40240345529](https://github.com/sunyych/PocketGigaScan/actions/runs/40240345529)
+Run [40241795440](https://github.com/sunyych/PocketGigaScan/actions/runs/40241795440)
 built and package-verified the unsigned device Release and arm64 simulator Debug
-apps. The two-tile native job and four-format exports passed; the test then
-failed at framework cleanup because a `SemanticsHandle` remained active. The
-test now disables semantics generation because it makes no UI semantics
-assertions; rerun validation is pending.
+apps, and the complete arm64 simulator integration smoke passed. It exercised
+the two-tile native job and PNG/TIFF/JPEG/JPEG XL exports.
 Ordinary-app replay [40234798847](https://github.com/sunyych/PocketGigaScan/actions/runs/40234798847)
 on an arm64 simulator showed the native-engine-loaded UI and process survival
 at 2, 15, and 30 seconds. The bundles are unsigned; signing, TestFlight, and physical iPhone use are
