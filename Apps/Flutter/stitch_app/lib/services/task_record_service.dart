@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 
 import '../models/stitch_task.dart';
 import '../models/grid_options.dart';
+import 'output_source_locator.dart';
 import 'task_repository.dart';
 
 /// Read-only snapshot of the task's single authoritative task.json envelope.
@@ -351,11 +352,14 @@ class TaskRecordService {
     outputs['exportDigestStatus'] = 'notComputed';
     outputs.remove('producerReceipt');
     final expectedPath = task.exportPath;
+    final outputFormat = expectedPath == null
+        ? null
+        : _exportFormatForPath(expectedPath);
     final fingerprint = task.exportFingerprint;
     if (manifest == null ||
         jobState == null ||
         expectedPath == null ||
-        _exportFormatForPath(expectedPath) != 'jxl' ||
+        (outputFormat != 'jxl' && outputFormat != 'jpeg') ||
         fingerprint == null ||
         jobState['state'] != 'completed' ||
         jobState['operation'] != 'export' ||
@@ -370,22 +374,33 @@ class TaskRecordService {
     final expectedWidth = manifest['width'];
     final expectedHeight = manifest['height'];
     final jobDimensions = jobState['dimensions'];
-    final actualWidth =
-        jobState['width'] ??
-        (jobDimensions is List && jobDimensions.length == 2
-            ? jobDimensions[0]
-            : null);
-    final actualHeight =
-        jobState['height'] ??
-        (jobDimensions is List && jobDimensions.length == 2
-            ? jobDimensions[1]
-            : null);
+    final resultStats = jobState['result_stats'] ?? jobState['resultStats'];
+    final actualWidth = outputFormat == 'jpeg' && resultStats is Map
+        ? (resultStats['width'] ?? resultStats['outputWidth'])
+        : jobState['width'] ??
+              (jobDimensions is List && jobDimensions.length == 2
+                  ? jobDimensions[0]
+                  : null);
+    final actualHeight = outputFormat == 'jpeg' && resultStats is Map
+        ? (resultStats['height'] ?? resultStats['outputHeight'])
+        : jobState['height'] ??
+              (jobDimensions is List && jobDimensions.length == 2
+                  ? jobDimensions[1]
+                  : null);
+    final sourceWidth = resultStats is Map
+        ? (resultStats['sourceWidth'] ?? resultStats['source_width'])
+        : jobState['sourceWidth'] ?? jobState['source_width'];
+    final sourceHeight = resultStats is Map
+        ? (resultStats['sourceHeight'] ?? resultStats['source_height'])
+        : jobState['sourceHeight'] ?? jobState['source_height'];
     final stateHashes = jobState['sourceHashes'];
     final requestHash = manifest['requestHash'];
     if (expectedWidth is! int ||
         expectedHeight is! int ||
-        actualWidth != expectedWidth ||
-        actualHeight != expectedHeight ||
+        (outputFormat == 'jxl' &&
+            (actualWidth != expectedWidth || actualHeight != expectedHeight)) ||
+        (outputFormat == 'jpeg' &&
+            (sourceWidth != expectedWidth || sourceHeight != expectedHeight)) ||
         outputs['sourceManifestAssociation'] != 'verified' ||
         requestHash is! String ||
         jobState['requestHash'] != requestHash ||
@@ -394,6 +409,18 @@ class TaskRecordService {
     }
     final file = File(expectedPath);
     if (!await file.exists()) return;
+    final encodedDimensions = outputFormat == 'jpeg'
+        ? await readExportDimensions(expectedPath)
+        : null;
+    final expectedJpegSize = outputFormat == 'jpeg'
+        ? expectedJpegDimensions(expectedWidth, expectedHeight)
+        : null;
+    if (outputFormat == 'jpeg' &&
+        (encodedDimensions != expectedJpegSize ||
+            actualWidth != encodedDimensions?.$1 ||
+            actualHeight != encodedDimensions?.$2)) {
+      return;
+    }
     final stat = await file.stat();
     if (stat.type != FileSystemEntityType.file ||
         stat.size <= 0 ||
@@ -427,6 +454,9 @@ class TaskRecordService {
     }
     outputs['exportSha256'] = digest;
     outputs['exportDigestStatus'] = 'verifiedProducerReceipt';
+    outputs['dimensions'] = outputFormat == 'jpeg'
+        ? {'width': encodedDimensions!.$1, 'height': encodedDimensions.$2}
+        : {'width': expectedWidth, 'height': expectedHeight};
     outputs['producerReceipt'] = {
       'status': 'verified',
       'jobStateSha256': stateRef['sha256'],
@@ -435,7 +465,12 @@ class TaskRecordService {
       'sourceManifestMatch': true,
       'destination': expectedPath,
       'format': jobState['exportFormat'],
-      'dimensions': {'width': expectedWidth, 'height': expectedHeight},
+      'dimensions': {
+        'width': outputFormat == 'jpeg' ? encodedDimensions!.$1 : expectedWidth,
+        'height': outputFormat == 'jpeg'
+            ? encodedDimensions!.$2
+            : expectedHeight,
+      },
       'exportSha256': digest,
       'exportFingerprint': {
         'sizeBytes': stat.size,
@@ -1083,6 +1118,7 @@ class TaskRecordService {
       switch (p.extension(path).replaceFirst('.', '').toLowerCase()) {
         'tif' || 'tiff' => 'tiff',
         'png' => 'png',
+        'jpg' || 'jpeg' => 'jpeg',
         'jxl' => 'jxl',
         _ => null,
       };

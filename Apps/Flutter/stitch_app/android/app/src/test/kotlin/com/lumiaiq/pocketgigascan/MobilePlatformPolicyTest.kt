@@ -36,8 +36,8 @@ class MobilePlatformPolicyTest {
     fun exportMimeAllowListIsExplicit() {
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/png"))
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/tiff"))
+        assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/jpeg"))
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/jxl"))
-        assertFalse(MobilePlatformPolicy.isSupportedExportMimeType("image/jpeg"))
         assertFalse(MobilePlatformPolicy.isSupportedExportMimeType(null))
     }
 

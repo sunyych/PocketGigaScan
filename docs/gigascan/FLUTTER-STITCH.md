@@ -4,7 +4,7 @@ Windows and Android DWARF photo-grid stitching. Android device qualification is 
 
 1. Import a single photo folder or queue each child folder of a parent folder.
 2. Confirm grid rows, columns and order. Automatic overlap uses horizontal and vertical central neighbor evidence; sky-only rows are unreliable. Review estimated or forced placement explicitly.
-3. Choose lossless PNG or TIFF/BigTIFF, or lossy JPEG XL before starting. New Windows jobs default to TIFF and automatically export after rendering completes.
+3. Choose lossless PNG or TIFF/BigTIFF, lossy JPEG XL, or standard JPEG before starting. JPEG uses quality 90, composites transparency onto white and is also available for automatic export. Existing `.jpg` and `.jpeg` outputs are recognized; there is no separate JPEG quality control. New Windows jobs default to TIFF and automatically export after rendering completes. JPEG preserves the full rendered dimensions up to 65,500 pixels on each axis; if either axis exceeds that compatibility limit, it scales proportionally to fit, with bounded memory use.
 4. Let the resource-bounded queue run, or pause/cancel through its owner. Queue-owned jobs cannot be independently started/exported on the single-task page.
 5. Open a completed output; wheel zoom and drag (pinch/drag on Android) to inspect details. Processing settings/progress disappear on completion. Stitch information/logs and viewer status start collapsed; click to open them. Create a copy to choose another format and stitch again.
 

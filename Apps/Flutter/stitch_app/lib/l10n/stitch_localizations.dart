@@ -112,6 +112,8 @@ class StitchLocalizations {
       'commit-export' => 'commit-export',
       'spool-jxl' => 'spool-jxl',
       'encode-jxl' => 'encode-jxl',
+      'spool-jpeg' => 'spool-jpeg',
+      'encode-jpeg' => 'encode-jpeg',
       'export' => 'export',
       'optimize-grid-poses' => 'optimize-grid-poses',
       'refine-pixel-texture' => 'refine-pixel-texture',
@@ -385,6 +387,7 @@ class StitchLocalizations {
         normalized == 'jxl') {
       return 'JPEG XL';
     }
+    if (normalized.startsWith('jpeg')) return 'JPEG';
     if (normalized.startsWith('tiff') || normalized == 'tif') return 'TIFF';
     if (normalized.startsWith('png')) return 'PNG';
     return text(format);
@@ -394,6 +397,9 @@ class StitchLocalizations {
     final normalized = format.trim().toLowerCase();
     if (normalized == 'png' || normalized.startsWith('png（无损）')) {
       return 'PNG (lossless)';
+    }
+    if (normalized == 'jpeg' || normalized.startsWith('jpeg（有损')) {
+      return 'JPEG (quality 90, lossy; transparency flattened to white; oversized images are scaled to fit 65500 pixels per axis while preserving aspect ratio)';
     }
     if (normalized == 'tiff' ||
         normalized == 'tif' ||
@@ -481,6 +487,7 @@ class StitchLocalizations {
     'associationMismatch' => '任务记录未验证当前输出与布局清单的关联。',
     'noVerifiedReceipt' => '此格式没有可验证的导出回执，来源追踪已停用。',
     'outputPreviewDimensionMismatch' => '实际输出尺寸与分块预览清单不一致，来源追踪已停用。',
+    'jpegOutputScaled' => 'JPEG 已缩小以符合尺寸上限；来源预览使用原尺寸金字塔，无法精确对应 JPEG 像素。',
     'outputRecordDimensionMismatch' => '实际输出尺寸与任务记录不一致，来源追踪已停用。',
     'outputManifestDimensionMismatch' => '输出尺寸与任务清单不一致，来源追踪已停用。',
     'layoutManifestIntegrityFailed' => '任务布局或清单校验失败，来源追踪已停用。',
@@ -494,6 +501,10 @@ class StitchLocalizations {
     'taskGridInvalid' => '任务网格映射无效。',
     _ => '几何追踪数据无效，已停止检查。',
   });
+
+  String get jpegPreviewNotice => isChinese
+      ? 'JPEG 为质量 90 有损图像，透明区域铺白底；超过 65500 像素的边长会按比例缩小。此处预览显示原尺寸渲染金字塔。'
+      : 'JPEG uses lossy quality 90 and flattens transparency to white; edges over 65500 pixels are scaled proportionally. This preview shows the original-size render pyramid.';
 
   String _tracePositionLabel(String value) => switch (value) {
     'visual' => '视觉测量',
@@ -1028,6 +1039,8 @@ class StitchLocalizations {
     'commit-export': 'Save export checkpoint',
     'spool-jxl': 'Prepare JPEG XL output',
     'encode-jxl': 'Encode JPEG XL',
+    'spool-jpeg': 'Prepare JPEG output',
+    'encode-jpeg': 'Encode JPEG',
     'export': 'Full image export',
     'optimize-grid-poses': 'Optimize grid alignment',
     'refine-pixel-texture': 'Refine pixel alignment',
@@ -1490,6 +1503,9 @@ class StitchLocalizations {
     '瓦片写入': 'Tile writing',
     'TIFF 类型：': 'TIFF variant: ',
     'PNG（无损）': 'PNG (lossless)',
+    'JPEG（有损，质量 90）': 'JPEG (lossy, quality 90)',
+    'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。':
+        'JPEG: quality 90 lossy compression; transparency is flattened onto white; edges over 65500 pixels are scaled down proportionally.',
     'TIFF（无损，大图自动 BigTIFF）': 'TIFF (lossless; BigTIFF for large images)',
     'JPEG XL（有损）': 'JPEG XL (lossy)',
     '实际渲染工作线程：': 'Actual render worker threads: ',
@@ -1723,6 +1739,8 @@ class StitchLocalizations {
         'No verified export receipt is available for this format; source tracing is disabled.',
     '实际输出尺寸与分块预览清单不一致，来源追踪已停用。':
         'The output dimensions do not match the preview manifest; source tracing is disabled.',
+    'JPEG 已缩小以符合尺寸上限；来源预览使用原尺寸金字塔，无法精确对应 JPEG 像素。':
+        'JPEG was scaled to fit the dimension limit; the source preview uses the original-size pyramid, so it cannot map JPEG pixels exactly.',
     '实际输出尺寸与任务记录不一致，来源追踪已停用。':
         'The output dimensions do not match the task record; source tracing is disabled.',
     '输出尺寸与任务清单不一致，来源追踪已停用。':
@@ -1874,6 +1892,8 @@ class StitchLocalizations {
     'commit-export': '保存导出检查点',
     'spool-jxl': '准备 JPEG XL 输出',
     'encode-jxl': '编码 JPEG XL',
+    'spool-jpeg': '准备 JPEG 输出',
+    'encode-jpeg': '编码 JPEG',
     'export': '整图导出',
     'optimize-grid-poses': '优化网格配准',
     'refine-pixel-texture': '校正像素纹理',

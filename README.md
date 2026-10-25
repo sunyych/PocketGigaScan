@@ -32,7 +32,7 @@ Planned provider: Free code signing provided by SignPath.io, certificate by Sign
 - Import DWARF photo grids, inspect rows/columns/order and estimate horizontal/vertical overlap from textured central neighbors.
 - Compare adjacent photos; refine texture geometry and retain every input. Explicit nominal/forced grid placement remains labelled as estimated and needs visual review.
 - Process individual jobs or queue child folders with resource-bounded concurrency, pause/resume and progress.
-- Choose lossless PNG or TIFF/BigTIFF, or high-quality lossy JPEG XL, before stitching. New Windows tasks default to TIFF and export automatically after successful rendering.
+- Choose lossless PNG or TIFF/BigTIFF, high-quality lossy JPEG XL, or standard JPEG before stitching. JPEG uses quality 90, flattens transparency onto white, and is available in the same format selector and automatic export flow; `.jpg` and `.jpeg` outputs are recognized without extra quality controls. New Windows tasks default to TIFF and export automatically after successful rendering. JPEG keeps the rendered size up to 65,500 pixels on either axis; larger images are proportionally reduced to fit this compatibility limit.
 - On Windows/macOS, optionally protect complete people at seams and smooth water overlap. The two settings are independent and default off; the bundled model runs offline. Phones hide these controls and keep semantic inference disabled.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
 - Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.

@@ -10,6 +10,7 @@ pub mod grid_overlap;
 pub mod image;
 pub mod job;
 pub mod job_resources;
+pub(crate) mod jpeg_export;
 pub(crate) mod jxl_export;
 pub mod metadata;
 pub mod pipeline;

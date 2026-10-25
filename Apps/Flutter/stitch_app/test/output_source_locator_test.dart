@@ -224,81 +224,109 @@ void main() {
     },
   );
 
-  test('independently reads PNG/TIFF dimensions and refuses JPEG XL', () async {
-    final directory = await Directory.systemTemp.createTemp('output-dims-');
-    addTearDown(() => directory.delete(recursive: true));
-    final png = File('${directory.path}/tiny.png');
-    await png.writeAsBytes([
-      137,
-      80,
-      78,
-      71,
-      13,
-      10,
-      26,
-      10,
-      0,
-      0,
-      0,
-      13,
-      73,
-      72,
-      68,
-      82,
-      0,
-      0,
-      0,
-      3,
-      0,
-      0,
-      0,
-      2,
-    ]);
-    expect(await readExportDimensions(png.path), (3, 2));
-    final tiff = File('${directory.path}/tiny.tif');
-    await tiff.writeAsBytes([
-      0x49,
-      0x49,
-      42,
-      0,
-      8,
-      0,
-      0,
-      0,
-      2,
-      0,
-      0,
-      1,
-      4,
-      0,
-      1,
-      0,
-      0,
-      0,
-      3,
-      0,
-      0,
-      0,
-      1,
-      1,
-      4,
-      0,
-      1,
-      0,
-      0,
-      0,
-      2,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-      0,
-    ]);
-    expect(await readExportDimensions(tiff.path), (3, 2));
-    final jxl = File('${directory.path}/tiny.jxl');
-    await jxl.writeAsBytes([1, 2, 3]);
-    expect(await readExportDimensions(jxl.path), isNull);
-  });
+  test(
+    'independently reads PNG/TIFF/JPEG dimensions and refuses JPEG XL',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('output-dims-');
+      addTearDown(() => directory.delete(recursive: true));
+      final png = File('${directory.path}/tiny.png');
+      await png.writeAsBytes([
+        137,
+        80,
+        78,
+        71,
+        13,
+        10,
+        26,
+        10,
+        0,
+        0,
+        0,
+        13,
+        73,
+        72,
+        68,
+        82,
+        0,
+        0,
+        0,
+        3,
+        0,
+        0,
+        0,
+        2,
+      ]);
+      expect(await readExportDimensions(png.path), (3, 2));
+      final tiff = File('${directory.path}/tiny.tif');
+      await tiff.writeAsBytes([
+        0x49,
+        0x49,
+        42,
+        0,
+        8,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        1,
+        4,
+        0,
+        1,
+        0,
+        0,
+        0,
+        3,
+        0,
+        0,
+        0,
+        1,
+        1,
+        4,
+        0,
+        1,
+        0,
+        0,
+        0,
+        2,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+      ]);
+      expect(await readExportDimensions(tiff.path), (3, 2));
+      final jpeg = File('${directory.path}/tiny.jpeg');
+      await jpeg.writeAsBytes([
+        0xff, 0xd8, // SOI
+        0xff, 0xc0, 0x00, 0x0b, 0x08, 0x00, 0x02, 0x00, 0x03,
+        0x01, 0x01, 0x11, 0x00, // one component and its tables
+      ]);
+      expect(await readExportDimensions(jpeg.path), (3, 2));
+      final invalidJpeg = File('${directory.path}/invalid.jpg');
+      await invalidJpeg.writeAsBytes([0xff, 0xd8, 0xff, 0xda]);
+      expect(await readExportDimensions(invalidJpeg.path), isNull);
+      final truncatedJpeg = File('${directory.path}/truncated.jpg');
+      await truncatedJpeg.writeAsBytes([
+        0xff,
+        0xd8,
+        0xff,
+        0xc0,
+        0x00,
+        0x11,
+        0x08,
+        0x00,
+        0x02,
+        0x00,
+        0x03,
+      ]);
+      expect(await readExportDimensions(truncatedJpeg.path), isNull);
+      final jxl = File('${directory.path}/tiny.jxl');
+      await jxl.writeAsBytes([1, 2, 3]);
+      expect(await readExportDimensions(jxl.path), isNull);
+    },
+  );
 }

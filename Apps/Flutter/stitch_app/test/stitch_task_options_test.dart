@@ -336,6 +336,22 @@ void main() {
     },
   );
 
+  test('JPEG extension, saved format, and label persist', () {
+    final task = fixture().copyWith(
+      exportFormat: ExportFormat.jpeg,
+      exportPath: r'C:\exports\panorama.jpeg',
+    );
+    final restored = StitchTask.fromJson(task.toJson());
+    expect(restored.exportFormat, ExportFormat.jpeg);
+    expect(ExportFormat.fromPath('PANORAMA.JPG'), ExportFormat.jpeg);
+    expect(ExportFormat.fromPath('PANORAMA.jpeg'), ExportFormat.jpeg);
+    expect(ExportFormat.jpeg.extension, 'jpg');
+    expect(ExportFormat.jpeg.shortLabel, 'JPEG');
+    expect(ExportFormat.fromSavedValue('jpeg'), ExportFormat.jpeg);
+    expect(ExportFormat.fromSavedValue('jpg'), ExportFormat.jpeg);
+    expect(task.toJson()['exportFormat'], 'jpeg');
+  });
+
   test('in-flight legacy exports migrate to an immutable checkpoint path', () {
     final legacy = fixture().toJson()
       ..['phase'] = StitchPhase.exporting.name

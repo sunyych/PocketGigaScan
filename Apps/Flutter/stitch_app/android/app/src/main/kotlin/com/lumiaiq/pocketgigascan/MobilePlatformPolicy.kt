@@ -7,7 +7,7 @@ internal object MobilePlatformPolicy {
     const val ANONYMOUS_JOB_ID = "__anonymous_render__"
     private const val WRITE_PERMISSION_FLAG = 0x00000002
     private const val PERSISTABLE_PERMISSION_FLAG = 0x00000040
-    private val supportedExportMimeTypes = setOf("image/png", "image/tiff", "image/jxl")
+    private val supportedExportMimeTypes = setOf("image/png", "image/tiff", "image/jpeg", "image/jxl")
 
     fun updateActiveJobs(existing: Set<String>, active: Boolean, jobId: String?): Set<String> =
         existing.toMutableSet().apply {

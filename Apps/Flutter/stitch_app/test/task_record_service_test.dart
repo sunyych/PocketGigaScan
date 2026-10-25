@@ -10,6 +10,7 @@ import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/performance_options.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_timeline.dart';
+import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/task_record_service.dart';
 import 'package:stitch_app/services/task_repository.dart';
 
@@ -705,6 +706,83 @@ void main() {
       expect(refused['exportSha256'], isNull);
       expect(refused['exportDigestStatus'], 'notComputed');
       expect(refused['producerReceipt'], isNull);
+    },
+  );
+
+  test(
+    'scaled JPEG receipt binds header, dimensions, state and fingerprint',
+    () async {
+      final destination = File(p.join(temp.path, 'scaled.jpg'))
+        ..writeAsBytesSync([
+          0xff, 0xd8,
+          0xff, 0xc0, 0x00, 0x11, 0x08,
+          0x7f, 0xee, // height 32750
+          0xff, 0xdc, // width 65500
+          0x03,
+          0x01, 0x11, 0x00,
+          0x02, 0x11, 0x00,
+          0x03, 0x11, 0x00,
+          0xff, 0xd9,
+        ]);
+      final stat = await destination.stat();
+      final exportTask = task.copyWith(
+        exportPath: destination.path,
+        exportFormat: ExportFormat.jpeg,
+        exportFingerprint: ExportFileFingerprint(
+          sizeBytes: stat.size,
+          modifiedAtMicros: stat.modified.microsecondsSinceEpoch,
+        ),
+      );
+      await repository.save(exportTask);
+      final hashes = {source.path: task.photos.single.sha256};
+      await File(p.join(output.path, 'manifest.json')).writeAsString(
+        jsonEncode({
+          'width': 70000,
+          'height': 35000,
+          'requestHash': 'jpeg-request',
+          'sourceHashes': hashes,
+        }),
+      );
+      final layoutJson = jsonEncode({
+        'tiles': [
+          {
+            'row': 0,
+            'column': 0,
+            'path': source.path,
+            'cameraToWorld': [1],
+          },
+        ],
+        'report': {},
+      });
+      await File(p.join(output.path, 'layout.json')).writeAsString(layoutJson);
+      await File(p.join(output.path, 'job-state.json')).writeAsString(
+        jsonEncode({
+          'state': 'completed',
+          'operation': 'export',
+          'export_format': 'jpeg',
+          'export_destination': nativePath(destination.path),
+          'width': 70000,
+          'height': 35000,
+          'result_stats': {
+            'sourceWidth': 70000,
+            'sourceHeight': 35000,
+            'width': 65500,
+            'height': 32750,
+            'scale': 0.9357142857,
+          },
+          'request_hash': 'jpeg-request',
+          'source_hashes': hashes.map(
+            (path, digest) => MapEntry(nativePath(path), digest),
+          ),
+          'layout_hash': sha256.convert(utf8.encode(layoutJson)).toString(),
+        }),
+      );
+
+      final outputs =
+          (await service.loadRecord(task.id))!.record['outputs'] as Map;
+      expect(outputs['exportDigestStatus'], 'verifiedProducerReceipt');
+      expect(outputs['dimensions'], {'width': 65500, 'height': 32750});
+      expect((outputs['producerReceipt'] as Map)['format'], 'jpeg');
     },
   );
 

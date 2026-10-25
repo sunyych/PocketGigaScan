@@ -197,6 +197,13 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                           ? 'JPEG XL（需随程序加载 libjxl）'
                           : candidate.label,
                     ),
+                    subtitle: candidate == ExportFormat.jpeg
+                        ? Text(
+                            StitchLocalizations.of(context).text(
+                              'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。',
+                            ),
+                          )
+                        : null,
                   ),
               ],
             ),
@@ -499,6 +506,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           exportMimeType: switch (task.exportFormat) {
             ExportFormat.png => 'image/png',
             ExportFormat.tiff => 'image/tiff',
+            ExportFormat.jpeg => 'image/jpeg',
             ExportFormat.jpegXl => 'image/jxl',
           },
         ),
