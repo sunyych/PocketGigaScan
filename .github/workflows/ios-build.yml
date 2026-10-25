@@ -4,6 +4,25 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: Build and smoke-test, or replay a prior unsigned simulator artifact
+        required: true
+        type: choice
+        options:
+          - build
+          - replay
+        default: build
+      replay_run_id:
+        description: Existing Actions run ID containing the simulator artifact
+        required: true
+        type: string
+        default: '40231943118'
+      replay_artifact_name:
+        description: Exact uploaded simulator artifact name
+        required: true
+        type: string
+        default: PocketGigaScan-iOS-5905ef90298352e70201106087bbee35ff945425
 
 permissions:
   contents: read
@@ -14,6 +33,7 @@ concurrency:
 
 jobs:
   ios-build:
+    if: github.event_name != 'workflow_dispatch' || inputs.mode != 'replay'
     name: iOS device and simulator app bundles
     runs-on: macos-15
     timeout-minutes: 240
@@ -126,13 +146,21 @@ jobs:
           xcrun simctl list devices available -j > "$diagnostic_dir/devices.json" 2>&1
           if [[ -n "$SIMULATOR_ID" ]]; then
             xcrun simctl io "$SIMULATOR_ID" screenshot "$diagnostic_dir/simulator.png" >/dev/null 2>&1
-            xcrun simctl spawn "$SIMULATOR_ID" log show --last 5m --style compact \
-              --predicate 'process == "Runner" OR sender == "Flutter"' > "$diagnostic_dir/runner.log" 2>&1
+            xcrun simctl spawn "$SIMULATOR_ID" log show --last 20m --style compact \
+              --predicate 'process == "Runner" OR senderImagePath ENDSWITH "/Flutter"' \
+              > "$diagnostic_dir/runner.log" 2>&1
             xcrun simctl spawn "$SIMULATOR_ID" launchctl list \
               > "$diagnostic_dir/launchctl-list.txt" 2>&1
-            xcrun simctl spawn "$SIMULATOR_ID" ps -A -o pid,ppid,state,comm \
-              | grep -iE 'Runner|Flutter' > "$diagnostic_dir/runner-processes.txt" 2>&1
+            ps -axo pid,ppid,state,command \
+              | awk -v device="$SIMULATOR_ID" \
+                  'NR == 1 || index($0, device) || tolower($0) ~ /runner|flutter/' \
+              > "$diagnostic_dir/runner-processes.txt" 2>&1
           fi
+          for report in "$HOME"/Library/Logs/DiagnosticReports/Runner*.ips \
+                        "$HOME"/Library/Logs/DiagnosticReports/Runner*.crash; do
+            [[ -f "$report" ]] || continue
+            cp -p "$report" "$diagnostic_dir/" || true
+          done
           exit 0
 
       - name: Shut down iOS simulator
@@ -172,3 +200,14 @@ jobs:
             .build/ios-diagnostics/**
           if-no-files-found: error
           retention-days: 14
+
+  ios-simulator-replay:
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'replay'
+    name: Replay a prebuilt iOS simulator app
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/ios-simulator-replay.yml
+    with:
+      run_id: ${{ inputs.replay_run_id }}
+      artifact_name: ${{ inputs.replay_artifact_name }}

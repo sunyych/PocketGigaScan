@@ -1,6 +1,16 @@
 name: iOS simulator app replay
 
 on:
+  workflow_call:
+    inputs:
+      run_id:
+        description: Actions run ID containing the already-built iOS artifact
+        required: true
+        type: string
+      artifact_name:
+        description: Exact uploaded artifact name
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       run_id:
