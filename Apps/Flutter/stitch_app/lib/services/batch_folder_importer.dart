@@ -67,7 +67,8 @@ class BatchFolderImporter {
               const {
                 '.jpg',
                 '.jpeg',
-              }.contains(p.extension(entity.path).toLowerCase())) {
+              }.contains(p.extension(entity.path).toLowerCase()) &&
+              !_isDwarfThumbnail(child.path, entity)) {
             files.add(entity);
           }
         }
@@ -94,11 +95,23 @@ class BatchFolderImporter {
     return List.unmodifiable(snapshots);
   }
 
+  bool _isDwarfThumbnail(String directoryPath, File file) {
+    if (!p.basename(directoryPath).toLowerCase().startsWith('dwarf_')) {
+      return false;
+    }
+    final basename = p.basenameWithoutExtension(file.path).toLowerCase();
+    return basename == 'panorama_thumbnail' ||
+        basename == 'panorarma_thumbnail';
+  }
+
   Future<BatchImportedFolder> importFolder(
     BatchFolderSnapshot snapshot,
     String taskDirectory,
   ) async {
-    if (snapshot.files.isEmpty) throw ImportFailure(snapshot.error ?? '没有原片');
+    final files = snapshot.files
+        .where((file) => !_isDwarfThumbnail(snapshot.directory, file))
+        .toList();
+    if (files.isEmpty) throw ImportFailure(snapshot.error ?? '没有原片');
     final taskDir = Directory(taskDirectory);
     await taskDir.create(recursive: true);
     final lock = File(p.join(taskDirectory, '.input-import.lock'));
@@ -110,8 +123,8 @@ class BatchFolderImporter {
       await input.create();
       createdInput = true;
       final photos = <ImportedPhoto>[];
-      for (var index = 0; index < snapshot.files.length; index++) {
-        final source = snapshot.files[index];
+      for (var index = 0; index < files.length; index++) {
+        final source = files[index];
         final destination = File(
           p.join(input.path, '${index.toString().padLeft(4, '0')}.jpg'),
         );
