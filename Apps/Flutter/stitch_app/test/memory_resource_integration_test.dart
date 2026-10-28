@@ -272,6 +272,22 @@ Future<void> _waitForEnabledStart(
   );
 }
 
+Future<Finder> _visibleInMainScroll(WidgetTester tester, Finder target) async {
+  final scrollable = find
+      .descendant(
+        of: find.byKey(const Key('stitch-main-scroll')),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  await tester.scrollUntilVisible(target, 300, scrollable: scrollable);
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
+  await tester.pump();
+  final visible = target.hitTestable();
+  expect(visible, findsOneWidget);
+  return visible;
+}
+
 void main() {
   test('large desktop memory readings and job allocations remain shared', () {
     final windowsReading = MemoryResourceReading.fromMap({
@@ -412,20 +428,34 @@ void main() {
       await _waitForEnabledStart(tester, label: 'Start stitching');
       if (start.evaluate().isEmpty) {
         final localizedStart = find.text('开始合成');
-        await tester.ensureVisible(localizedStart);
-        await tester.tap(localizedStart);
+        final visible = await _visibleInMainScroll(tester, localizedStart);
+        await tester.tap(visible);
       } else {
-        await tester.ensureVisible(start);
-        await tester.tap(start);
+        final visible = await _visibleInMainScroll(tester, start);
+        await tester.tap(visible);
       }
       await _pumpUntil(
         tester,
-        () =>
-            find.textContaining('concurrency limit is 1').evaluate().isNotEmpty,
+        () => find
+            .text('Operation failed. See technical details below.')
+            .evaluate()
+            .isNotEmpty,
         'Direct-start admission did not report the lowered slot cap.',
       );
       expect(api.startedBudgets, isEmpty);
-      expect(find.textContaining('concurrency limit is 1'), findsOneWidget);
+      final technicalDetails = find.text('Technical details');
+      expect(technicalDetails, findsOneWidget);
+      await tester.ensureVisible(technicalDetails);
+      await tester.tap(technicalDetails);
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is SelectableText &&
+              widget.data!.contains('concurrency limit is 1'),
+        ),
+        findsOneWidget,
+      );
 
       await tester.pumpWidget(const SizedBox.shrink());
       batch.dispose();

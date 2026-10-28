@@ -17,6 +17,22 @@ import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
 import 'support/platform_golden.dart';
 
+Future<void> _scrollMainIntoView(WidgetTester tester, Finder target) async {
+  await tester.scrollUntilVisible(
+    target,
+    300,
+    scrollable: find
+        .descendant(
+          of: find.byKey(const Key('stitch-main-scroll')),
+          matching: find.byType(Scrollable),
+        )
+        .first,
+  );
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
+  await tester.pump();
+}
+
 class _NoopForegroundLock implements ForegroundWorkLock {
   @override
   Future<void> enable() async {}
@@ -149,7 +165,7 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
             )
           : const PerformanceOptions(),
     );
-    tester.view.physicalSize = size;
+    tester.view.physicalSize = Size(size.width, 2500);
     tester.view.devicePixelRatio = 1;
     final api = _OptionsScreenshotApi();
     final repository = _OptionsScreenshotRepository(task);
@@ -199,8 +215,24 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
-    await tester.ensureVisible(find.byKey(const Key('stitch-options-card')));
-    await tester.pump(const Duration(milliseconds: 100));
+    final arrangement = find.byKey(const Key('stitch-arrangement-expansion'));
+    await _scrollMainIntoView(tester, arrangement);
+    await tester.tap(arrangement);
+    await tester.pumpAndSettle();
+    final sections = [
+      if (mode == 'desktop') const Key('stitch-quality-expansion'),
+      const Key('registration-threshold-expansion'),
+    ];
+    for (final key in sections) {
+      final section = find.byKey(key);
+      await _scrollMainIntoView(tester, section);
+      await tester.tap(section);
+      await tester.pumpAndSettle();
+    }
+    await _scrollMainIntoView(
+      tester,
+      find.byKey(const Key('stitch-options-card')),
+    );
 
     final switchTile = tester.widget<SwitchListTile>(
       find.byKey(const Key('force-grid-option')),
@@ -217,6 +249,30 @@ void _addOptionsScreenshotTest(Size size, String mode, String profile) {
           .widget<TextField>(find.byKey(const Key('horizontal-overlap-field')))
           .enabled,
       !locked && profile == 'manual',
+    );
+    expect(
+      find.byKey(const Key('force-grid-option')).hitTestable(),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('auto-grid-overlap-option')).hitTestable(),
+      findsOneWidget,
+    );
+    if (mode == 'mobile') {
+      expect(find.byKey(const Key('stitch-quality-expansion')), findsNothing);
+      expect(
+        find.byKey(const Key('registration-threshold-expansion')).hitTestable(),
+        findsOneWidget,
+      );
+    }
+    final optionsRect = tester.getRect(
+      find.byKey(const Key('stitch-options-card')),
+    );
+    expect(optionsRect.top, greaterThanOrEqualTo(0));
+    expect(optionsRect.height, lessThan(tester.view.physicalSize.height));
+    expect(
+      optionsRect.bottom,
+      lessThanOrEqualTo(tester.view.physicalSize.height),
     );
     expect(tester.takeException(), isNull);
     await expectLater(

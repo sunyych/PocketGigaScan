@@ -299,6 +299,22 @@ Future<void> _pumpUntil(
   expect(condition(), isTrue, reason: '$reason (5 second deadline)');
 }
 
+Future<Finder> _visibleInMainScroll(WidgetTester tester, Finder target) async {
+  final scrollable = find
+      .descendant(
+        of: find.byKey(const Key('stitch-main-scroll')),
+        matching: find.byType(Scrollable),
+      )
+      .first;
+  await tester.scrollUntilVisible(target, 300, scrollable: scrollable);
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
+  await tester.pump();
+  final visible = target.hitTestable();
+  expect(visible, findsOneWidget);
+  return visible;
+}
+
 Future<void> _pumpUntilStartEnabled(WidgetTester tester) async {
   const label = '开始合成';
   await _pumpUntil(
@@ -948,10 +964,16 @@ void main() {
           .onChanged,
       isNull,
     );
-    final qualityExpansion = find.byKey(const Key('stitch-quality-expansion'));
-    await tester.ensureVisible(qualityExpansion);
+    final arrangement = await _visibleInMainScroll(
+      tester,
+      find.byKey(const Key('stitch-arrangement-expansion')),
+    );
+    await tester.tap(arrangement);
     await tester.pump(const Duration(milliseconds: 350));
-    await tester.pump();
+    final qualityExpansion = await _visibleInMainScroll(
+      tester,
+      find.byKey(const Key('stitch-quality-expansion')),
+    );
     await tester.tap(qualityExpansion);
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump();
@@ -1508,7 +1530,7 @@ void main() {
         );
         await tester.pump(const Duration(milliseconds: 100));
         final start = find.text('开始合成');
-        await tester.ensureVisible(start);
+        await _visibleInMainScroll(tester, start);
         await _pumpUntilStartEnabled(tester);
         await tester.tap(start);
         await tester.pump();

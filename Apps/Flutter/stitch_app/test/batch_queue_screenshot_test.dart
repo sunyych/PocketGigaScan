@@ -158,12 +158,36 @@ void main() {
       platformGoldenFile('goldens/batch_queue_desktop_top.png'),
     );
 
-    await tester.scrollUntilVisible(find.text('08_BlurrySet'), 300);
+    final lastQueueItem = find.text('08_BlurrySet');
+    final queueList = find.byType(ListView);
+    expect(queueList, findsOneWidget);
+    await tester.scrollUntilVisible(
+      lastQueueItem,
+      300,
+      scrollable: find
+          .descendant(of: queueList, matching: find.byType(Scrollable))
+          .first,
+    );
+    await tester.pump(const Duration(milliseconds: 350));
+    await tester.ensureVisible(lastQueueItem);
     await tester.pump();
     expect(find.text('05_Waterfall'), findsOneWidget);
     expect(find.text('06_Sunset'), findsOneWidget);
     expect(find.text('07_InteriorRoom'), findsOneWidget);
     expect(find.text('08_BlurrySet'), findsOneWidget);
+    for (final name in [
+      '05_Waterfall',
+      '06_Sunset',
+      '07_InteriorRoom',
+      '08_BlurrySet',
+    ]) {
+      expect(find.text(name).hitTestable(), findsOneWidget, reason: name);
+    }
+    final lastItemRect = tester.getRect(lastQueueItem);
+    final queueViewportRect = tester.getRect(queueList);
+    final visibleIntersection = lastItemRect.intersect(queueViewportRect);
+    expect(visibleIntersection.width, greaterThan(0));
+    expect(visibleIntersection.height, greaterThan(0));
     expect(tester.takeException(), isNull);
     await expectLater(
       find.byType(Scaffold),

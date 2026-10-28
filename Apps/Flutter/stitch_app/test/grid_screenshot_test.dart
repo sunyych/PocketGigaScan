@@ -260,16 +260,7 @@ void main() {
           ),
         );
         await tester.pump(const Duration(milliseconds: 100));
-        final mainVerticalScroll = find
-            .descendant(
-              of: find.byType(Expanded),
-              matching: find.byWidgetPredicate(
-                (widget) =>
-                    widget is Scrollable &&
-                    widget.axisDirection == AxisDirection.down,
-              ),
-            )
-            .hitTestable();
+        final mainVerticalScroll = _mainVerticalScroll(tester);
         expect(mainVerticalScroll, findsOneWidget);
         for (
           var attempt = 0;
@@ -289,6 +280,17 @@ void main() {
         final contactSheet = tester.getSize(find.byType(GridView).first);
         expect(contactSheet.width / 24, greaterThanOrEqualTo(15));
         expect(contactSheet.height, greaterThanOrEqualTo(100));
+        final lastCell = find.byKey(const ValueKey('grid-photo-select-15-23'));
+        await tester.ensureVisible(lastCell);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(lastCell.hitTestable(), findsOneWidget);
+        final firstCell = find.byKey(const ValueKey('grid-photo-select-0-0'));
+        await tester.ensureVisible(firstCell);
+        await tester.pump(const Duration(milliseconds: 350));
+        expect(firstCell.hitTestable(), findsOneWidget);
+        await tester.ensureVisible(contactSheetLabel);
+        await tester.pump(const Duration(milliseconds: 350));
+        await tester.pump();
         expect(tester.takeException(), isNull);
         await expectLater(find.byType(Scaffold), platformGoldenFile(golden));
       }

@@ -12,6 +12,22 @@ import 'support/empty_batch_queue_controller.dart';
 import 'support/chinese_test_app.dart';
 import 'support/platform_golden.dart';
 
+Future<void> _scrollMainIntoView(WidgetTester tester, Finder target) async {
+  await tester.scrollUntilVisible(
+    target,
+    300,
+    scrollable: find
+        .descendant(
+          of: find.byKey(const Key('stitch-main-scroll')),
+          matching: find.byType(Scrollable),
+        )
+        .first,
+  );
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
+  await tester.pump();
+}
+
 class _ScreenshotApi implements JobApi {
   @override
   bool get isAvailable => true;
@@ -183,7 +199,7 @@ void main() {
     'paused-locked',
   ]) {
     testWidgets('TIFF and seam quality controls: $state', (tester) async {
-      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.physicalSize = const Size(1280, 2500);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
@@ -241,9 +257,10 @@ void main() {
         expect(find.byKey(const Key('export-format-card')), findsNothing);
         expect(find.byKey(const Key('export-format-option')), findsNothing);
       } else {
-        await tester.ensureVisible(find.byKey(const Key('export-format-card')));
-        await tester.pump(const Duration(milliseconds: 350));
-        await tester.pump();
+        await _scrollMainIntoView(
+          tester,
+          find.byKey(const Key('export-format-card')),
+        );
         expect(find.byKey(const Key('export-format-card')), findsOneWidget);
         final selectedFormat = tester
             .widget<DropdownButtonFormField<ExportFormat>>(
@@ -253,13 +270,31 @@ void main() {
         expect(selectedFormat.initialValue, task.exportFormat);
       }
 
-      await tester.ensureVisible(
+      final arrangement = find.byKey(const Key('stitch-arrangement-expansion'));
+      await _scrollMainIntoView(tester, arrangement);
+      await tester.tap(arrangement);
+      await tester.pumpAndSettle();
+
+      await _scrollMainIntoView(
+        tester,
         find.byKey(const Key('stitch-quality-expansion')),
       );
-      await tester.pump(const Duration(milliseconds: 350));
-      await tester.pump();
       await tester.tap(find.byKey(const Key('stitch-quality-expansion')));
-      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pumpAndSettle();
+      final registrationThreshold = find.byKey(
+        const Key('registration-threshold-expansion'),
+      );
+      await _scrollMainIntoView(tester, registrationThreshold);
+      await tester.tap(registrationThreshold);
+      await tester.pumpAndSettle();
+      await _scrollMainIntoView(
+        tester,
+        find.byKey(const Key('stitch-options-card')),
+      );
+      await _scrollMainIntoView(
+        tester,
+        find.byKey(const Key('stitch-quality-expansion')),
+      );
 
       final neighbors = tester.widget<CheckboxListTile>(
         find.byKey(const Key('refine-grid-neighbors-option')),
@@ -282,11 +317,33 @@ void main() {
       expect(deghost.onChanged != null, !paused);
       expect(localTextureWarp.onChanged == null, paused);
       expect(localTextureWarp.onChanged != null, !paused);
+      expect(
+        find.byKey(const Key('refine-grid-neighbors-option')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('local-texture-warp-option')).hitTestable(),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getRect(find.byKey(const Key('stitch-quality-expansion')))
+            .height,
+        lessThan(tester.view.physicalSize.height),
+      );
+      final optionsRect = tester.getRect(
+        find.byKey(const Key('stitch-options-card')),
+      );
+      expect(optionsRect.top, greaterThanOrEqualTo(0));
+      expect(
+        optionsRect.bottom,
+        lessThanOrEqualTo(tester.view.physicalSize.height),
+      );
       expect(find.byTooltip('在相邻重叠区域限制局部变形，减少纹理错位'), findsOneWidget);
       expect(tester.takeException(), isNull);
 
       await expectLater(
-        find.byKey(const Key('stitch-quality-expansion')),
+        find.byKey(const Key('stitch-options-card')),
         platformGoldenFile('goldens/tiff_quality_desktop_$state.png'),
       );
     });

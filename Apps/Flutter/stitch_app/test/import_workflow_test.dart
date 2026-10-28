@@ -148,7 +148,7 @@ void main() {
         await _pumpImport(tester);
         expect(importer.calls, 2);
         expect(
-          find.text(language == 'en' ? 'Import failed: ' : '导入失败：'),
+          find.text(language == 'en' ? 'Import failed:' : '导入失败：'),
           findsOneWidget,
         );
         expect(
