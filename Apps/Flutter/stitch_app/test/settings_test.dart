@@ -56,27 +56,56 @@ void main() {
       'ignored': true,
     });
     expect(settings.language, AppLanguage.system);
-    expect(settings.exportFormat, ExportFormat.tiff);
+    expect(settings.exportFormat, ExportFormat.jpeg);
     expect(settings.seamBlendMode, SeamBlendMode.deghost);
   });
 
-  test(
-    'platform defaults preserve the existing Windows and Android choices',
-    () {
-      final windows = AppSettings.defaults(mobile: false);
-      final android = AppSettings.defaults(mobile: true, android: true);
-      final ios = AppSettings.defaults(mobile: true);
-      expect(windows.exportFormat, ExportFormat.tiff);
-      expect(windows.refineGridNeighbors, isTrue);
-      expect(windows.seamBlendMode, SeamBlendMode.deghost);
-      expect(android.exportFormat, ExportFormat.tiff);
-      expect(android.refineGridNeighbors, isTrue);
-      expect(android.seamBlendMode, SeamBlendMode.deghost);
-      expect(ios.exportFormat, ExportFormat.png);
-      expect(ios.refineGridNeighbors, isFalse);
-      expect(ios.seamBlendMode, SeamBlendMode.feather);
-    },
-  );
+  test('platform defaults use JPEG on desktop and preserve mobile choices', () {
+    final windows = AppSettings.defaults(mobile: false);
+    final android = AppSettings.defaults(mobile: true, android: true);
+    final ios = AppSettings.defaults(mobile: true);
+    expect(windows.exportFormat, ExportFormat.jpeg);
+    expect(windows.refineGridNeighbors, isTrue);
+    expect(windows.seamBlendMode, SeamBlendMode.deghost);
+    expect(android.exportFormat, ExportFormat.tiff);
+    expect(android.refineGridNeighbors, isTrue);
+    expect(android.seamBlendMode, SeamBlendMode.deghost);
+    expect(ios.exportFormat, ExportFormat.png);
+    expect(ios.refineGridNeighbors, isFalse);
+    expect(ios.seamBlendMode, SeamBlendMode.feather);
+  });
+
+  test('migrates an unset legacy desktop TIFF default to JPEG once', () async {
+    final legacy = File('${temp.path}${Platform.pathSeparator}settings.json');
+    await legacy.writeAsString(
+      '{"version":1,"exportFormat":"tiff","language":"zh"}',
+    );
+
+    final loaded = await SettingsRepository(
+      file: legacy,
+      defaults: AppSettings.defaults(mobile: false),
+    ).load();
+    final persisted = AppSettings.decode(await legacy.readAsString());
+
+    expect(loaded.exportFormat, ExportFormat.jpeg);
+    expect(loaded.language, AppLanguage.zh);
+    expect(persisted.exportFormat, ExportFormat.jpeg);
+    expect(persisted.exportFormatExplicitlySet, isFalse);
+  });
+
+  test('preserves an explicitly selected legacy output format', () async {
+    final legacy = File('${temp.path}${Platform.pathSeparator}settings.json');
+    await legacy.writeAsString(
+      '{"version":2,"exportFormat":"tiff",'
+      '"exportFormatExplicitlySet":true}',
+    );
+    final loaded = await SettingsRepository(
+      file: legacy,
+      defaults: AppSettings.defaults(mobile: false),
+    ).load();
+    expect(loaded.exportFormat, ExportFormat.tiff);
+    expect(loaded.exportFormatExplicitlySet, isTrue);
+  });
 
   test(
     'rapid updates are serialized and latest value survives restart',

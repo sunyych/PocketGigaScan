@@ -183,6 +183,110 @@ class DwarfDownloadService {
     );
   }
 
+  /// Saves an optional camera preview separately from the original-file
+  /// manifest. It is deliberately outside the batch's direct JPEG list so it
+  /// cannot affect source validation, hashes, or the stitch input set.
+  Future<String> downloadPanoramaThumbnail({
+    required String batchId,
+    required String url,
+    required String trustedHost,
+    required int trustedPort,
+  }) async {
+    final uri = Uri.parse(url);
+    final decodedPath = Uri.decodeFull(uri.path).toLowerCase();
+    if (uri.scheme != 'http' ||
+        uri.host.toLowerCase() != trustedHost.toLowerCase() ||
+        uri.port != trustedPort ||
+        uri.userInfo.isNotEmpty ||
+        uri.query.isNotEmpty ||
+        uri.fragment.isNotEmpty ||
+        !DwarfDeviceClient.isLocalNetworkHost(uri.host) ||
+        !decodedPath.contains('/dwarf3/panoramas/') ||
+        !decodedPath.contains('thumbnail')) {
+      throw const FormatException(
+        'DWARF preview must come from the connected camera thumbnail path',
+      );
+    }
+    final batch = await loadBatch(batchId);
+    if (batch == null || !batch.isComplete) {
+      throw StateError(
+        'DWARF preview can only be attached to a verified completed batch',
+      );
+    }
+    final batchDirectory = Directory(_batchDirectory(batchId));
+    final batchDirectoryType = await FileSystemEntity.type(
+      batchDirectory.path,
+      followLinks: false,
+    );
+    if (batchDirectoryType != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid DWARF batch directory');
+    }
+    final directory = Directory(p.join(batchDirectory.path, '_metadata'));
+    final metadataType = await FileSystemEntity.type(
+      directory.path,
+      followLinks: false,
+    );
+    if (metadataType == FileSystemEntityType.notFound) {
+      await directory.create();
+    } else if (metadataType != FileSystemEntityType.directory) {
+      throw const FileSystemException('Invalid DWARF metadata directory');
+    }
+    final target = File(p.join(directory.path, 'camera-thumbnail.jpg'));
+    final partial = File('${target.path}.part');
+    final request = await _http
+        .getUrl(uri)
+        .timeout(const Duration(seconds: 20));
+    request.followRedirects = false;
+    request.headers.set(HttpHeaders.acceptHeader, 'image/jpeg');
+    final response = await request.close().timeout(const Duration(seconds: 30));
+    if (response.statusCode != HttpStatus.ok) {
+      await response.listen(null).cancel();
+      throw HttpException(
+        'DWARF preview download returned HTTP ${response.statusCode}',
+        uri: uri,
+      );
+    }
+    if (response.contentLength > 8 * 1024 * 1024) {
+      await response.listen(null).cancel();
+      throw const FormatException('DWARF preview exceeds the supported size');
+    }
+    await partial.deleteIfExists();
+    final sink = partial.openWrite(mode: FileMode.writeOnly);
+    var written = 0;
+    try {
+      try {
+        await for (final chunk in response.timeout(
+          const Duration(seconds: 30),
+        )) {
+          written += chunk.length;
+          if (written > 8 * 1024 * 1024) {
+            throw const FormatException(
+              'DWARF preview exceeds the supported size',
+            );
+          }
+          sink.add(chunk);
+        }
+        await sink.flush();
+      } finally {
+        await sink.close();
+      }
+    } catch (_) {
+      await partial.deleteIfExists();
+      rethrow;
+    }
+    if (response.contentLength >= 0 && written != response.contentLength) {
+      await partial.deleteIfExists();
+      throw const FormatException('DWARF preview response length is invalid');
+    }
+    if (!await _validJpeg(partial, written)) {
+      await partial.deleteIfExists();
+      throw const FormatException('DWARF preview is not a complete JPEG');
+    }
+    await target.deleteIfExists();
+    await partial.rename(target.path);
+    return target.path;
+  }
+
   Future<void> cancelBatch(String batchId) async {
     final id = batchId;
     _cancelled.add(id);

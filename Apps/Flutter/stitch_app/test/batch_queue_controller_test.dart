@@ -13,6 +13,7 @@ import 'package:stitch_app/models/stitch_timeline.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
+import 'package:stitch_app/services/batch_folder_importer.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/task_repository.dart';
 import 'package:stitch_app/services/mobile_runtime_service.dart';
@@ -149,6 +150,23 @@ class _GatedTaskLoads extends _MemoryTasks {
       await release.future;
     }
     return super.loadById(id);
+  }
+}
+
+class _GatedBatchImporter extends BatchFolderImporter {
+  final entered = Completer<void>();
+  final release = Completer<void>();
+  bool gateNextSnapshot = false;
+
+  @override
+  Future<List<BatchFolderSnapshot>> snapshot(String parentPath) async {
+    final snapshots = await super.snapshot(parentPath);
+    if (gateNextSnapshot) {
+      gateNextSnapshot = false;
+      entered.complete();
+      await release.future;
+    }
+    return snapshots;
   }
 }
 
@@ -342,6 +360,10 @@ class _FakeApi implements JobApi {
     jobs[jobId]!
       ..state = 'completed'
       ..progress = 0.92;
+    final output = Directory(jobId)..createSync(recursive: true);
+    await File(
+      '${output.path}${Platform.pathSeparator}manifest.json',
+    ).writeAsString('{"width":1024,"height":512}');
   }
 
   Future<void> finishExport(String jobId) async {
@@ -488,6 +510,7 @@ void main() {
       await _makeFolder(parent, 'C', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      expect(queue.started, isFalse);
       for (final item in queue.items) {
         await controller.setSettings(
           queueId: queue.id,
@@ -497,8 +520,9 @@ void main() {
           horizontalFovDegrees: 45,
         );
       }
-      // Drive the queue synchronously after settings changes. The periodic
-      // timer is intentionally not part of this scheduler contract test.
+      // Newly imported work waits for explicit queue start.
+      expect(api.starts, 0);
+      await controller.startQueue(queue.id);
       await controller.tick();
       expect(api.active, 2);
       expect(api.maxActive, 2);
@@ -556,6 +580,109 @@ void main() {
       );
     },
   );
+
+  test(
+    'refresh merges after polling and preserves a live item state',
+    () async {
+      final isolated = await Directory.systemTemp.createTemp(
+        'batch-refresh-race-test-',
+      );
+      final isolatedParent = Directory(
+        '${isolated.path}${Platform.pathSeparator}source',
+      )..createSync();
+      final importer = _GatedBatchImporter();
+      final isolatedTasks = _MemoryTasks(
+        Directory('${isolated.path}${Platform.pathSeparator}tasks'),
+      );
+      final isolatedApi = _FakeApi();
+      final isolatedController = BatchQueueController(
+        api: isolatedApi,
+        queueRepository: BatchQueueRepository(
+          rootDirectory: Directory(
+            '${isolated.path}${Platform.pathSeparator}queues',
+          ),
+        ),
+        taskRepository: isolatedTasks,
+        importer: importer,
+      );
+      try {
+        await isolatedController.initialize();
+        await _makeFolder(isolatedParent, 'first', 4);
+        await isolatedController.addParent(isolatedParent.path);
+        final queue = isolatedController.queues.single;
+        final item = queue.items.single;
+        await isolatedController.setSettings(
+          queueId: queue.id,
+          itemId: item.id,
+          rows: 2,
+          columns: 2,
+          horizontalFovDegrees: 45,
+        );
+        await isolatedController.startQueue(queue.id);
+        final job = isolatedApi.jobs.values.single;
+
+        await _makeFolder(isolatedParent, 'second', 4);
+        importer.gateNextSnapshot = true;
+        final refresh = isolatedController.refreshQueue(queue.id);
+        await importer.entered.future.timeout(const Duration(seconds: 10));
+
+        job.operation = 'export';
+        await isolatedController.tick();
+        expect(
+          isolatedController.queues.single.items
+              .singleWhere((current) => current.id == item.id)
+              .state,
+          BatchItemState.exporting,
+        );
+
+        importer.release.complete();
+        expect(await refresh, 1);
+        final refreshed = isolatedController.queues.single;
+        expect(refreshed.items, hasLength(2));
+        expect(
+          refreshed.items.singleWhere((current) => current.id == item.id).state,
+          BatchItemState.exporting,
+        );
+      } finally {
+        if (!importer.release.isCompleted) importer.release.complete();
+        isolatedController.dispose();
+        await isolatedController.drain();
+        if (await isolated.exists()) await isolated.delete(recursive: true);
+      }
+    },
+  );
+
+  test('oversized rendered JPEG waits for explicit scaling approval', () async {
+    await _makeFolder(parent, 'oversized-jpeg', 4);
+    await controller.addParent(parent.path);
+    final queue = controller.queues.single;
+    final item = queue.items.single;
+    await controller.startQueue(queue.id);
+    await controller.setSettings(
+      queueId: queue.id,
+      itemId: item.id,
+      rows: 2,
+      columns: 2,
+      horizontalFovDegrees: 45,
+    );
+    await _waitUntil(() => api.jobs.length == 1);
+    final job = api.jobs.values.single;
+    await api.finishRender(job.id);
+    await File('${job.id}${Platform.pathSeparator}manifest.json').writeAsString(
+      '{"width":65501,"height":4096}${List.filled(2 * 1024 * 1024, ' ').join()}',
+    );
+
+    await controller.tick();
+    expect(
+      controller.queues.single.items.single.state,
+      BatchItemState.needsFormatApproval,
+    );
+    expect(api.exports, 0);
+
+    await controller.approveJpegScaling(queue.id, item.id);
+    expect(api.exports, 1);
+    expect(api.jobs.values.single.destination, endsWith('.jpg'));
+  });
 
   test(
     'drain waits for an in-flight queue save before storage cleanup',
@@ -722,6 +849,7 @@ void main() {
       await _makeFolder(parent, 'delete-me', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -754,6 +882,7 @@ void main() {
     await _makeFolder(parent, 'keep-me', 4);
     await controller.addParent(parent.path);
     final queue = controller.queues.single;
+    await controller.startQueue(queue.id);
     final item = queue.items.single;
     await controller.setSettings(
       queueId: queue.id,
@@ -792,6 +921,7 @@ void main() {
       await failingController.initialize();
       await failingController.addParent(parent.path);
       final queue = failingController.queues.single;
+      await failingController.startQueue(queue.id);
       final item = queue.items.single;
       await failingController.setSettings(
         queueId: queue.id,
@@ -856,6 +986,7 @@ void main() {
       await failingController.initialize();
       await failingController.addParent(parent.path);
       final queue = failingController.queues.single;
+      await failingController.startQueue(queue.id);
       final item = queue.items.single;
       await failingController.setSettings(
         queueId: queue.id,
@@ -911,6 +1042,7 @@ void main() {
       await _makeFolder(parent, 'tiff-panorama', 4);
       await controller.addParent(parent.path, outputFormat: ExportFormat.tiff);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       expect(queue.outputFormat, ExportFormat.tiff);
       for (final item in queue.items) {
         await controller.setSettings(
@@ -943,6 +1075,7 @@ void main() {
       await _makeFolder(parent, 'large-1x7', 7);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -1015,6 +1148,7 @@ void main() {
       await _makeFolder(parent, 'approval-export-pending', 7);
       await guardedController.addParent(parent.path);
       final queue = guardedController.queues.single;
+      await guardedController.startQueue(queue.id);
       final item = queue.items.single;
       await guardedController.setSettings(
         queueId: queue.id,
@@ -1120,6 +1254,7 @@ void main() {
       await _makeFolder(parent, 'thermal-export-pending', 4);
       await guardedController.addParent(parent.path);
       final queue = guardedController.queues.single;
+      await guardedController.startQueue(queue.id);
       final item = queue.items.single;
       await guardedController.setSettings(
         queueId: queue.id,
@@ -1170,6 +1305,7 @@ void main() {
       await _makeFolder(parent, 'memory-export-pending', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -1244,6 +1380,7 @@ void main() {
       await _makeFolder(parent, 'guarded-small', 4);
       await guardedController.addParent(parent.path);
       final queue = guardedController.queues.single;
+      await guardedController.startQueue(queue.id);
       final item = queue.items.single;
       await guardedController.setSettings(
         queueId: queue.id,
@@ -1606,6 +1743,7 @@ void main() {
       await _makeFolder(parent, 'grouped-stage', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -1665,6 +1803,7 @@ void main() {
       await _makeFolder(parent, 'retry-stage', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -1751,6 +1890,7 @@ void main() {
         ),
       );
       final importedQueue = publisher.queues.single;
+      await publisher.startQueue(importedQueue.id);
       final importedItem = importedQueue.items.single;
       // Synthetic JPEGs have no camera EXIF, so explicitly confirm the grid
       // and view angle as an operator would before expecting a render to start.
@@ -2142,6 +2282,7 @@ void main() {
       await _makeFolder(parent, 'missing-export', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -2181,6 +2322,7 @@ void main() {
       await _makeFolder(parent, 'nine', 9);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -2222,6 +2364,7 @@ void main() {
       await _makeFolder(parent, 'pause', 4);
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       await controller.setSettings(
         queueId: queue.id,
@@ -2277,6 +2420,7 @@ void main() {
       await controller.initialize();
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       final pendingStart = controller.setSettings(
         queueId: queue.id,
@@ -2319,6 +2463,7 @@ void main() {
       await controller.initialize();
       await controller.addParent(parent.path);
       final queue = controller.queues.single;
+      await controller.startQueue(queue.id);
       final item = queue.items.single;
       final pendingStart = controller.setSettings(
         queueId: queue.id,
@@ -2347,6 +2492,7 @@ void main() {
     await _makeFolder(parent, 'failed-retry', 4);
     await controller.addParent(parent.path);
     final queue = controller.queues.single;
+    await controller.startQueue(queue.id);
     final item = queue.items.single;
     await controller.setSettings(
       queueId: queue.id,
@@ -2385,6 +2531,7 @@ void main() {
     await _makeFolder(parent, 'export-reopen', 4);
     await controller.addParent(parent.path);
     final queue = controller.queues.single;
+    await controller.startQueue(queue.id);
     final item = queue.items.single;
     await controller.setSettings(
       queueId: queue.id,
@@ -2420,6 +2567,7 @@ void main() {
     await _makeFolder(parent, 'eta', 4);
     await controller.addParent(parent.path);
     final queue = controller.queues.single;
+    await controller.startQueue(queue.id);
     final item = queue.items.single;
     await controller.setSettings(
       queueId: queue.id,

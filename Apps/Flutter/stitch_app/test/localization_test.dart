@@ -53,6 +53,84 @@ void main() {
     expect(english.text(otherFilesystemError), otherFilesystemError);
   });
 
+  test('unknown stages, JPEG warnings, and task selection copy are localized', () {
+    const english = StitchLocalizations(Locale('en'));
+    const chinese = StitchLocalizations(Locale('zh'));
+
+    expect(
+      english.timelineStage('future-render-stage'),
+      'Other processing stage',
+    );
+    expect(chinese.timelineStage('future-render-stage'), '其他处理阶段');
+    const estimate =
+        '估算输出为 70000 × 40000 像素。JPEG 单边上限为 65500 像素，选择 JPEG 会按比例缩小。估算可能与实际投影尺寸不同。';
+    expect(
+      english.text(estimate),
+      'Estimated output is 70000 × 40000 pixels. The JPEG edge limit is 65500 pixels, so JPEG will be proportionally scaled down. The estimate may differ from the rendered projection.',
+    );
+    expect(chinese.text(estimate), estimate);
+    expect(english.text('JPEG 边长超过限制'), 'JPEG edge limit exceeded');
+    expect(english.text('改用 JPEG XL'), 'Use JPEG XL');
+    expect(english.text('继续并缩小 JPEG'), 'Continue with scaled JPEG');
+    expect(
+      english.text('需要确认 JPEG 输出尺寸'),
+      'JPEG output size needs confirmation',
+    );
+    expect(
+      english.text(
+        '估算输出 70000 × 40000 超出 JPEG 单边 65500 像素上限；请选择缩小 JPEG 或改用 JPEG XL',
+      ),
+      'Estimated output 70000 × 40000 exceeds the JPEG edge limit of 65500 pixels. Choose scaled JPEG or JPEG XL.',
+    );
+    expect(
+      english.text(
+        '合成结果 70000 × 40000 超出 JPEG 单边 65500 像素上限；请选择缩小 JPEG 或改用 JPEG XL',
+      ),
+      'Rendered output 70000 × 40000 exceeds the JPEG edge limit of 65500 pixels. Choose scaled JPEG or JPEG XL.',
+    );
+    expect(
+      english.text('自动锁定超标关系涉及的 5 张照片'),
+      'Auto-lock 5 photos involved in over-limit matches',
+    );
+    expect(english.text('重新扫描此母目录'), 'Rescan this parent folder');
+    expect(english.text('没有发现新的子目录。'), 'No new subfolders found.');
+    expect(
+      english.text('无法启动队列：disk unavailable'),
+      'Could not start queue: disk unavailable',
+    );
+    expect(
+      english.text('重新扫描失败：disk unavailable'),
+      'Queue rescan failed: disk unavailable',
+    );
+    expect(
+      english.statusMessageParts('No new subfolders found.').summary,
+      'No new subfolders found.',
+    );
+    expect(
+      english.statusMessageParts('No new subfolders found.').technicalDetails,
+      isNull,
+    );
+    expect(english.text('批量删除本地任务？'), 'Delete selected local tasks?');
+    expect(english.text('已选 3 项'), '3 selected');
+
+    final englishParts = english.statusMessageParts(
+      'UNKNOWN_NATIVE_ERROR: decoder failed (errno=47)',
+    );
+    final chineseParts = chinese.statusMessageParts(
+      'UNKNOWN_NATIVE_ERROR: decoder failed (errno=47)',
+    );
+    expect(englishParts.summary, english.operationFailedSummary);
+    expect(chineseParts.summary, chinese.operationFailedSummary);
+    expect(
+      englishParts.technicalDetails,
+      'UNKNOWN_NATIVE_ERROR: decoder failed (errno=47)',
+    );
+    expect(
+      chineseParts.technicalDetails,
+      'UNKNOWN_NATIVE_ERROR: decoder failed (errno=47)',
+    );
+  });
+
   test('folder dialog messages are localized in both supported locales', () {
     const english = StitchLocalizations(Locale('en'));
     const chinese = StitchLocalizations(Locale('zh'));
@@ -142,11 +220,17 @@ void main() {
       english.text(warning),
       'Photos stay in the grid. Use a photo lock button to fix its grid position. Click a photo to select it; Shift+click adds or removes individual photos. Use “Lock selected photos to grid” to lock them together. A lock skips neighbor texture matching for that photo, so use it only when the photo order is known. Long-press to see the full filename.',
     );
-    expect(english.text('上次配准的超标匹配关系'), 'Previous registration matches over the limit');
+    expect(
+      english.text('上次配准的超标匹配关系'),
+      'Previous registration matches over the limit',
+    );
     expect(chinese.text('上次配准的超标匹配关系'), '上次配准的超标匹配关系');
     expect(english.text('不匹配'), 'Not match');
     expect(chinese.text('不匹配'), '不匹配');
-    expect(english.text('上次诊断，已按网格锁定，待重算'), 'Previous diagnosis; locked to grid, pending restitch');
+    expect(
+      english.text('上次诊断，已按网格锁定，待重算'),
+      'Previous diagnosis; locked to grid, pending restitch',
+    );
     expect(english.text('锁定网格位置'), 'Lock grid position');
     expect(english.text('解除网格位置锁定'), 'Unlock grid position');
     expect(
@@ -455,6 +539,13 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    final arrangementExpansion = find.descendant(
+      of: find.byKey(const Key('stitch-options-card')),
+      matching: find.byType(ExpansionTile),
+    );
+    await tester.ensureVisible(arrangementExpansion.first);
+    await tester.tap(arrangementExpansion.first);
+    await tester.pumpAndSettle();
     await tester.ensureVisible(
       find.byKey(const Key('stitch-quality-expansion')),
     );
@@ -538,6 +629,13 @@ void main() {
             ),
           );
           await tester.pump(const Duration(milliseconds: 100));
+          final arrangementExpansion = find.descendant(
+            of: find.byKey(const Key('stitch-options-card')),
+            matching: find.byType(ExpansionTile),
+          );
+          await tester.ensureVisible(arrangementExpansion.first);
+          await tester.tap(arrangementExpansion.first);
+          await tester.pumpAndSettle();
           final overlapOption = find.byKey(
             const Key('auto-grid-overlap-option'),
           );
@@ -918,8 +1016,7 @@ void main() {
       const cases = <String, String>{
         // Colon-terminated prefix keys; the remainder is preserved verbatim.
         '无法启动：timeout': 'Could not start: timeout',
-        '无法启用前台任务锁：denied':
-            'Could not enable the foreground task lock: denied',
+        '无法启用前台任务锁：denied': 'Could not enable the foreground task lock: denied',
         '前台任务锁不可用，正在请求暂停：denied':
             'Foreground task lock unavailable; requesting pause: denied',
         '无法创建新任务副本：oops': 'Could not create a task copy: oops',
@@ -934,23 +1031,19 @@ void main() {
             'the batch task stays pending verification: err',
         '无法重新读取母目录：err': 'Could not re-read the parent directory: err',
         '无法读取子目录：err': 'Could not read the subdirectory: err',
-        '仅支持 JPEG 原片：a.jpg':
-            'Only original JPEG photos are supported: a.jpg',
+        '仅支持 JPEG 原片：a.jpg': 'Only original JPEG photos are supported: a.jpg',
         '无法读取所选文件：a.jpg': 'Could not read the selected file: a.jpg',
         '文件不是有效 JPEG：a.jpg': 'The file is not a valid JPEG: a.jpg',
         'JPEG marker 顺序无效：a.jpg': 'Invalid JPEG marker order: a.jpg',
-        'JPEG 头中找不到图像尺寸：a.jpg':
-            'No image size found in the JPEG header: a.jpg',
+        'JPEG 头中找不到图像尺寸：a.jpg': 'No image size found in the JPEG header: a.jpg',
         '本地合成核心不可用：err': 'The local stitching core is unavailable: err',
-        '调用原生合成核心失败：err':
-            'Failed to call the native stitching core: err',
+        '调用原生合成核心失败：err': 'Failed to call the native stitching core: err',
         '启动失败：err': 'Failed to start: err',
         '取消失败：err': 'Failed to cancel: err',
         '无法读取核心资源：err': 'Could not read core resources: err',
         '读取批处理队列失败：err': 'Failed to read the batch queue: err',
         '导入批次失败：err': 'Failed to import the batch: err',
-        '原生任务已创建，正在重新连接：err':
-            'The native job was created; reconnecting: err',
+        '原生任务已创建，正在重新连接：err': 'The native job was created; reconnecting: err',
         '状态暂时不可用，保留原任务并重试：err':
             'State temporarily unavailable; keeping the original task '
             'and retrying: err',
@@ -996,12 +1089,9 @@ void main() {
             'Confirmed the 3×2 grid and camera angles from filenames',
         '已确认 3×2 顺序排列与相机视角':
             'Confirmed the 3×2 sequential layout and camera angles',
-        '75% · 本阶段预计剩余 2 分 5 秒':
-            '75% · 2 min 5 sec remaining in this phase',
-        '42% · 本阶段预计剩余 30 秒':
-            '42% · 30 sec remaining in this phase',
-        '合成中 · 估算排列，建议检查':
-            'Stitching · estimated arrangement, review it',
+        '75% · 本阶段预计剩余 2 分 5 秒': '75% · 2 min 5 sec remaining in this phase',
+        '42% · 本阶段预计剩余 30 秒': '42% · 30 sec remaining in this phase',
+        '合成中 · 估算排列，建议检查': 'Stitching · estimated arrangement, review it',
         '估算布局 · 估算排列，建议检查':
             'Estimated layout · estimated arrangement, review it',
         '2 分 5 秒': '2 min 5 sec',
@@ -1041,8 +1131,7 @@ void main() {
       '合成失败': 'Stitching failed',
       '合成已开始': 'Stitching started',
       '合成已完成': 'Composition completed',
-      '合成完成，等待整图导出':
-          'Composition complete; waiting for the full image export',
+      '合成完成，等待整图导出': 'Composition complete; waiting for the full image export',
       '整图导出失败': 'Full image export failed',
       '整图导出已开始': 'Full image export started',
       '整图导出已完成': 'Full image export completed',
@@ -1060,8 +1149,7 @@ void main() {
       '母目录中没有直接子目录': 'No direct subdirectory in the parent directory',
       '没有原片': 'No source photos',
       '没有选中照片': 'No photos selected',
-      '子目录中没有直接 JPEG 原片':
-          'No direct JPEG source photos in the subdirectory',
+      '子目录中没有直接 JPEG 原片': 'No direct JPEG source photos in the subdirectory',
       '全景目录没有可导入的 JPEG 原片':
           'The panorama directory has no importable JPEG source photos',
       '原片尺寸不一致': 'The source photos have inconsistent dimensions',
@@ -1069,10 +1157,8 @@ void main() {
       '请先导入原片': 'Import the source photos first',
       '需要设置行列': 'Set the rows and columns first',
       '需要设置相机视角': 'Set the camera field of view first',
-      '行列数必须与原片数量一致':
-          'Rows and columns must match the number of source photos',
-      '文件名行列编号超出支持范围':
-          'Filename row/column numbers exceed the supported range',
+      '行列数必须与原片数量一致': 'Rows and columns must match the number of source photos',
+      '文件名行列编号超出支持范围': 'Filename row/column numbers exceed the supported range',
       '检测到重复行列文件；请改用顺序模式，全部原片都会保留':
           'Duplicate row/column files detected; use sequence mode. '
           'All source photos are kept.',
@@ -1098,8 +1184,7 @@ void main() {
           'try removing the task again later',
       '此队列项目不需要大型任务确认':
           'This queue item does not need a large-job confirmation',
-      '大型任务需要确认后才会导出':
-          'The large job needs confirmation before exporting',
+      '大型任务需要确认后才会导出': 'The large job needs confirmation before exporting',
       '大型任务需要重新确认后才能导出':
           'The large job needs to be re-confirmed before exporting',
       '大型任务尚未安全暂停，确认后不能继续':
@@ -1123,8 +1208,7 @@ void main() {
       '等待共享内存预算释放后再导出整图':
           'Waiting for the shared memory budget to be released before '
           'exporting the full image',
-      '无法分配不冲突的整图文件名':
-          'Could not assign a non-conflicting full image filename',
+      '无法分配不冲突的整图文件名': 'Could not assign a non-conflicting full image filename',
       '原生合成核心不可用': 'The native stitching engine is unavailable',
       '原生响应不是 JSON 对象': 'The native response is not a JSON object',
       '原生核心返回空响应': 'The native engine returned an empty response',
@@ -1155,10 +1239,8 @@ void main() {
       '水平视角需介于 1° 与 179°':
           'Horizontal field of view must be between 1° and 179°',
       '已提交暂停请求': 'Pause request submitted',
-      '已请求暂停，等待核心确认':
-          'Pause requested; waiting for the engine to confirm',
-      '已请求暂停；等待核心确认':
-          'Pause requested; waiting for the engine to confirm',
+      '已请求暂停，等待核心确认': 'Pause requested; waiting for the engine to confirm',
+      '已请求暂停；等待核心确认': 'Pause requested; waiting for the engine to confirm',
       '已恢复原生任务': 'Restored the native job',
       '已连接正在运行的原生任务': 'Connected to the running native job',
       '应用未运行期间的原生状态不会自动恢复':
@@ -1265,10 +1347,7 @@ void main() {
       await tester.pump();
 
       expect(find.byTooltip('重试发布整图'), findsOneWidget);
-      expect(
-        find.text('发布失败：boom。私有整图已保留，可重试发布。'),
-        findsOneWidget,
-      );
+      expect(find.text('发布失败：boom。私有整图已保留，可重试发布。'), findsOneWidget);
       expect(find.text('1/1 已导出 · 0 项处理中'), findsOneWidget);
     },
   );

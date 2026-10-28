@@ -171,7 +171,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       return;
     }
     var selectedFormat =
-        widget.settingsController?.settings.exportFormat ?? ExportFormat.tiff;
+        widget.settingsController?.settings.exportFormat ?? ExportFormat.jpeg;
     final format = await showDialog<ExportFormat>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -237,6 +237,53 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('无法加入批处理：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _startAllQueues() async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      await _controller.startAllQueues();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('无法启动队列：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshQueue(BatchQueue queue) async {
+    if (_busy) return;
+    setState(() => _busy = true);
+    try {
+      final added = await _controller.refreshQueue(
+        queue.id,
+        deferScheduling: true,
+      );
+      if (mounted && added == 0) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('没有发现新的子目录。')));
+      } else if (mounted && added > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已加入 $added 个新子目录，正在按队列资源策略安排。')),
+        );
+        if (queue.started) {
+          await _controller.resumeDeferredQueue(queue.id);
+        }
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('重新扫描失败：$error')));
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -610,13 +657,30 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                   ),
                 )
               else ...[
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton.icon(
-                    onPressed: _busy ? null : _selectParent,
-                    icon: const Icon(Icons.add),
-                    label: const Text('添加批次'),
-                  ),
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton.icon(
+                        key: const Key('start-all-queues'),
+                        onPressed:
+                            _busy ||
+                                (_controller.queues.every(
+                                      (queue) => queue.started,
+                                    ) &&
+                                    !_controller.hasDeferredQueues)
+                            ? null
+                            : _startAllQueues,
+                        icon: const Icon(Icons.play_arrow),
+                        label: const Text('开始队列'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : _selectParent,
+                      icon: const Icon(Icons.add),
+                      label: const Text('添加批次'),
+                    ),
+                  ],
                 ),
                 for (final queue in _controller.queues) ...[
                   _queueHeader(queue),
@@ -663,6 +727,11 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                 ),
               ],
             ),
+          ),
+          IconButton(
+            tooltip: StitchLocalizations.of(context).text('重新扫描此母目录'),
+            onPressed: _busy ? null : () => _refreshQueue(queue),
+            icon: const Icon(Icons.refresh),
           ),
           IconButton(
             tooltip: StitchLocalizations.of(context).text('资源设置'),
@@ -736,7 +805,26 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                     onPressed: () => _confirmBatchJob(queue, item),
                     icon: const Icon(Icons.warning_amber_outlined),
                   )
-                else if (active || item.state == BatchItemState.ready) ...[
+                else if (item.state == BatchItemState.needsFormatApproval) ...[
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('继续并缩小 JPEG'),
+                    onPressed: () =>
+                        _controller.approveJpegScaling(queue.id, item.id),
+                    icon: const Icon(Icons.photo_size_select_small),
+                  ),
+                  if (_jxlAvailable)
+                    IconButton(
+                      tooltip: StitchLocalizations.of(
+                        context,
+                      ).text('改用 JPEG XL'),
+                      onPressed: () => _controller.setItemExportFormat(
+                        queue.id,
+                        item.id,
+                        ExportFormat.jpegXl,
+                      ),
+                      icon: const Icon(Icons.high_quality_outlined),
+                    ),
+                ] else if (active || item.state == BatchItemState.ready) ...[
                   IconButton(
                     tooltip: StitchLocalizations.of(context).text('暂停任务'),
                     onPressed: () => _controller.pause(queue.id, item.id),
@@ -805,6 +893,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           BatchItemState.pending => '等待资源',
           BatchItemState.needsSettings => '需要处理设置',
           BatchItemState.needsApproval => '等待大型任务确认',
+          BatchItemState.needsFormatApproval => '需要确认 JPEG 输出尺寸',
           BatchItemState.skipped => '已跳过',
           BatchItemState.ready => '等待开始',
           BatchItemState.running => '合成中',
@@ -833,6 +922,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     BatchItemState.cancelled => Icons.pause_circle_outline,
     BatchItemState.needsSettings => Icons.tune,
     BatchItemState.needsApproval => Icons.warning_amber_outlined,
+    BatchItemState.needsFormatApproval => Icons.photo_size_select_small,
     _ => Icons.schedule,
   };
 
@@ -841,6 +931,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     BatchItemState.failed ||
     BatchItemState.needsSettings => Theme.of(context).colorScheme.error,
     BatchItemState.needsApproval => Theme.of(context).colorScheme.tertiary,
+    BatchItemState.needsFormatApproval => Theme.of(
+      context,
+    ).colorScheme.tertiary,
     BatchItemState.skipped => Theme.of(context).disabledColor,
     _ => null,
   };

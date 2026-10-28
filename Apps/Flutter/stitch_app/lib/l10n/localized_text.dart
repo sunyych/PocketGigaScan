@@ -69,37 +69,13 @@ class StitchStatusMessage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final localization = StitchLocalizations.of(context);
-    final accessDeniedSummary = localization
-        .localizedTaskDirectoryAccessDeniedSummary(message);
-    if (accessDeniedSummary != null) {
-      final technicalDetails = localization
-          .taskDirectoryAccessDeniedTechnicalDetails(message);
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(accessDeniedSummary, style: style),
-          ExpansionTile(
-            tilePadding: EdgeInsets.zero,
-            childrenPadding: EdgeInsets.zero,
-            expandedAlignment: Alignment.centerLeft,
-            expandedCrossAxisAlignment: CrossAxisAlignment.start,
-            dense: true,
-            title: Text(localization.text('Technical details'), style: style),
-            children: [SelectableText(technicalDetails!, style: style)],
-          ),
-        ],
-      );
-    }
-    final split = message.indexOf('：');
-    if (split <= 0 || split == message.length - 1) {
-      return Text(message, style: style);
-    }
-    final summary = message.substring(0, split + 1);
-    final detail = message.substring(split + 1).trim();
+    final parts = localization.statusMessageParts(message);
+    final detail = parts.technicalDetails;
+    if (detail == null) return Text(parts.summary, style: style);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(summary, style: style),
+        Text(parts.summary, style: style),
         ExpansionTile(
           tilePadding: EdgeInsets.zero,
           childrenPadding: EdgeInsets.zero,

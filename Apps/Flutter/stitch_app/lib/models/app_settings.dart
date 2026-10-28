@@ -16,7 +16,8 @@ class AppSettings {
     this.language = AppLanguage.system,
     this.themeMode = AppThemeMode.system,
     this.accent = AppAccent.teal,
-    this.exportFormat = ExportFormat.tiff,
+    this.exportFormat = ExportFormat.jpeg,
+    this.exportFormatExplicitlySet = false,
     this.refineGridNeighbors = true,
     this.seamBlendMode = SeamBlendMode.deghost,
     this.localTextureWarp = true,
@@ -32,6 +33,7 @@ class AppSettings {
   final AppThemeMode themeMode;
   final AppAccent accent;
   final ExportFormat exportFormat;
+  final bool exportFormatExplicitlySet;
   final bool refineGridNeighbors;
   final SeamBlendMode seamBlendMode;
   final bool localTextureWarp;
@@ -46,7 +48,9 @@ class AppSettings {
 
   factory AppSettings.defaults({required bool mobile, bool android = false}) =>
       AppSettings(
-        exportFormat: mobile && !android ? ExportFormat.png : ExportFormat.tiff,
+        exportFormat: mobile
+            ? (android ? ExportFormat.tiff : ExportFormat.png)
+            : ExportFormat.jpeg,
         refineGridNeighbors: !mobile || android,
         seamBlendMode: mobile && !android
             ? SeamBlendMode.feather
@@ -58,6 +62,7 @@ class AppSettings {
     AppThemeMode? themeMode,
     AppAccent? accent,
     ExportFormat? exportFormat,
+    bool? exportFormatExplicitlySet,
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
     bool? localTextureWarp,
@@ -73,6 +78,8 @@ class AppSettings {
     themeMode: themeMode ?? this.themeMode,
     accent: accent ?? this.accent,
     exportFormat: exportFormat ?? this.exportFormat,
+    exportFormatExplicitlySet:
+        exportFormatExplicitlySet ?? this.exportFormatExplicitlySet,
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
@@ -87,11 +94,12 @@ class AppSettings {
   );
 
   Map<String, Object?> toJson() => {
-    'version': 1,
+    'version': 2,
     'language': language.name,
     'themeMode': themeMode.name,
     'accent': accent.name,
     'exportFormat': exportFormat.name,
+    'exportFormatExplicitlySet': exportFormatExplicitlySet,
     'refineGridNeighbors': refineGridNeighbors,
     'seamBlendMode': seamBlendMode.name,
     'localTextureWarp': localTextureWarp,
@@ -127,7 +135,9 @@ class AppSettings {
       accent: enumValue(AppAccent.values, json['accent'], AppAccent.teal),
       exportFormat: json.containsKey('exportFormat')
           ? ExportFormat.fromSavedValue(json['exportFormat'])
-          : ExportFormat.tiff,
+          : ExportFormat.jpeg,
+      exportFormatExplicitlySet:
+          json['exportFormatExplicitlySet'] as bool? ?? false,
       refineGridNeighbors: json['refineGridNeighbors'] as bool? ?? true,
       seamBlendMode: json.containsKey('seamBlendMode')
           ? SeamBlendMode.fromSavedValue(json['seamBlendMode'])

@@ -92,6 +92,8 @@ class _FixtureClient extends DwarfDeviceClient {
     filePath: '/sdcard/DCIM/DWARF3/Panoramas/Panorama_01',
     fileSize: 1024,
     mediaType: 1,
+    thumbnailUrl:
+        'http://192.168.88.1/DWARF3/Panoramas/Panorama_01/panorama_thumbnail.jpg',
   );
   final originals = const [
     DwarfOriginal(
@@ -123,7 +125,9 @@ class _FixtureDownloader extends DwarfDownloadService {
   final List<DwarfDownloadBatch> _saved;
   final Completer<DwarfDownloadBatch> transfer = Completer();
   Object? downloadFailure;
+  Object? thumbnailFailure;
   bool downloadStarted = false;
+  bool thumbnailStarted = false;
   bool resumeStarted = false;
   bool cancelCalled = false;
   DwarfDownloadProgress? lastProgress;
@@ -182,6 +186,18 @@ class _FixtureDownloader extends DwarfDownloadService {
     resumeStarted = true;
     final batch = _saved.singleWhere((value) => value.id == batchId);
     return completed(batch);
+  }
+
+  @override
+  Future<String> downloadPanoramaThumbnail({
+    required String batchId,
+    required String url,
+    required String trustedHost,
+    required int trustedPort,
+  }) async {
+    thumbnailStarted = true;
+    if (thumbnailFailure != null) throw thumbnailFailure!;
+    return 'fixture-preview.jpg';
   }
 
   @override
@@ -382,7 +398,8 @@ void main() {
   ) async {
     final navigatorKey = GlobalKey<NavigatorState>();
     final queue = _FixtureQueueController();
-    final downloader = _FixtureDownloader();
+    final downloader = _FixtureDownloader()
+      ..thumbnailFailure = StateError('preview unavailable');
     final openedTasks = <String>[];
     await tester.pumpWidget(
       _app(
@@ -427,6 +444,7 @@ void main() {
     await tester.pump();
 
     expect(queue.admitted, hasLength(1));
+    expect(downloader.thumbnailStarted, isTrue);
     expect(openedTasks, ['task-${queue.admitted.single.id}']);
     queue.dispose();
   });

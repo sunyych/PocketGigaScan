@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:stitch_app/l10n/stitch_localizations.dart';
 import 'package:stitch_app/models/stitch_timeline.dart';
 import 'package:stitch_app/widgets/stitching_log.dart';
 
@@ -22,6 +24,14 @@ void main() {
       final label = language == 'en' ? 'Rendering panorama' : '正在生成全景图';
       await tester.pumpWidget(
         MaterialApp(
+          locale: Locale(language),
+          supportedLocales: StitchLocalizations.supportedLocales,
+          localizationsDelegates: const [
+            StitchLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
           home: Scaffold(
             body: Padding(
               padding: const EdgeInsets.all(8),
@@ -50,5 +60,46 @@ void main() {
       expect(tester.takeException(), isNull);
     }
     await tester.binding.setSurfaceSize(null);
+  });
+
+  testWidgets('unknown native event kind has a localized fallback', (
+    tester,
+  ) async {
+    final timeline = StitchTimeline(
+      events: [
+        StitchTimelineEvent(
+          id: 'unknown',
+          timestampUtc: DateTime.utc(2026, 10, 6, 19, 30),
+          kind: 'new-native-event-kind',
+        ),
+      ],
+    );
+    for (final locale in [const Locale('en'), const Locale('zh')]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: locale,
+          supportedLocales: StitchLocalizations.supportedLocales,
+          localizationsDelegates: const [
+            StitchLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          home: Scaffold(
+            body: StitchingLog(
+              timeline: timeline,
+              eventLabel: (event) => event.kind,
+              totalLabel: 'total',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text(locale.languageCode == 'zh' ? '其他任务事件' : 'Other task event'),
+        findsOneWidget,
+      );
+      expect(find.text('new-native-event-kind'), findsNothing);
+    }
   });
 }

@@ -23,6 +23,7 @@ import 'mobile_storage_service.dart';
 import 'spherical_request.dart';
 import 'task_repository.dart';
 import 'task_record_service.dart';
+import 'jpeg_dimension_estimator.dart';
 import 'dwarf_download_service.dart';
 import 'scene_model_service.dart';
 
@@ -65,6 +66,7 @@ class BatchQueueController extends ChangeNotifier {
   final Set<String> _inFlight = {};
   final Set<String> _runtimeGuardUnavailableJobs = {};
   final Set<String> _deletingTaskIds = {};
+  final Set<String> _deferredQueueStarts = {};
   final Map<String, StitchTask> _taskCache = {};
   final Map<String, int> _generations = {};
   final Map<String, int> _timelineUiSequences = {};
@@ -105,6 +107,7 @@ class BatchQueueController extends ChangeNotifier {
               }.contains(item.state),
             ),
       );
+  bool get hasDeferredQueues => _deferredQueueStarts.isNotEmpty;
 
   String _nextTimelineUiId(String taskId, StitchTimeline timeline) {
     var sequence = _timelineUiSequences[taskId] ?? 0;
@@ -935,7 +938,7 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> addParent(
     String parentPath, {
-    ExportFormat outputFormat = ExportFormat.tiff,
+    ExportFormat outputFormat = ExportFormat.jpeg,
     AppSettings? settings,
   }) async {
     if (_importing) return;
@@ -983,6 +986,7 @@ class BatchQueueController extends ChangeNotifier {
         outputDirectory: outputPath,
         items: items,
         outputFormat: selectedFormat,
+        started: false,
         exportDestination: configuredDestination,
         performanceOptions: settings?.performance ?? const PerformanceOptions(),
         refineGridNeighbors: settings?.refineGridNeighbors ?? true,
@@ -1013,6 +1017,115 @@ class BatchQueueController extends ChangeNotifier {
       if (!_disposed) notifyListeners();
     }
     unawaited(tick());
+  }
+
+  Future<void> startQueue(String queueId) async {
+    final index = _queues.indexWhere((queue) => queue.id == queueId);
+    if (index < 0 || _loading || _importing) return;
+    final queue = _queues[index];
+    if (queue.started) return;
+    final started = queue.copyWith(started: true);
+    _queues[index] = started;
+    await _save(started);
+    if (!_disposed) notifyListeners();
+    await tick();
+  }
+
+  Future<void> startAllQueues() async {
+    if (_loading || _importing || _disposed) return;
+    for (var index = 0; index < _queues.length; index++) {
+      final queue = _queues[index];
+      if (queue.started) continue;
+      final started = queue.copyWith(started: true);
+      _queues[index] = started;
+      await _save(started);
+    }
+    _deferredQueueStarts.clear();
+    if (!_disposed) notifyListeners();
+    await tick();
+  }
+
+  Future<void> resumeDeferredQueue(String queueId) async {
+    _deferredQueueStarts.remove(queueId);
+    if (!_disposed) notifyListeners();
+    if (_queues.any((queue) => queue.id == queueId && queue.started)) {
+      await tick();
+    }
+  }
+
+  /// Re-scans the queue's selected parent and appends only new direct child
+  /// directories. Existing entries, including completed ones, keep their state.
+  Future<int> refreshQueue(
+    String queueId, {
+    bool deferScheduling = false,
+  }) async {
+    if (_loading || _importing) {
+      throw StateError('队列正在恢复或导入，请稍后重新扫描');
+    }
+    final index = _queues.indexWhere((queue) => queue.id == queueId);
+    if (index < 0) return 0;
+    _importing = true;
+    if (deferScheduling && _queues[index].started) {
+      _deferredQueueStarts.add(queueId);
+    }
+    if (!_disposed) notifyListeners();
+    try {
+      final requestedQueue = _queues[index];
+      final snapshots = await _importer.snapshot(
+        requestedQueue.parentDirectory,
+      );
+      // Polling may update running/completed entries while snapshot() is in
+      // flight. Re-read the queue before appending so those changes survive.
+      final latestIndex = _queues.indexWhere(
+        (candidate) => candidate.id == queueId,
+      );
+      if (latestIndex < 0) return 0;
+      final queue = _queues[latestIndex];
+      String normalizedPath(String path) => p.normalize(p.absolute(path));
+      final known = queue.items
+          .map((item) => normalizedPath(item.sourceDirectory))
+          .toList();
+      final added = <BatchQueueItem>[];
+      final addedSnapshots = <BatchFolderSnapshot>[];
+      for (final snapshot in snapshots) {
+        final normalized = normalizedPath(snapshot.directory);
+        if (known.any((path) => p.equals(path, normalized))) continue;
+        known.add(normalized);
+        final item = BatchQueueItem(
+          id: _taskRepository.createId(),
+          name: p.basename(snapshot.directory),
+          sourceDirectory: snapshot.directory,
+          state: snapshot.error == null
+              ? BatchItemState.pending
+              : BatchItemState.skipped,
+          message: snapshot.error,
+        );
+        added.add(item);
+        addedSnapshots.add(snapshot);
+      }
+      if (added.isEmpty) {
+        _deferredQueueStarts.remove(queueId);
+        return 0;
+      }
+      final updated = queue.copyWith(items: [...queue.items, ...added]);
+      _queues[latestIndex] = updated;
+      await _save(updated);
+      if (!_disposed) notifyListeners();
+      for (var i = 0; i < added.length; i++) {
+        if (added[i].state == BatchItemState.pending) {
+          await _importSnapshot(updated, added[i], addedSnapshots[i]);
+        }
+      }
+      await _releaseStagingIfFullyImported(queue.id, queue.parentDirectory);
+      return added.length;
+    } finally {
+      _importing = false;
+      if (!_disposed) notifyListeners();
+      if (!deferScheduling &&
+          _queues.any((queue) => queue.id == queueId && queue.started)) {
+        unawaited(tick());
+      }
+    }
   }
 
   /// Adds only explicitly completed device panorama directories. Source paths
@@ -1153,7 +1266,8 @@ class BatchQueueController extends ChangeNotifier {
         parentDirectory: parentDirectory,
         outputDirectory: outputPath,
         items: items,
-        outputFormat: settings?.exportFormat ?? ExportFormat.tiff,
+        outputFormat: settings?.exportFormat ?? ExportFormat.jpeg,
+        started: false,
         exportDestination: settings?.outputDirectory,
         performanceOptions: settings?.performance ?? const PerformanceOptions(),
         refineGridNeighbors: settings?.refineGridNeighbors ?? true,
@@ -1238,6 +1352,7 @@ class BatchQueueController extends ChangeNotifier {
         cameraProfileId: imported.cameraProfileId,
         performanceOptions: queue.performanceOptions,
         exportFormat: queue.outputFormat,
+        previewThumbnailPath: imported.previewThumbnailPath,
         refineGridNeighbors: queue.refineGridNeighbors,
         seamBlendMode: queue.seamBlendMode,
         localTextureWarp: queue.localTextureWarp,
@@ -1323,6 +1438,7 @@ class BatchQueueController extends ChangeNotifier {
     await _saveTask(updated);
     final item = found.item.copyWith(
       state: BatchItemState.ready,
+      jpegScalingApproved: false,
       estimatedLayout: !filenameLayout,
       message: filenameLayout
           ? '已确认文件名中的 $rows×$columns 网格与相机视角'
@@ -1373,6 +1489,65 @@ class BatchQueueController extends ChangeNotifier {
       ),
     );
     await _tickAfterCurrent();
+  }
+
+  Future<void> approveJpegScaling(String queueId, String itemId) async {
+    final found = _find(queueId, itemId);
+    if (found == null ||
+        (found.item.state != BatchItemState.needsFormatApproval &&
+            found.item.state != BatchItemState.ready)) {
+      return;
+    }
+    final approved = found.item.copyWith(
+      jpegScalingApproved: true,
+      state: BatchItemState.ready,
+      message: '已确认超大 JPEG 可按比例缩小',
+    );
+    await _replaceItem(found.index, approved);
+    final latest = _find(queueId, itemId);
+    final task = latest == null ? null : await _loadTask(latest.item);
+    if (latest != null &&
+        task != null &&
+        task.phase == StitchPhase.completed &&
+        latest.queue.started) {
+      await _exportCompleted(latest.queue, latest.item, task);
+    } else if (latest != null && latest.queue.started) {
+      await tick();
+    }
+  }
+
+  Future<void> setItemExportFormat(
+    String queueId,
+    String itemId,
+    ExportFormat format,
+  ) async {
+    final found = _find(queueId, itemId);
+    if (found == null ||
+        found.item.state == BatchItemState.running ||
+        found.item.state == BatchItemState.exporting ||
+        found.item.state == BatchItemState.completed) {
+      return;
+    }
+    final task = await _loadTask(found.item);
+    if (task == null) return;
+    final updatedTask = task.copyWith(exportFormat: format);
+    await _saveTask(updatedTask);
+    _taskCache[updatedTask.id] = updatedTask;
+    final item = found.item.state == BatchItemState.needsFormatApproval
+        ? found.item.copyWith(
+            state: BatchItemState.ready,
+            message: '输出格式已改为 ${format.label}',
+          )
+        : found.item.copyWith(message: '输出格式已改为 ${format.label}');
+    await _replaceItem(found.index, item);
+    final latest = _find(queueId, itemId);
+    if (latest != null &&
+        latest.queue.started &&
+        updatedTask.phase == StitchPhase.completed) {
+      await _exportCompleted(latest.queue, latest.item, updatedTask);
+    } else if (latest != null && latest.queue.started) {
+      await tick();
+    }
   }
 
   Future<bool> pauseJobByNativeId(String jobId) async {
@@ -2064,7 +2239,7 @@ class BatchQueueController extends ChangeNotifier {
                   lastTickAt: _clock(),
                   progressSamples: samples,
                   progressOperation: operation,
-                  message: '导出整图 ${queue.outputFormat.label}',
+                  message: '导出整图 ${task.exportFormat.label}',
                 ),
               );
             }
@@ -2106,6 +2281,30 @@ class BatchQueueController extends ChangeNotifier {
           }
         }
       }
+    }
+  }
+
+  Future<(int, int)?> _renderedDimensions(StitchTask task) async {
+    try {
+      final manifest = File(p.join(task.outputDirectory, 'manifest.json'));
+      final stat = await manifest.stat();
+      if (stat.type != FileSystemEntityType.file ||
+          stat.size <= 0 ||
+          stat.size > 64 * 1024 * 1024) {
+        return null;
+      }
+      final decoded = jsonDecode(await manifest.readAsString());
+      if (decoded is! Map<String, dynamic> ||
+          decoded['width'] is! int ||
+          decoded['height'] is! int) {
+        return null;
+      }
+      final width = decoded['width'] as int;
+      final height = decoded['height'] as int;
+      if (width <= 0 || height <= 0) return null;
+      return (width, height);
+    } on Object {
+      return null;
     }
   }
 
@@ -2174,6 +2373,25 @@ class BatchQueueController extends ChangeNotifier {
         generation,
       );
       return;
+    }
+    if (task.exportFormat == ExportFormat.jpeg &&
+        !initial.item.jpegScalingApproved) {
+      final dimensions = await _renderedDimensions(task);
+      if (dimensions == null ||
+          dimensions.$1 > jpegMaximumDimension ||
+          dimensions.$2 > jpegMaximumDimension) {
+        await _deferCompletedExport(
+          queue,
+          item,
+          task,
+          BatchItemState.needsFormatApproval,
+          dimensions == null
+              ? '无法读取合成结果尺寸；请选择缩小 JPEG 或改用 JPEG XL 后再导出'
+              : '合成结果 ${dimensions.$1} × ${dimensions.$2} 超出 JPEG 单边 $jpegMaximumDimension 像素上限；请选择缩小 JPEG 或改用 JPEG XL',
+          generation,
+        );
+        return;
+      }
     }
     if (!await _completedExportFitsMemoryBudget(task)) {
       await _deferCompletedExport(
@@ -2252,7 +2470,7 @@ class BatchQueueController extends ChangeNotifier {
       item.id,
       BatchItemState.exporting,
       progress: 0.85,
-      message: '合成完成，正在导出整图 ${queue.outputFormat.label}',
+      message: '合成完成，正在导出整图 ${task.exportFormat.label}',
     );
     if (generation != _generation(item.id)) {
       _inFlight.remove(item.id);
@@ -2275,7 +2493,7 @@ class BatchQueueController extends ChangeNotifier {
       final destination = await _uniqueExportFile(
         output,
         '${item.name}-${task.id}',
-        queue.outputFormat,
+        task.exportFormat,
       );
       if (generation != _generation(item.id)) {
         _inFlight.remove(item.id);
@@ -2400,7 +2618,7 @@ class BatchQueueController extends ChangeNotifier {
           item.id,
           BatchItemState.exporting,
           progress: 0.9,
-          message: '导出整图 ${queue.outputFormat.label}',
+          message: '导出整图 ${task.exportFormat.label}',
         );
       }
     } on NativeJobException catch (exception) {
@@ -2716,7 +2934,7 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> _startReady() async {
-    if (_disposed || !_api.isAvailable) return;
+    if (_disposed || _importing || !_api.isAvailable) return;
     if (requireLargeJobApproval && !resourceConfigurationReady) return;
     if (requireLargeJobApproval && runtimeService != null) {
       try {
@@ -2773,7 +2991,9 @@ class BatchQueueController extends ChangeNotifier {
     final candidates = [
       for (final queue in _queues)
         for (final item in queue.items)
-          if (item.state == BatchItemState.ready &&
+          if (queue.started &&
+              !_deferredQueueStarts.contains(queue.id) &&
+              item.state == BatchItemState.ready &&
               !_inFlight.contains(item.id) &&
               (item.taskId == null || !_deletingTaskIds.contains(item.id)))
             (queue, item),
@@ -2798,6 +3018,19 @@ class BatchQueueController extends ChangeNotifier {
           message: '任务记录丢失',
         );
         continue;
+      }
+      if (task.exportFormat == ExportFormat.jpeg && !item.jpegScalingApproved) {
+        final estimate = estimateOutputDimensions(task);
+        if (estimate != null && estimate.exceedsJpegLimit) {
+          await _replaceState(
+            queue.id,
+            item.id,
+            BatchItemState.needsFormatApproval,
+            message:
+                '估算输出 ${estimate.width} × ${estimate.height} 超出 JPEG 单边 65500 像素上限；请选择缩小 JPEG 或改用 JPEG XL',
+          );
+          continue;
+        }
       }
       if (requireLargeJobApproval &&
           task.needsLargeJobConfirmation &&

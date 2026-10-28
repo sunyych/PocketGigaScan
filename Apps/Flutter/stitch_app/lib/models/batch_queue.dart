@@ -5,6 +5,7 @@ enum BatchItemState {
   pending,
   needsSettings,
   needsApproval,
+  needsFormatApproval,
   skipped,
   ready,
   running,
@@ -27,6 +28,7 @@ class BatchQueueItem {
     this.estimatedLayout = false,
     this.pauseRequested = false,
     this.publishFailed = false,
+    this.jpegScalingApproved = false,
     this.progress = 0,
     this.etaSeconds,
     this.elapsedSeconds = 0,
@@ -50,6 +52,7 @@ class BatchQueueItem {
   /// True when the completed task's private export could not be published to
   /// the chosen folder and the operator can retry publishing from the queue.
   final bool publishFailed;
+  final bool jpegScalingApproved;
   final double progress;
   final int? etaSeconds;
   final int elapsedSeconds;
@@ -68,6 +71,7 @@ class BatchQueueItem {
     bool? estimatedLayout,
     bool? pauseRequested,
     bool? publishFailed,
+    bool? jpegScalingApproved,
     bool clearPublishFailed = false,
     double? progress,
     int? etaSeconds,
@@ -92,6 +96,7 @@ class BatchQueueItem {
     publishFailed: clearPublishFailed
         ? false
         : publishFailed ?? this.publishFailed,
+    jpegScalingApproved: jpegScalingApproved ?? this.jpegScalingApproved,
     progress: progress ?? this.progress,
     etaSeconds: clearEtaSeconds ? null : etaSeconds ?? this.etaSeconds,
     elapsedSeconds: elapsedSeconds ?? this.elapsedSeconds,
@@ -111,6 +116,7 @@ class BatchQueueItem {
     'estimatedLayout': estimatedLayout,
     'pauseRequested': pauseRequested,
     'publishFailed': publishFailed,
+    'jpegScalingApproved': jpegScalingApproved,
     'progress': progress,
     'etaSeconds': etaSeconds,
     'elapsedSeconds': elapsedSeconds,
@@ -135,6 +141,7 @@ class BatchQueueItem {
     estimatedLayout: json['estimatedLayout'] as bool? ?? false,
     pauseRequested: json['pauseRequested'] as bool? ?? false,
     publishFailed: json['publishFailed'] as bool? ?? false,
+    jpegScalingApproved: json['jpegScalingApproved'] as bool? ?? false,
     progress: (json['progress'] as num? ?? 0).toDouble(),
     etaSeconds: json['etaSeconds'] as int?,
     elapsedSeconds: json['elapsedSeconds'] as int? ?? 0,
@@ -170,7 +177,8 @@ class BatchQueue {
     required this.parentDirectory,
     required this.outputDirectory,
     required this.items,
-    this.outputFormat = ExportFormat.tiff,
+    this.outputFormat = ExportFormat.jpeg,
+    this.started = true,
     this.exportDestination,
     this.performanceOptions = const PerformanceOptions(),
     this.refineGridNeighbors = true,
@@ -187,6 +195,9 @@ class BatchQueue {
   final List<BatchQueueItem> items;
   final ExportFormat outputFormat;
 
+  /// Whether this queue has been explicitly started by the operator.
+  final bool started;
+
   /// Filesystem folder on desktop, persisted SAF tree URI on Android.
   final String? exportDestination;
   final PerformanceOptions performanceOptions;
@@ -199,6 +210,7 @@ class BatchQueue {
   BatchQueue copyWith({
     List<BatchQueueItem>? items,
     ExportFormat? outputFormat,
+    bool? started,
     String? exportDestination,
     PerformanceOptions? performanceOptions,
     bool? refineGridNeighbors,
@@ -213,6 +225,7 @@ class BatchQueue {
     outputDirectory: outputDirectory,
     items: items ?? this.items,
     outputFormat: outputFormat ?? this.outputFormat,
+    started: started ?? this.started,
     exportDestination: exportDestination ?? this.exportDestination,
     performanceOptions: performanceOptions ?? this.performanceOptions,
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
@@ -230,6 +243,7 @@ class BatchQueue {
     'outputDirectory': outputDirectory,
     'items': items.map((item) => item.toJson()).toList(),
     'outputFormat': outputFormat.name,
+    'started': started,
     'exportDestination': exportDestination,
     'performanceOptions': performanceOptions.toJson(),
     'refineGridNeighbors': refineGridNeighbors,
@@ -249,6 +263,8 @@ class BatchQueue {
         .map(BatchQueueItem.fromJson)
         .toList(),
     outputFormat: ExportFormat.fromSavedValue(json['outputFormat']),
+    // Queues saved before the explicit start control were already auto-run.
+    started: json['started'] as bool? ?? true,
     exportDestination: json['exportDestination'] as String?,
     performanceOptions: PerformanceOptions.fromJson(
       json['performanceOptions'] as Map<String, Object?>?,

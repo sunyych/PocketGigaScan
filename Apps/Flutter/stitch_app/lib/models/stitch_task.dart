@@ -47,6 +47,7 @@ class StitchTask {
     this.pauseReason,
     this.centralReference,
     this.exportPath,
+    this.previewThumbnailPath,
     this.performanceOptions = const PerformanceOptions(),
     this.exportFormat = ExportFormat.png,
     this.autoExportOnCompletion = false,
@@ -92,6 +93,7 @@ class StitchTask {
   final String? pauseReason;
   final GridCell? centralReference;
   final String? exportPath;
+  final String? previewThumbnailPath;
   final PerformanceOptions performanceOptions;
   final ExportFormat exportFormat;
   final bool autoExportOnCompletion;
@@ -111,6 +113,7 @@ class StitchTask {
   final String? exportDirectory;
   final String? publishedExportPath;
   final String? publishError;
+
   /// Prevents repeatedly offering the same automatic registration repair.
   final bool registrationRepairOffered;
 
@@ -180,6 +183,7 @@ class StitchTask {
     GridCell? centralReference,
     bool clearCentralReference = false,
     String? exportPath,
+    String? previewThumbnailPath,
     PerformanceOptions? performanceOptions,
     ExportFormat? exportFormat,
     bool? autoExportOnCompletion,
@@ -233,6 +237,7 @@ class StitchTask {
         ? null
         : centralReference ?? this.centralReference,
     exportPath: exportPath ?? this.exportPath,
+    previewThumbnailPath: previewThumbnailPath ?? this.previewThumbnailPath,
     performanceOptions: performanceOptions ?? this.performanceOptions,
     exportFormat: exportFormat ?? this.exportFormat,
     autoExportOnCompletion:
@@ -294,6 +299,7 @@ class StitchTask {
         ? null
         : {'row': centralReference!.row, 'column': centralReference!.column},
     'exportPath': exportPath,
+    'previewThumbnailPath': previewThumbnailPath,
     'performanceOptions': performanceOptions.toJson(),
     'exportFormat': exportFormat.name,
     'autoExportOnCompletion': autoExportOnCompletion,
@@ -374,6 +380,7 @@ class StitchTask {
       exportPath: legacyExportCheckpoint == savedExportPath
           ? null
           : savedExportPath,
+      previewThumbnailPath: json['previewThumbnailPath'] as String?,
       performanceOptions: PerformanceOptions.fromJson(
         json['performanceOptions'] as Map<String, Object?>?,
       ),

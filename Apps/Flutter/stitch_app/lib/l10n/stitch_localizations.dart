@@ -139,12 +139,79 @@ class StitchLocalizations {
       'published' => 'published',
       'publish-failed' => 'publish-failed',
       'prune-conflicting-neighbors' => 'prune-conflicting-neighbors',
+      'native-transition' => 'native-transition',
+      'transition' => 'transition',
+      'started' => 'started',
+      'finished' => 'finished',
+      'export-started' => 'export-started',
+      'export-finished' => 'export-finished',
       'done' => 'done',
       'paused' => 'paused',
       'cancelled' => 'cancelled',
-      _ => stage,
+      _ => 'unknown-processing-stage',
     });
   }
+
+  String get unknownProcessingStage => text('unknown-processing-stage');
+  String get unknownTimelineEvent => text('unknown-timeline-event');
+
+  String timelineEventKind(String kind) => text(switch (kind) {
+    'started' => 'started',
+    'finished' => 'finished',
+    'export-started' => 'export-started',
+    'export-finished' => 'export-finished',
+    'transition' => 'transition',
+    'native-transition' => 'native-transition',
+    'legacy' => 'legacy-timeline-event',
+    _ => 'unknown-timeline-event',
+  });
+
+  String get operationFailedSummary =>
+      text('Operation failed. See technical details below.');
+
+  ({String summary, String? technicalDetails}) statusMessageParts(
+    String source,
+  ) {
+    final accessDenied = localizedTaskDirectoryAccessDeniedSummary(source);
+    if (accessDenied != null) {
+      return (
+        summary: accessDenied,
+        technicalDetails: taskDirectoryAccessDeniedTechnicalDetails(source),
+      );
+    }
+
+    final split = _firstMessageDelimiter(source);
+    if (split > 0 && split < source.length - 1) {
+      final prefix = source.substring(0, split + 1);
+      final detail = source.substring(split + 1).trim();
+      final knownPrefix = _en.containsKey(prefix) || _zh.containsKey(prefix);
+      if (knownPrefix) {
+        return (summary: text(prefix).trimRight(), technicalDetails: detail);
+      }
+    }
+
+    final translated = text(source);
+    if (translated != source) {
+      return (summary: translated, technicalDetails: null);
+    }
+    if (_looksTechnical(source)) {
+      return (summary: operationFailedSummary, technicalDetails: source);
+    }
+    return (summary: source, technicalDetails: null);
+  }
+
+  int _firstMessageDelimiter(String source) {
+    final fullWidth = source.indexOf('：');
+    final ascii = source.indexOf(':');
+    if (fullWidth < 0) return ascii;
+    if (ascii < 0) return fullWidth;
+    return fullWidth < ascii ? fullWidth : ascii;
+  }
+
+  bool _looksTechnical(String source) => RegExp(
+    r'(?:Exception|Error|errno\s*=|HRESULT|\b[A-Z][A-Z0-9_]{2,}:|[A-Za-z]:\\|\bfailed\b|\bfailure\b)',
+    caseSensitive: false,
+  ).hasMatch(source);
 
   String timelineTotal(String elapsed, {required bool pausedIncluded}) =>
       isChinese
@@ -380,6 +447,22 @@ class StitchLocalizations {
       '$photoCount ${isChinese ? '张' : 'photos'} · '
       '${phaseLabel(phase)} · ${formatLabel(format)}';
 
+  String gridSummary({
+    required int rows,
+    required int columns,
+    required int photoCount,
+    required String dimensions,
+  }) => isChinese
+      ? '$rows 行 × $columns 列 · $photoCount 张 · $dimensions'
+      : '$rows rows × $columns columns · $photoCount photos · $dimensions';
+
+  String photoGridMappingTitle({
+    required int mappedPhotoCount,
+    required int totalPhotoCount,
+  }) => isChinese
+      ? '照片与网格映射（$mappedPhotoCount/$totalPhotoCount）'
+      : 'Photo-to-grid mapping ($mappedPhotoCount/$totalPhotoCount)';
+
   String formatLabel(String format) {
     final normalized = format.trim().toLowerCase();
     if (normalized.startsWith('jpeg xl') ||
@@ -549,6 +632,67 @@ class StitchLocalizations {
       '',
     );
     if (unwrapped != source) return text(unwrapped);
+    final jpegLimit = RegExp(
+      r'^(估算输出|合成结果)为 (\d+) × (\d+) 像素。JPEG 单边上限为 (\d+) 像素，选择 JPEG 会按比例缩小。(估算可能与实际投影尺寸不同。)?$',
+    ).firstMatch(source);
+    if (jpegLimit != null) {
+      final estimate = jpegLimit[1] == '估算输出';
+      final lead = estimate ? 'Estimated output' : 'Rendered output';
+      final caveat = jpegLimit[5] == null
+          ? ''
+          : ' The estimate may differ from the rendered projection.';
+      return isChinese
+          ? source
+          : '$lead is ${jpegLimit[2]} × ${jpegLimit[3]} pixels. The JPEG edge limit is ${jpegLimit[4]} pixels, so JPEG will be proportionally scaled down.$caveat';
+    }
+    final jpegQueueLimit = RegExp(
+      r'^(估算输出|合成结果) (\d+) × (\d+) 超出 JPEG 单边 (\d+) 像素上限；请选择缩小 JPEG 或改用 JPEG XL$',
+    ).firstMatch(source);
+    if (jpegQueueLimit != null) {
+      return isChinese
+          ? source
+          : '${jpegQueueLimit[1] == '估算输出' ? 'Estimated output' : 'Rendered output'} ${jpegQueueLimit[2]} × ${jpegQueueLimit[3]} exceeds the JPEG edge limit of ${jpegQueueLimit[4]} pixels. Choose scaled JPEG or JPEG XL.';
+    }
+    final autoLockCount = RegExp(r'^自动锁定超标关系涉及的 (\d+) 张照片$').firstMatch(source);
+    if (autoLockCount != null) {
+      return isChinese
+          ? source
+          : 'Auto-lock ${autoLockCount[1]} photos involved in over-limit matches';
+    }
+    final selectedCount = RegExp(r'^已选 (\d+) 项$').firstMatch(source);
+    if (selectedCount != null) {
+      return isChinese ? source : '${selectedCount[1]} selected';
+    }
+    final deletedCount = RegExp(
+      r'^已删除 (\d+) 条任务记录；原片、瓦片和导出照片已保留。$',
+    ).firstMatch(source);
+    if (deletedCount != null) {
+      return isChinese
+          ? source
+          : 'Deleted ${deletedCount[1]} task record(s); source photos, tiles, and exported images were kept.';
+    }
+    final partialDelete = RegExp(
+      r'^已删除 (\d+) 条任务记录；(\d+) 条未删除：(.*)$',
+    ).firstMatch(source);
+    if (partialDelete != null) {
+      return isChinese
+          ? source
+          : 'Deleted ${partialDelete[1]} task record(s); ${partialDelete[2]} could not be deleted: ${partialDelete[3]}';
+    }
+    final deleteSelected = RegExp(
+      r'^将删除 (\d+) 条任务记录和队列引用。原片、渲染瓦片及已导出照片都会保留。$',
+    ).firstMatch(source);
+    if (deleteSelected != null) {
+      return isChinese
+          ? source
+          : 'This will delete ${deleteSelected[1]} task record(s) and queue references. Source photos, rendered tiles, and exported images will be kept.';
+    }
+    final changedFormat = RegExp(r'^输出格式已改为 (.+)$').firstMatch(source);
+    if (changedFormat != null) {
+      return isChinese
+          ? source
+          : 'Output format changed to ${formatLabel(changedFormat[1]!)}';
+    }
     final accessDenied = localizedTaskDirectoryAccessDeniedSummary(source);
     if (accessDenied != null) return accessDenied;
     if (source.startsWith(
@@ -1788,9 +1932,47 @@ class StitchLocalizations {
     '检查像素来源': 'Inspect pixel source',
     '模型随 Windows 和 macOS 程序附带，可离线使用。':
         'The model is included with the Windows and macOS apps and works offline.',
+    'Operation failed. See technical details below.':
+        'Operation failed. See technical details below.',
+    'unknown-processing-stage': 'Other processing stage',
+    'unknown-timeline-event': 'Other task event',
+    'legacy-timeline-event': 'Legacy task event',
+    'native-transition': 'Native task transition',
+    'transition': 'State changed',
+    'started': 'Stitching started',
+    'finished': 'Stitching finished',
+    'export-started': 'Export started',
+    'export-finished': 'Export finished',
+    'JPEG 边长超过限制': 'JPEG edge limit exceeded',
+    '需要确认 JPEG 输出尺寸': 'JPEG output size needs confirmation',
+    '改用 JPEG XL': 'Use JPEG XL',
+    '继续并缩小 JPEG': 'Continue with scaled JPEG',
+    '批量删除本地任务？': 'Delete selected local tasks?',
+    '开始队列': 'Start queue',
+    '重新扫描此母目录': 'Rescan this parent folder',
+    '没有发现新的子目录。': 'No new subfolders found.',
+    '无法启动队列：': 'Could not start queue: ',
+    '重新扫描失败：': 'Queue rescan failed: ',
+    '任务选择': 'Task selection',
+    '全选可删除任务': 'Select all deletable tasks',
+    '删除所选任务': 'Delete selected tasks',
+    '退出选择模式': 'Exit selection mode',
+    '选择任务': 'Select tasks',
+    '已确认超大 JPEG 可按比例缩小': 'Confirmed that oversized JPEG may be scaled down',
+    '错误：': 'Error: ',
   };
 
   static const _zh = <String, String>{
+    'Operation failed. See technical details below.': '操作失败；请展开查看技术详情。',
+    'unknown-processing-stage': '其他处理阶段',
+    'unknown-timeline-event': '其他任务事件',
+    'legacy-timeline-event': '旧任务事件',
+    'native-transition': '原生任务状态变化',
+    'transition': '状态变化',
+    'started': '合成已开始',
+    'finished': '合成已完成',
+    'export-started': '整图导出已开始',
+    'export-finished': '整图导出已完成',
     '不匹配': '不匹配',
     '上次诊断，已按网格锁定，待重算': '上次诊断，已按网格锁定，待重算',
     '已选照片：': '已选照片：',

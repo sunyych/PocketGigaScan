@@ -30,6 +30,7 @@ class BatchImportedFolder {
     required this.cameraVerified,
     required this.fovDegrees,
     required this.cameraProfileId,
+    this.previewThumbnailPath,
   });
   final List<ImportedPhoto> photos;
   final String inputDirectory;
@@ -40,6 +41,7 @@ class BatchImportedFolder {
   final bool cameraVerified;
   final double? fovDegrees;
   final String? cameraProfileId;
+  final String? previewThumbnailPath;
 }
 
 class BatchFolderImporter {
@@ -122,6 +124,43 @@ class BatchFolderImporter {
       if (await input.exists()) throw const ImportFailure('任务输入目录已存在，拒绝覆盖');
       await input.create();
       createdInput = true;
+      String? previewThumbnailPath;
+      final dwarfFolder = p
+          .basename(snapshot.directory)
+          .toLowerCase()
+          .startsWith('dwarf_');
+      final candidates = <File>[];
+      final downloadedPreview = File(
+        p.join(snapshot.directory, '_metadata', 'camera-thumbnail.jpg'),
+      );
+      if (await FileSystemEntity.type(
+            p.dirname(downloadedPreview.path),
+            followLinks: false,
+          ) ==
+          FileSystemEntityType.directory) {
+        candidates.add(downloadedPreview);
+      }
+      if (dwarfFolder) {
+        candidates.addAll([
+          for (final name in const [
+            'panorama_thumbnail.jpg',
+            'panorama_thumbnail.jpeg',
+            'panorarma_thumbnail.jpg',
+            'panorarma_thumbnail.jpeg',
+          ])
+            File(p.join(snapshot.directory, name)),
+        ]);
+      }
+      for (final candidate in candidates) {
+        if (await FileSystemEntity.type(candidate.path, followLinks: false) !=
+            FileSystemEntityType.file) {
+          continue;
+        }
+        final preview = File(p.join(taskDirectory, 'camera-thumbnail.jpg'));
+        await candidate.copy(preview.path);
+        previewThumbnailPath = preview.path;
+        break;
+      }
       final photos = <ImportedPhoto>[];
       for (var index = 0; index < files.length; index++) {
         final source = files[index];
@@ -195,6 +234,7 @@ class BatchFolderImporter {
         cameraVerified: dwarf,
         fovDegrees: fov,
         cameraProfileId: dwarf ? 'dwarf3-tele-nominal-150mm' : null,
+        previewThumbnailPath: previewThumbnailPath,
       );
     } on Object {
       if (createdInput && await input.exists()) {

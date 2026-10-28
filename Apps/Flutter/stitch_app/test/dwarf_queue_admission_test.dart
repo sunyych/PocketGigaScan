@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:stitch_app/models/dwarf_download.dart';
+import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/batch_queue_repository.dart';
 import 'package:stitch_app/services/dwarf_download_service.dart';
@@ -31,6 +32,8 @@ const _jpeg = <int>[
 ];
 
 class _NoopJobApi implements JobApi {
+  int startCalls = 0;
+
   @override
   bool get isAvailable => true;
   @override
@@ -58,7 +61,11 @@ class _NoopJobApi implements JobApi {
     String outputDirectory, {
     required int memoryBudgetMiB,
     required int workers,
-  }) async => const {};
+  }) async {
+    startCalls++;
+    return const {};
+  }
+
   @override
   Future<Map<String, Object?>> status(String jobId) async => const {};
 }
@@ -73,9 +80,10 @@ void main() {
   late DwarfDownloadBatch completeBatch;
   late File manifestFile;
   late String validManifest;
+  late _NoopJobApi jobApi;
 
   BatchQueueController newController() => BatchQueueController(
-    api: _NoopJobApi(),
+    api: jobApi,
     queueRepository: queues,
     taskRepository: tasks,
   );
@@ -112,6 +120,7 @@ void main() {
     tasks = TaskRepository(
       rootDirectory: Directory(p.join(temporary.path, 'tasks')),
     );
+    jobApi = _NoopJobApi();
     controller = newController();
   });
 
@@ -133,6 +142,10 @@ void main() {
       expect(controller.queues, hasLength(1));
       expect(controller.queues.single.items, hasLength(1));
       expect(controller.queues.single.items.single.name, 'Panorama 01');
+      expect(controller.queues.single.started, isFalse);
+      expect(controller.queues.single.outputFormat, ExportFormat.jpeg);
+      await Future<void>.delayed(Duration.zero);
+      expect(jobApi.startCalls, 0);
       expect(
         controller.queues.single.items.single.sourceDirectory,
         completeBatch.directory,

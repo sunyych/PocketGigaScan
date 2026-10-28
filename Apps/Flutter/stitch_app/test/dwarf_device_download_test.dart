@@ -193,6 +193,7 @@ void main() {
               {
                 'fileName': 'DWARF_PANORAMA_01',
                 'filePath': '/DWARF3/Panoramas/Thumbnail/DWARF_PANORAMA_01.jpg',
+                'thumbnailPath': '/DWARF3/Panoramas/Thumbnail/Panorama_01.jpg',
                 'fileSize': 0,
                 'mediaType': 5,
               },
@@ -254,6 +255,10 @@ void main() {
       expect(deviceInfo.sdCardAvailable, isTrue);
       final panoramas = await client.listPanoramas();
       expect(panoramas, hasLength(1));
+      expect(
+        panoramas.single.thumbnailUrl,
+        'http://127.0.0.1:${server.port}/DWARF3/Panoramas/Thumbnail/Panorama_01.jpg',
+      );
       expect(requestsUsedExpectedHeaders, isTrue);
       final originals = await client.listOriginals(panoramas.single);
       expect(originals.map((source) => source.name), [
@@ -349,6 +354,63 @@ void main() {
         sourceCheck.close(force: true);
       }
       expect(sourceMethods, ['GET', 'GET']);
+    },
+  );
+
+  test(
+    'stores camera thumbnail separately from validated original files',
+    () async {
+      server.listen((request) async {
+        request.response.headers.contentType = ContentType('image', 'jpeg');
+        request.response.contentLength = _jpeg.length;
+        request.response.add(_jpeg);
+        await request.response.close();
+      });
+      final service = DwarfDownloadService(
+        rootDirectory: p.join(temp.path, 'downloads'),
+      );
+      addTearDown(() => service.close(force: true));
+      final batchId = 'DWARF3|P01';
+      final sourceUrl =
+          'http://127.0.0.1:${server.port}/DWARF3/Panoramas/P01/0_0.jpg';
+      final batch = await service.downloadBatch(
+        batchId: batchId,
+        originals: [
+          DwarfOriginal(
+            id: 'source',
+            name: '0_0.jpg',
+            url: sourceUrl,
+            size: _jpeg.length,
+          ),
+        ],
+      );
+      final previewPath = await service.downloadPanoramaThumbnail(
+        batchId: batchId,
+        url:
+            'http://127.0.0.1:${server.port}/DWARF3/Panoramas/P01/panorama_thumbnail.jpg',
+        trustedHost: '127.0.0.1',
+        trustedPort: server.port,
+      );
+
+      expect(batch.isComplete, isTrue);
+      expect(p.isWithin(batch.directory, previewPath), isTrue);
+      expect(p.basename(p.dirname(previewPath)), '_metadata');
+      expect(await File(previewPath).readAsBytes(), _jpeg);
+      final restored = await service.loadBatch(batchId);
+      expect(restored?.isComplete, isTrue);
+      expect(restored?.files, hasLength(1));
+      expect(restored!.files.single.original.name, '0_0.jpg');
+
+      await expectLater(
+        service.downloadPanoramaThumbnail(
+          batchId: batchId,
+          url: 'http://example.com/DWARF3/Panoramas/P01/panorama_thumbnail.jpg',
+          trustedHost: '127.0.0.1',
+          trustedPort: server.port,
+        ),
+        throwsA(isA<FormatException>()),
+      );
+      expect((await service.loadBatch(batchId))?.isComplete, isTrue);
     },
   );
 

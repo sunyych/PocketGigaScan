@@ -336,6 +336,20 @@ class _DwarfDevicePageState extends State<DwarfDevicePage>
         } finally {
           _activeBatchIds.remove(id);
         }
+        final thumbnailUrl = panorama.thumbnailUrl;
+        final client = _client;
+        if (batch.isComplete && thumbnailUrl != null && client != null) {
+          try {
+            await _downloader!.downloadPanoramaThumbnail(
+              batchId: id,
+              url: thumbnailUrl,
+              trustedHost: client.host,
+              trustedPort: client.mediaPort,
+            );
+          } on Object {
+            // Previews are optional and must not block original imports.
+          }
+        }
         _batches[id] = batch;
         if (batch.isComplete) _importSelected.add(id);
         if (mounted) {

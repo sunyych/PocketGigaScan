@@ -240,13 +240,25 @@ class _MemoryTaskRepository extends TaskRepository {
 }
 
 Future<Finder> _visibleAfterScroll(WidgetTester tester, Finder target) async {
-  await tester.ensureVisible(target);
+  await tester.scrollUntilVisible(
+    target,
+    300,
+    scrollable: _mainPageScrollable(),
+  );
   await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
   await tester.pump();
   final visible = target.hitTestable();
   expect(visible, findsOneWidget);
   return visible;
 }
+
+Finder _mainPageScrollable() => find
+    .descendant(
+      of: find.byKey(const Key('stitch-main-scroll')),
+      matching: find.byType(Scrollable),
+    )
+    .first;
 
 Future<Finder> _lazyChildVisibleAfterScroll(
   WidgetTester tester,
@@ -256,17 +268,29 @@ Future<Finder> _lazyChildVisibleAfterScroll(
   await tester.scrollUntilVisible(
     target,
     delta,
-    scrollable: find
-        .descendant(
-          of: find.byType(ListView).last,
-          matching: find.byType(Scrollable),
-        )
-        .first,
+    scrollable: _mainPageScrollable(),
   );
   await tester.pump(const Duration(milliseconds: 350));
+  await tester.ensureVisible(target);
+  await tester.pump();
   final visible = target.hitTestable();
   expect(visible, findsOneWidget);
   return visible;
+}
+
+Future<void> _expandArrangementOptions(WidgetTester tester) async {
+  final title = find.byKey(const Key('stitch-arrangement-expansion'));
+  await tester.scrollUntilVisible(
+    title,
+    300,
+    scrollable: _mainPageScrollable(),
+  );
+  await tester.ensureVisible(title);
+  await tester.pump();
+  expect(title.hitTestable(), findsOneWidget);
+  await tester.tap(title);
+  await tester.pump(const Duration(milliseconds: 350));
+  await tester.pump();
 }
 
 void main() {
@@ -716,8 +740,21 @@ void main() {
       find.byKey(const Key('registration-repair-confirmation')),
       findsOneWidget,
     );
-    expect(find.textContaining('photo-0.jpg ↔ photo-1.jpg'), findsOneWidget);
-    expect(find.textContaining('photo-1.jpg ↔ photo-2.jpg'), findsOneWidget);
+    final dialog = find.byKey(const Key('registration-repair-confirmation'));
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('photo-0.jpg ↔ photo-1.jpg'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.textContaining('photo-1.jpg ↔ photo-2.jpg'),
+      ),
+      findsOneWidget,
+    );
     await tester.tap(find.byKey(const Key('registration-repair-accept')));
     await tester.pump();
     for (
@@ -845,17 +882,33 @@ void main() {
       find.byKey(const Key('registration-repair-confirmation')),
       findsOneWidget,
     );
+    final repairDialog = find.byKey(
+      const Key('registration-repair-confirmation'),
+    );
     expect(
-      find.text('Adjacent photo registration errors are over the limit'),
+      find.descendant(
+        of: repairDialog,
+        matching: find.text(
+          'Adjacent photo registration errors are over the limit',
+        ),
+      ),
       findsOneWidget,
     );
     expect(
-      find.text('one.jpg ↔ two.jpg · RMS 24.00 px / limit 20.00 px'),
+      find.descendant(
+        of: repairDialog,
+        matching: find.text(
+          'one.jpg ↔ two.jpg · RMS 24.00 px / limit 20.00 px',
+        ),
+      ),
       findsOneWidget,
     );
     expect(
-      find.text(
-        'Lock the following problem positions to the capture grid and restitch now? The original task and photos will be kept.',
+      find.descendant(
+        of: repairDialog,
+        matching: find.text(
+          'Lock the following problem positions to the capture grid and restitch now? The original task and photos will be kept.',
+        ),
       ),
       findsOneWidget,
     );
@@ -950,7 +1003,55 @@ void main() {
         expect(progress.value, 0, reason: '$language imported task');
         expect(
           find.text(
-            language == 'zh' ? 'ready · 0% · 已导入' : 'ready · 0% · Imported',
+            language == 'zh'
+                ? '等待开始 · 0% · 已导入'
+                : 'Ready to start · 0% · Imported',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            language == 'zh' ? '照片与网格映射（1/1）' : 'Photo-to-grid mapping (1/1)',
+          ),
+          findsOneWidget,
+        );
+
+        final unknownStage = imported.copyWith(stage: 'future-stage');
+        final unknownRepository = _MemoryTaskRepository();
+        await tester.pumpWidget(
+          LumiaStitchApp(
+            key: ValueKey('$language-unknown-stage'),
+            locale: Locale(language),
+            home: StitchHomePage(
+              initialTask: unknownStage,
+              jobApi: api,
+              repository: unknownRepository,
+              batchQueueController: EmptyBatchQueueController(
+                api: api,
+                taskRepository: unknownRepository,
+              ),
+              foregroundWorkLock: _TestForegroundLock(),
+              mobileOverride: false,
+            ),
+          ),
+        );
+        await tester.pump(const Duration(seconds: 1));
+        expect(
+          find.text(
+            language == 'zh'
+                ? '其他处理阶段 · 0% · 已导入'
+                : 'Other processing stage · 0% · Imported',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(
+          find.text(language == 'zh' ? '合成详情' : 'Stitch details'),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is SelectableText && widget.data == 'stage=future-stage',
           ),
           findsOneWidget,
         );
@@ -1163,6 +1264,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 350));
+    await _expandArrangementOptions(tester);
     final thresholdExpansion = await _visibleAfterScroll(
       tester,
       find.byKey(const Key('registration-threshold-expansion')),
@@ -1236,6 +1338,7 @@ void main() {
     loadGate.complete();
     await tester.pump();
     await tester.pump();
+    await _expandArrangementOptions(tester);
     final expansion = await _visibleAfterScroll(
       tester,
       find.byKey(const Key('registration-threshold-expansion')),
@@ -1264,6 +1367,7 @@ void main() {
     await _lazyChildVisibleAfterScroll(
       tester,
       find.textContaining('Photo-to-grid mapping (1/1)'),
+      delta: -300,
     );
     expect(find.textContaining('Photo-to-grid mapping (1/1)'), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -1371,6 +1475,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
+      await _expandArrangementOptions(tester);
       final thresholdExpansion = await _visibleAfterScroll(
         tester,
         find.byKey(const Key('registration-threshold-expansion')),
@@ -1453,6 +1558,7 @@ void main() {
     expect(tiffChoice, findsOneWidget);
     await tester.tap(tiffChoice);
     await tester.pump();
+    await _expandArrangementOptions(tester);
     final qualityExpansion = await _visibleAfterScroll(
       tester,
       find.byKey(const Key('stitch-quality-expansion')),
@@ -1562,6 +1668,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    await _expandArrangementOptions(tester);
 
     final tile = tester.widget<SwitchListTile>(
       find.byKey(const Key('force-grid-option')),
@@ -1642,6 +1749,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    await _expandArrangementOptions(tester);
     final orbOption = await _visibleAfterScroll(
       tester,
       find.byKey(const Key('orb-features-option')),
@@ -1708,6 +1816,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 100));
+      await _expandArrangementOptions(tester);
       final saveButton = await _visibleAfterScroll(tester, find.text('保存任务设置'));
       await tester.tap(saveButton);
       await tester.pump();
@@ -1792,6 +1901,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 100));
+    await _expandArrangementOptions(tester);
 
     final lockedTile = tester.widget<SwitchListTile>(
       find.byKey(const Key('force-grid-option')),
@@ -1818,4 +1928,74 @@ void main() {
     expect(fresh?.localTextureWarp, isFalse);
     expect(failed.outputDirectory, '${temp.path}/old-output');
   });
+
+  testWidgets(
+    'completed task errors and publish failures keep a red rail badge',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      StitchTask task(String id, {String? error, String? publishError}) =>
+          StitchTask(
+            id: id,
+            createdAt: DateTime.utc(2026),
+            sourceDirectory: 'input-$id',
+            outputDirectory: 'output-$id',
+            photos: const [],
+            grid: const GridOptions(),
+            horizontalFovDegrees: 45,
+            memoryBudgetMiB: 512,
+            workers: 2,
+            phase: StitchPhase.completed,
+            error: error,
+            publishError: publishError,
+          );
+
+      final completedWithError = task(
+        'completed-with-error',
+        error: 'export failed',
+      );
+      final publishFailed = task(
+        'publish-failed',
+        publishError: 'could not copy export',
+      );
+      final normal = task('normal-completed');
+      final repository = _MemoryTaskRepository()
+        ..records[completedWithError.id] = completedWithError
+        ..records[publishFailed.id] = publishFailed
+        ..records[normal.id] = normal;
+
+      await tester.pumpWidget(
+        _EnglishTestApp(
+          home: StitchHomePage(
+            initialTask: completedWithError,
+            jobApi: _WidgetJobApi(),
+            repository: repository,
+            batchQueueController: EmptyBatchQueueController(
+              api: _WidgetJobApi(),
+              taskRepository: repository,
+            ),
+            foregroundWorkLock: _TestForegroundLock(),
+            mobileOverride: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      for (final taskId in [completedWithError.id, publishFailed.id]) {
+        final marker = find.byKey(Key('task-thumbnail-failure-$taskId'));
+        expect(marker, findsOneWidget);
+        final avatar = tester.widget<CircleAvatar>(
+          find.descendant(of: marker, matching: find.byType(CircleAvatar)),
+        );
+        expect(avatar.backgroundColor, Colors.red);
+      }
+      expect(
+        find.byKey(Key('task-thumbnail-failure-${normal.id}')),
+        findsNothing,
+      );
+    },
+  );
 }

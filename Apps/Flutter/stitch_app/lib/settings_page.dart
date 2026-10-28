@@ -145,7 +145,12 @@ class _SettingsPageState extends State<SettingsPage> {
                           .toList(),
                       onChanged: (v) {
                         if (v != null) {
-                          widget.controller.update(s.copyWith(exportFormat: v));
+                          widget.controller.update(
+                            s.copyWith(
+                              exportFormat: v,
+                              exportFormatExplicitlySet: true,
+                            ),
+                          );
                         }
                       },
                     ),

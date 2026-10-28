@@ -112,6 +112,39 @@ void main() {
   });
 
   test(
+    'imports downloaded DWARF preview as task metadata, not a source photo',
+    () async {
+      final child = Directory(
+        '${parent.path}${Platform.pathSeparator}DWARF_005',
+      )..createSync();
+      final metadata = Directory(
+        '${child.path}${Platform.pathSeparator}_metadata',
+      )..createSync();
+      await _writePhoto(child, '1.jpg', width: 100, height: 80);
+      await _writePhoto(metadata, 'camera-thumbnail.jpg', width: 10, height: 8);
+
+      final source = (await importer.snapshot(parent.path)).single;
+      expect(source.files.map((file) => file.uri.pathSegments.last), ['1.jpg']);
+      final taskDirectory =
+          '${temporary.path}${Platform.pathSeparator}offline-task';
+      final imported = await importer.importFolder(source, taskDirectory);
+
+      expect(imported.photos, hasLength(1));
+      expect(imported.photos.single.originalName, '1.jpg');
+      expect(imported.previewThumbnailPath, isNotNull);
+      expect(
+        imported.previewThumbnailPath,
+        '$taskDirectory${Platform.pathSeparator}camera-thumbnail.jpg',
+      );
+      expect(await File(imported.previewThumbnailPath!).exists(), isTrue);
+      expect(
+        imported.photos.single.storedPath,
+        isNot(imported.previewThumbnailPath),
+      );
+    },
+  );
+
+  test(
     'filters thumbnails from manually constructed snapshots on retry',
     () async {
       final child = Directory(

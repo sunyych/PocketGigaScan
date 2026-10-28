@@ -6,6 +6,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/app_settings.dart';
+import '../models/stitch_quality.dart';
 
 class SettingsRepository {
   SettingsRepository({this.file, this.defaults = const AppSettings()});
@@ -30,16 +31,34 @@ class SettingsRepository {
           try {
             await backup.rename(target.path);
           } catch (_) {}
-          return AppSettings.decode(
+          return _decodeSaved(
             await (await target.exists() ? target : backup).readAsString(),
           );
         }
         return defaults;
       }
-      return AppSettings.decode(await target.readAsString());
+      final saved = await target.readAsString();
+      return _decodeSaved(saved);
     } catch (_) {
       return defaults;
     }
+  }
+
+  Future<AppSettings> _decodeSaved(String saved) async {
+    final decoded = AppSettings.decode(saved);
+    final raw = (jsonDecode(saved) as Map).cast<String, Object?>();
+    final oldSchema = (raw['version'] as num? ?? 1).toInt() < 2;
+    // The old desktop default was TIFF and was not tagged as a user choice.
+    // Migrate that one legacy default once; other saved formats stay intact.
+    if (oldSchema &&
+        !decoded.exportFormatExplicitlySet &&
+        decoded.exportFormat == ExportFormat.tiff &&
+        defaults.exportFormat == ExportFormat.jpeg) {
+      final migrated = decoded.copyWith(exportFormat: ExportFormat.jpeg);
+      await save(migrated);
+      return migrated;
+    }
+    return decoded;
   }
 
   Future<void> save(AppSettings settings) {

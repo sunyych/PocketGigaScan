@@ -32,6 +32,8 @@ import 'services/scene_model_service.dart';
 import 'services/registration_issues.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
+import 'services/task_thumbnail_service.dart';
+import 'services/jpeg_dimension_estimator.dart';
 import 'services/task_record_service.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'l10n/stitch_localizations.dart';
@@ -43,6 +45,8 @@ import 'models/stitch_timeline.dart';
 import 'widgets/stitching_log.dart';
 import 'widgets/scene_model_dialog.dart';
 import 'widgets/photo_grid_issues.dart';
+
+enum _JpegDimensionChoice { keepScaledJpeg, useJpegXl }
 
 void main() => runApp(const LumiaStitchApp());
 
@@ -189,6 +193,7 @@ class StitchHomePage extends StatefulWidget {
 class _StitchHomePageState extends State<StitchHomePage>
     with WidgetsBindingObserver {
   late final _repository = widget.repository ?? TaskRepository();
+  late final TaskThumbnailService _thumbnailService = TaskThumbnailService();
   late final bool _android = widget.androidOverride ?? Platform.isAndroid;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
@@ -259,7 +264,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   PerformanceOptions _performanceOptions = const PerformanceOptions();
   ExportFormat _exportFormat = Platform.isAndroid || Platform.isIOS
       ? ExportFormat.png
-      : ExportFormat.tiff;
+      : ExportFormat.jpeg;
   bool _refineGridNeighbors = !(Platform.isAndroid || Platform.isIOS);
   SeamBlendMode _seamBlendMode = Platform.isAndroid || Platform.isIOS
       ? SeamBlendMode.feather
@@ -270,6 +275,8 @@ class _StitchHomePageState extends State<StitchHomePage>
   double _maxEdgeReprojectionRmsPixels = 12;
   List<GridCell> _mappingCells = const [];
   Set<String> _selectedPhotoPaths = {};
+  bool _taskSelectionMode = false;
+  Set<String> _selectedTaskIds = {};
   List<RegistrationIssue> _registrationIssues = const [];
   int _registrationIssueGeneration = 0;
   Timer? _registrationRepairPromptTimer;
@@ -305,7 +312,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   AppSettings get _appSettings =>
       widget.settingsController?.settings ??
       AppSettings(
-        exportFormat: _mobile ? ExportFormat.png : ExportFormat.tiff,
+        exportFormat: _mobile ? ExportFormat.png : ExportFormat.jpeg,
         refineGridNeighbors: _android,
         seamBlendMode: _mobile ? SeamBlendMode.feather : SeamBlendMode.deghost,
         performance: _performanceOptions,
@@ -786,8 +793,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       await _startOrResume(resume: false);
     } on Object catch (error) {
       if (mounted &&
-          (_task?.id == taskId ||
-              (copyId != null && _task?.id == copyId))) {
+          (_task?.id == taskId || (copyId != null && _task?.id == copyId))) {
         setState(() {
           _busy = false;
           _message =
@@ -920,6 +926,23 @@ class _StitchHomePageState extends State<StitchHomePage>
           issue.toPhotoPath,
       };
     });
+  }
+
+  Set<String> _registrationIssuePhotoPaths(StitchTask task) {
+    final current = task.photos.map((photo) => photo.storedPath).toSet();
+    return {
+      for (final issue in _registrationIssues) ...[
+        if (current.contains(issue.fromPhotoPath)) issue.fromPhotoPath,
+        if (current.contains(issue.toPhotoPath)) issue.toPhotoPath,
+      ],
+    };
+  }
+
+  Future<void> _lockRegistrationIssuePhotos(StitchTask task) async {
+    final paths = _registrationIssuePhotoPaths(task);
+    if (paths.length < 2 || !_canEditPhotoGridLocks) return;
+    setState(() => _selectedPhotoPaths = paths);
+    await _changeSelectedPhotoLocks(locked: true);
   }
 
   bool _photoLocked(StitchTask task, String path) {
@@ -2311,6 +2334,58 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
   }
 
+  Future<StitchTask?> _confirmJpegDimensionChoice(
+    StitchTask task, {
+    int? actualWidth,
+    int? actualHeight,
+  }) async {
+    if (task.exportFormat != ExportFormat.jpeg) return task;
+    final dimensions = actualWidth != null && actualHeight != null
+        ? EstimatedOutputDimensions(width: actualWidth, height: actualHeight)
+        : estimateOutputDimensions(task);
+    if (dimensions == null || !dimensions.exceedsJpegLimit) return task;
+    final exact = actualWidth != null && actualHeight != null;
+    final choice = await showDialog<_JpegDimensionChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('JPEG 边长超过限制'),
+        content: Text(
+          '${exact ? '合成结果' : '估算输出'}为 ${dimensions.width} × ${dimensions.height} 像素。'
+          'JPEG 单边上限为 $jpegMaximumDimension 像素，选择 JPEG 会按比例缩小。'
+          '${exact ? '' : '估算可能与实际投影尺寸不同。'}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          if (_jpegXlAvailable)
+            OutlinedButton(
+              onPressed: () =>
+                  Navigator.pop(context, _JpegDimensionChoice.useJpegXl),
+              child: const Text('改用 JPEG XL'),
+            ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(context, _JpegDimensionChoice.keepScaledJpeg),
+            child: const Text('继续并缩小 JPEG'),
+          ),
+        ],
+      ),
+    );
+    if (choice == null) return null;
+    if (choice == _JpegDimensionChoice.keepScaledJpeg) return task;
+    final updated = task.copyWith(exportFormat: ExportFormat.jpegXl);
+    await _persist(updated);
+    if (mounted && _task?.id == task.id) {
+      setState(() {
+        _task = updated;
+        _exportFormat = ExportFormat.jpegXl;
+      });
+    }
+    return updated;
+  }
+
   Future<void> _startOrResume({required bool resume}) async {
     if (_startOrResumeInFlight || _busy) return;
     _startOrResumeInFlight = true;
@@ -2420,6 +2495,9 @@ class _StitchHomePageState extends State<StitchHomePage>
       } else {
         if (!await _saveOptions()) return;
         active = _task!;
+        final dimensionConfirmed = await _confirmJpegDimensionChoice(active);
+        if (dimensionConfirmed == null || !mounted) return;
+        active = dimensionConfirmed;
         if (active.phase != StitchPhase.imported) {
           active = await _repository.duplicateForNewRun(active);
           setState(() {
@@ -2705,6 +2783,29 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   Future<void> _exportTask(StitchTask task) async {
+    if (task.exportFormat == ExportFormat.jpeg) {
+      try {
+        final manifest = jsonDecode(
+          await File(
+            p.join(task.outputDirectory, 'manifest.json'),
+          ).readAsString(),
+        );
+        if (manifest is Map<String, Object?> &&
+            manifest['width'] is int &&
+            manifest['height'] is int) {
+          final confirmed = await _confirmJpegDimensionChoice(
+            task,
+            actualWidth: manifest['width'] as int,
+            actualHeight: manifest['height'] as int,
+          );
+          if (confirmed == null || !mounted) return;
+          task = confirmed;
+        }
+      } on Object {
+        // Some older or interrupted runs have no readable manifest; export
+        // remains available and the native exporter enforces its hard limit.
+      }
+    }
     if (task.exportFormat == ExportFormat.jpegXl && !_jpegXlAvailable) {
       setState(() => _message = '此原生核心未报告内置 JPEG XL 编码器，已阻止导出。');
       return;
@@ -3001,8 +3102,8 @@ class _StitchHomePageState extends State<StitchHomePage>
         await Process.start(command, [
           directory,
         ], mode: ProcessStartMode.detached);
-        setState(() => _message = '已在文件管理器中打开导出文件夹。');
       }
+      if (mounted) setState(() => _message = null);
     } on Object catch (error) {
       setState(() => _message = '无法分享导出文件：$error');
     }
@@ -3086,7 +3187,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   };
 
   Future<void> _deleteTask(StitchTask task) async {
-    if (_busy || !_batchOwnershipReady || _isActivelyBatchOwned(task)) return;
+    if (!_canDeleteTask(task)) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -3150,6 +3251,98 @@ class _StitchHomePageState extends State<StitchHomePage>
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  bool _canDeleteTask(StitchTask task) =>
+      !_busy &&
+      _batchOwnershipReady &&
+      !_isActivelyBatchOwned(task) &&
+      !const {
+        StitchPhase.queued,
+        StitchPhase.running,
+        StitchPhase.pausing,
+        StitchPhase.exporting,
+      }.contains(task.phase);
+
+  void _toggleTaskSelection(StitchTask task) {
+    if (!_canDeleteTask(task)) return;
+    setState(() {
+      final next = Set<String>.of(_selectedTaskIds);
+      if (!next.add(task.id)) next.remove(task.id);
+      _selectedTaskIds = next;
+    });
+  }
+
+  Future<void> _deleteSelectedTasks() async {
+    final selected = _tasks
+        .where((task) => _selectedTaskIds.contains(task.id))
+        .where(_canDeleteTask)
+        .toList();
+    if (selected.isEmpty || _busy) return;
+    if (selected.length == 1) {
+      await _deleteTask(selected.single);
+      if (mounted) {
+        setState(() {
+          _selectedTaskIds.clear();
+          _taskSelectionMode = false;
+        });
+      }
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('批量删除本地任务？'),
+        content: Text('将删除 ${selected.length} 条任务记录和队列引用。原片、渲染瓦片及已导出照片都会保留。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('保留'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除任务记录'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() {
+      _busy = true;
+      _message = null;
+    });
+    _controlGeneration++;
+    _poll?.cancel();
+    var deleted = 0;
+    final errors = <String>[];
+    final batchController = _batchController;
+    for (final task in selected) {
+      try {
+        await _performanceSaveQueue.enqueue(() async {});
+        if (batchController != null) {
+          await batchController.removeTask(task.id);
+        } else {
+          await _stopNativeTask(task);
+          await _repository.removeTaskRecord(task.id);
+        }
+        deleted++;
+        if (_task?.id == task.id) _clearPhotoGridIssueState();
+      } on Object catch (error) {
+        errors.add('${task.id}: $error');
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _selectedTaskIds.removeWhere(
+        (id) => selected.any((task) => task.id == id),
+      );
+      _taskSelectionMode = false;
+      _message = errors.isEmpty
+          ? '已删除 $deleted 条任务记录；原片、瓦片和导出照片已保留。'
+          : '已删除 $deleted 条任务记录；${errors.length} 条未删除：${errors.join('；')}';
+    });
+    await _refreshTasks();
+    if (mounted) setState(() => _busy = false);
   }
 
   Future<void> _stopNativeTask(StitchTask task) async {
@@ -3844,13 +4037,16 @@ class _StitchHomePageState extends State<StitchHomePage>
     return Scaffold(
       drawer: Drawer(child: SafeArea(child: _taskRail())),
       appBar: AppBar(
-        leading: Builder(
-          builder: (context) => IconButton(
-            icon: const Icon(Icons.menu),
-            tooltip: StitchLocalizations.of(context).text('本地任务'),
-            onPressed: () => Scaffold.of(context).openDrawer(),
-          ),
-        ),
+        automaticallyImplyLeading: MediaQuery.sizeOf(context).width <= 900,
+        leading: MediaQuery.sizeOf(context).width <= 900
+            ? Builder(
+                builder: (context) => IconButton(
+                  icon: const Icon(Icons.menu),
+                  tooltip: StitchLocalizations.of(context).text('本地任务'),
+                  onPressed: () => Scaffold.of(context).openDrawer(),
+                ),
+              )
+            : null,
         title: const Text('PocketGigaScan'),
         actions: [
           if (widget.settingsController != null)
@@ -3913,14 +4109,6 @@ class _StitchHomePageState extends State<StitchHomePage>
             },
             icon: const Icon(Icons.queue),
           ),
-          if (_task != null)
-            IconButton(
-              tooltip: StitchLocalizations.of(context).text('删除本地任务记录'),
-              onPressed: _busy || _isActivelyBatchOwned(_task)
-                  ? null
-                  : () => _deleteTask(_task!),
-              icon: const Icon(Icons.delete_outline),
-            ),
           IconButton(
             tooltip: StitchLocalizations.of(context).text('导入照片'),
             onPressed: _busy || !_editable ? null : _importPhotos,
@@ -3937,8 +4125,15 @@ class _StitchHomePageState extends State<StitchHomePage>
                 SizedBox(width: 230, child: _taskRail()),
               Expanded(
                 child: ListView(
+                  key: const Key('stitch-main-scroll'),
                   padding: const EdgeInsets.all(16),
                   children: [
+                    if (task != null &&
+                        task.photos.isNotEmpty &&
+                        task.phase != StitchPhase.completed) ...[
+                      _photoGrid(task, mappingError),
+                      const SizedBox(height: 12),
+                    ],
                     _statusCard(task),
                     const SizedBox(height: 12),
                     if ((!_mobile || _android) &&
@@ -3951,8 +4146,6 @@ class _StitchHomePageState extends State<StitchHomePage>
                     else ...[
                       if (task.phase != StitchPhase.completed) ...[
                         _optionsCard(task, mappingError),
-                        const SizedBox(height: 12),
-                        _photoGrid(task, mappingError),
                         const SizedBox(height: 12),
                       ],
                       if (_manifest != null) _tilePyramid(task),
@@ -4026,10 +4219,106 @@ class _StitchHomePageState extends State<StitchHomePage>
     );
   }
 
+  bool _taskHasFailureIndicator(StitchTask task) =>
+      task.phase == StitchPhase.failed ||
+      (task.error?.trim().isNotEmpty ?? false) ||
+      (task.publishError?.trim().isNotEmpty ?? false);
+
+  Widget _taskThumbnail(StitchTask task) => FutureBuilder<File?>(
+    future: _thumbnailService.thumbnailFor(task),
+    builder: (context, snapshot) => SizedBox(
+      width: 48,
+      height: 48,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: snapshot.data == null
+                  ? const ColoredBox(
+                      color: Colors.black12,
+                      child: Icon(Icons.panorama_outlined),
+                    )
+                  : Image.file(
+                      snapshot.data!,
+                      fit: BoxFit.cover,
+                      cacheWidth: 128,
+                      errorBuilder: (_, _, _) => const ColoredBox(
+                        color: Colors.black12,
+                        child: Icon(Icons.broken_image_outlined),
+                      ),
+                    ),
+            ),
+          ),
+          if (_taskHasFailureIndicator(task))
+            Positioned(
+              key: Key('task-thumbnail-failure-${task.id}'),
+              right: -3,
+              bottom: -3,
+              child: const CircleAvatar(
+                radius: 8,
+                backgroundColor: Colors.red,
+                child: Icon(Icons.close, size: 12, color: Colors.white),
+              ),
+            ),
+        ],
+      ),
+    ),
+  );
+
   Widget _taskRail() => ListView(
     padding: const EdgeInsets.all(8),
     children: [
-      const ListTile(title: Text('本地任务'), leading: Icon(Icons.folder_open)),
+      ListTile(
+        title: Text(
+          _taskSelectionMode ? '已选 ${_selectedTaskIds.length} 项' : '本地任务',
+        ),
+        leading: Icon(_taskSelectionMode ? Icons.checklist : Icons.folder_open),
+        trailing: _taskSelectionMode
+            ? Wrap(
+                spacing: 0,
+                children: [
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('全选可删除任务'),
+                    onPressed: _busy
+                        ? null
+                        : () => setState(() {
+                            _selectedTaskIds = _tasks
+                                .where(_canDeleteTask)
+                                .map((task) => task.id)
+                                .toSet();
+                          }),
+                    icon: const Icon(Icons.select_all),
+                  ),
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('删除所选任务'),
+                    onPressed: _selectedTaskIds.isEmpty || _busy
+                        ? null
+                        : _deleteSelectedTasks,
+                    icon: const Icon(Icons.delete_outline),
+                  ),
+                  IconButton(
+                    tooltip: StitchLocalizations.of(context).text('退出选择模式'),
+                    onPressed: () => setState(() {
+                      _taskSelectionMode = false;
+                      _selectedTaskIds.clear();
+                    }),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              )
+            : IconButton(
+                tooltip: StitchLocalizations.of(context).text('选择任务'),
+                onPressed: _tasks.isEmpty
+                    ? null
+                    : () => setState(() {
+                        _taskSelectionMode = true;
+                        _selectedTaskIds.clear();
+                      }),
+                icon: const Icon(Icons.checklist),
+              ),
+      ),
       if (_deviceTransfers.isNotEmpty) ...[
         ListTile(
           leading: const Icon(Icons.downloading_outlined),
@@ -4071,7 +4360,17 @@ class _StitchHomePageState extends State<StitchHomePage>
       for (final task in _tasks)
         ListTile(
           key: Key('task-row-${task.id}'),
-          selected: task.id == _task?.id,
+          selected: _taskSelectionMode
+              ? _selectedTaskIds.contains(task.id)
+              : task.id == _task?.id,
+          leading: _taskSelectionMode
+              ? Checkbox(
+                  value: _selectedTaskIds.contains(task.id),
+                  onChanged: _canDeleteTask(task)
+                      ? (_) => _toggleTaskSelection(task)
+                      : null,
+                )
+              : _taskThumbnail(task),
           title: Text(task.createdAt.toLocal().toString().substring(0, 16)),
           subtitle: Text(
             StitchLocalizations.of(context).taskSummary(
@@ -4080,20 +4379,17 @@ class _StitchHomePageState extends State<StitchHomePage>
               format: task.exportFormat.shortLabel,
             ),
           ),
-          enabled: _canSelectTaskFromRail(task),
-          onTap: _canSelectTaskFromRail(task)
+          enabled: _taskSelectionMode
+              ? _canDeleteTask(task)
+              : _canSelectTaskFromRail(task),
+          onTap: _taskSelectionMode
+              ? () => _toggleTaskSelection(task)
+              : _canSelectTaskFromRail(task)
               ? () async {
                   await Navigator.of(context).maybePop();
                   if (mounted) await _selectTask(task);
                 }
               : null,
-          trailing: IconButton(
-            tooltip: StitchLocalizations.of(context).text('删除任务记录'),
-            onPressed: _busy || _isActivelyBatchOwned(task)
-                ? null
-                : () => _deleteTask(task),
-            icon: const Icon(Icons.delete_outline),
-          ),
         ),
     ],
   );
@@ -4202,8 +4498,8 @@ class _StitchHomePageState extends State<StitchHomePage>
                 ],
               ],
               if (task.error != null)
-                Text(
-                  task.error!,
+                StitchStatusMessage(
+                  message: task.error!,
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ),
               if (task.publishError != null)
@@ -4261,6 +4557,8 @@ class _StitchHomePageState extends State<StitchHomePage>
                     Text('完成后自动导出：${task.exportFormat.shortLabel}'),
                   if (task.resultStats case final stats?)
                     ..._performanceStatsLines(stats),
+                  if (_hasUnknownStage(task))
+                    SelectableText('stage=${task.stage}'),
                   const Text('水平参考：以网格中心照片为准'),
                 ],
               ),
@@ -4479,17 +4777,45 @@ class _StitchHomePageState extends State<StitchHomePage>
   String _phaseLabel(StitchPhase phase) =>
       StitchLocalizations.of(context).phaseLabel(phase.name);
 
-  String _stageLabel(String stage) => switch (stage) {
-    'register' => '图像配准',
-    'render-level-0' => '生成全分辨率瓦片',
-    'pyramid' => '生成缩放金字塔',
-    'manifest' => '写入预览清单',
-    'auto-export' => '合成完成，自动导出整图',
-    'export' => '导出完整图像',
-    'export-failed' => '整图导出失败，可重试',
-    'done' => '完成',
-    _ => StitchLocalizations.of(context).timelineStage(stage),
-  };
+  String _stageLabel(String stage) {
+    final localization = StitchLocalizations.of(context);
+    return switch (stage) {
+      'ready' => localization.text('等待开始'),
+      'register' => localization.text('图像配准'),
+      'render-level-0' => localization.text('生成全分辨率瓦片'),
+      'pyramid' => localization.text('生成缩放金字塔'),
+      'manifest' => localization.text('写入预览清单'),
+      'auto-export' => localization.text('合成完成，自动导出整图'),
+      'auto-export-deferred' => localization.text('合成完成，等待整图导出'),
+      'export-deferred' => localization.text('合成完成，等待整图导出'),
+      'export-pending' => localization.text('等待核心资源后自动导出'),
+      'export' => localization.text('导出完整图像'),
+      'export-failed' => localization.text('整图导出失败，可重试'),
+      'queued' => localization.text('排队中'),
+      _ => localization.timelineStage(stage),
+    };
+  }
+
+  bool _hasUnknownStage(StitchTask task) {
+    const locallyMapped = {
+      'ready',
+      'register',
+      'render-level-0',
+      'pyramid',
+      'manifest',
+      'auto-export',
+      'auto-export-deferred',
+      'export-deferred',
+      'export-pending',
+      'export',
+      'export-failed',
+      'queued',
+    };
+    if (locallyMapped.contains(task.stage)) return false;
+    final localization = StitchLocalizations.of(context);
+    return localization.timelineStage(task.stage) ==
+        localization.unknownProcessingStage;
+  }
 
   String _timelineEventLabel(StitchTimelineEvent event) {
     final l = StitchLocalizations.of(context);
@@ -4732,551 +5058,559 @@ class _StitchHomePageState extends State<StitchHomePage>
         : '${task.photos.first.width}×${task.photos.first.height}';
     return Card(
       key: const Key('stitch-options-card'),
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('排列与相机', style: Theme.of(context).textTheme.titleMedium),
-            Text('全部 ${task.photos.length} 张照片保留；尺寸 $dimensions。无法映射时不会丢弃原片。'),
-            Wrap(
-              spacing: 8,
-              children: [
-                ChoiceChip(
-                  label: const Text('自动读取文件名行列'),
-                  selected: _grid.mode == GridMode.filename,
-                  onSelected: enabled
-                      ? (_) => _setGrid(_grid.copyWith(mode: GridMode.filename))
-                      : null,
-                ),
-                ChoiceChip(
-                  label: const Text('按选择顺序排列'),
-                  selected: _grid.mode == GridMode.sequence,
-                  onSelected: enabled
-                      ? (_) => _setGrid(_grid.copyWith(mode: GridMode.sequence))
-                      : null,
-                ),
-              ],
-            ),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                SizedBox(
-                  width: 92,
-                  child: TextField(
-                    controller: _rows,
-                    enabled: enabled && _grid.mode == GridMode.sequence,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(context).text('行'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 92,
-                  child: TextField(
-                    controller: _columns,
-                    enabled: enabled && _grid.mode == GridMode.sequence,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(context).text('列'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: _mobile ? 140 : null,
-                  child: DropdownButton<TraversalAxis>(
-                    value: _grid.axis,
-                    isExpanded: _mobile,
-                    onChanged: enabled && _grid.mode == GridMode.sequence
-                        ? (value) => _changeTraversal(axis: value)
-                        : null,
-                    items: const [
-                      DropdownMenuItem(
-                        value: TraversalAxis.row,
-                        child: Text('逐行拍摄'),
-                      ),
-                      DropdownMenuItem(
-                        value: TraversalAxis.column,
-                        child: Text('逐列拍摄'),
-                      ),
-                    ],
-                  ),
-                ),
-                SizedBox(
-                  width: _mobile ? 155 : null,
-                  child: DropdownButton<StartCorner>(
-                    value: _grid.startCorner,
-                    isExpanded: _mobile,
-                    onChanged: enabled && _grid.mode == GridMode.sequence
-                        ? (value) => _changeTraversal(corner: value)
-                        : null,
-                    items: const [
-                      DropdownMenuItem(
-                        value: StartCorner.topLeft,
-                        child: Text('左上起拍'),
-                      ),
-                      DropdownMenuItem(
-                        value: StartCorner.topRight,
-                        child: Text('右上起拍'),
-                      ),
-                      DropdownMenuItem(
-                        value: StartCorner.bottomLeft,
-                        child: Text('左下起拍'),
-                      ),
-                      DropdownMenuItem(
-                        value: StartCorner.bottomRight,
-                        child: Text('右下起拍'),
-                      ),
-                    ],
-                  ),
-                ),
-                FilterChip(
-                  label: const Text('蛇形'),
-                  selected: _grid.serpentine,
-                  onSelected: enabled && _grid.mode == GridMode.sequence
-                      ? (value) => _changeTraversal(serpentine: value)
-                      : null,
-                ),
-              ],
-            ),
-            Wrap(
-              spacing: 8,
-              children: [
-                SizedBox(
-                  width: 110,
-                  child: TextField(
-                    controller: _fov,
-                    enabled: enabled,
-                    onChanged: (_) => _cameraCalibrationTouched = true,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(context).text('水平视角 °'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 145,
-                  child: TextField(
-                    controller: _fx,
-                    enabled: enabled,
-                    onChanged: (_) => _cameraCalibrationTouched = true,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(
-                        context,
-                      ).text('焦距像素（可选）'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                TextButton.icon(
-                  onPressed:
-                      enabled &&
-                          task.photos.isNotEmpty &&
-                          task.photos.first.width == 3840 &&
-                          task.photos.first.height == 2160
-                      ? () {
-                          final width = task.photos.first.width;
-                          const nominalFx = 75000.0;
-                          final nominalFov =
-                              2 *
-                              math.atan(width / (2 * nominalFx)) *
-                              180 /
-                              math.pi;
-                          setState(() {
-                            _fx.text = '$nominalFx';
-                            _fov.text = nominalFov.toStringAsFixed(4);
-                            _cameraCalibrationTouched = true;
-                          });
-                        }
-                      : null,
-                  icon: const Icon(Icons.center_focus_strong),
-                  label: const Text('DWARF 固定视角（名义值）'),
-                ),
-                SizedBox(
-                  width: 110,
-                  child: TextField(
-                    controller: _memory,
-                    enabled: enabled,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(
-                        context,
-                      ).text('渲染内存 MiB'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 90,
-                  child: TextField(
-                    controller: _workers,
-                    enabled: enabled,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(context).text('工作线程数'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const Text(
-              'DWARF 固定视角快捷项使用名义 fx=75000 px，尚未校准；cx/cy 根据照片尺寸计算。',
-              style: TextStyle(fontSize: 12),
-            ),
-            if (task.cameraProfileId == 'dwarf3-tele-nominal-150mm')
-              Text(
-                '已按照片 EXIF 识别 DWARFLAB / DWARF3 / TELE；使用名义 150 mm 配置 fx=${(75000 * task.photos.first.width / 3840).round()} px（随图像宽度缩放），未校准。实际 EXIF 焦距：${task.photos.first.exifFocalLengthMm?.toStringAsFixed(1) ?? '未记录'} mm。',
-                style: const TextStyle(fontSize: 12),
-              ),
-            SwitchListTile.adaptive(
-              key: const Key('force-grid-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('强制网格合成'),
-              subtitle: const Text('自动重叠关闭时，无法可靠匹配的方向才会按焦距/视角和手动重叠率估算网格位置。'),
-              value: _forceGridFallback,
-              onChanged: enabled && !_autoGridOverlap
-                  ? (value) => setState(() => _forceGridFallback = value)
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('auto-grid-overlap-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('从中间照片估算水平/垂直重叠并按网格合成'),
-              subtitle: Text(
-                _cameraCalibrationTouched ||
-                        task.cameraProfileId == 'dwarf3-tele-nominal-150mm'
-                    ? '最多检查 24 组中心相邻照片；结果是网格估算值，尚未校准，仍需目视检查接缝。'
-                    : '重叠率由照片实测；未知镜头的视角仍需填写。当前视角用于球面投影，默认 45° 不是照片测量值。最多检查 24 组中心相邻照片，结果仍需目视检查接缝。',
-              ),
-              value: _autoGridOverlap,
-              onChanged: enabled
-                  ? (value) => _updateAutoGridOverlap(value ?? true)
-                  : null,
-            ),
-            Wrap(
-              spacing: 12,
-              runSpacing: 8,
-              children: [
-                SizedBox(
-                  width: 145,
-                  child: TextField(
-                    key: const Key('horizontal-overlap-field'),
-                    controller: _horizontalOverlap,
-                    enabled: enabled && !_autoGridOverlap,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(
-                        context,
-                      ).text('手动水平重叠率 %'),
-                      helperText: StitchLocalizations.of(
-                        context,
-                      ).text('15–80；自动模式忽略此值，实测结果见报告'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 145,
-                  child: TextField(
-                    key: const Key('vertical-overlap-field'),
-                    controller: _verticalOverlap,
-                    enabled: enabled && !_autoGridOverlap,
-                    keyboardType: const TextInputType.numberWithOptions(
-                      decimal: true,
-                    ),
-                    decoration: InputDecoration(
-                      labelText: StitchLocalizations.of(
-                        context,
-                      ).text('手动垂直重叠率 %'),
-                      helperText: StitchLocalizations.of(
-                        context,
-                      ).text('15–80；自动模式忽略此值，实测结果见报告'),
-                      isDense: true,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const Text(
-              '渲染内存预算用于缓存和活动图像/瓦片估算；配准阶段 OpenCV 与进程其他内存另计。',
-              style: TextStyle(fontSize: 12),
-            ),
-            if (!_mobile || _android)
-              ExpansionTile(
-                key: const Key('stitch-quality-expansion'),
-                tilePadding: EdgeInsets.zero,
-                title: const Text('输出与画质'),
+      child: ExpansionTile(
+        key: const Key('stitch-arrangement-expansion'),
+        tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+        childrenPadding: const EdgeInsets.all(16),
+        title: const Text('排列与相机'),
+        subtitle: Text(
+          StitchLocalizations.of(context).gridSummary(
+            rows: _grid.rows,
+            columns: _grid.columns,
+            photoCount: task.photos.length,
+            dimensions: dimensions ?? '—',
+          ),
+        ),
+        children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Wrap(
+                spacing: 8,
                 children: [
-                  CheckboxListTile(
-                    key: const Key('refine-grid-neighbors-option'),
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('精细校正相邻照片位置'),
-                    subtitle: const Text(
-                      '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。',
-                    ),
-                    value: _refineGridNeighbors,
-                    onChanged: enabled ? _updateRefineGridNeighbors : null,
-                  ),
-                  CheckboxListTile(
-                    key: const Key('deghost-blending-option'),
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('抑制接缝重影'),
-                    subtitle: const Text(
-                      '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。',
-                    ),
-                    value: _seamBlendMode == SeamBlendMode.deghost,
-                    onChanged: enabled
-                        ? (value) => _updateSeamBlendMode(
-                            value == true
-                                ? SeamBlendMode.deghost
-                                : SeamBlendMode.feather,
-                          )
+                  ChoiceChip(
+                    label: const Text('自动读取文件名行列'),
+                    selected: _grid.mode == GridMode.filename,
+                    onSelected: enabled
+                        ? (_) =>
+                              _setGrid(_grid.copyWith(mode: GridMode.filename))
                         : null,
                   ),
-                  CheckboxListTile(
-                    key: const Key('local-texture-warp-option'),
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('局部纹理校正'),
-                    secondary: const Tooltip(
-                      message: '在相邻重叠区域限制局部变形，减少纹理错位',
-                      child: Icon(Icons.info_outline),
-                    ),
-                    value: _localTextureWarp,
-                    onChanged: enabled ? _updateLocalTextureWarp : null,
+                  ChoiceChip(
+                    label: const Text('按选择顺序排列'),
+                    selected: _grid.mode == GridMode.sequence,
+                    onSelected: enabled
+                        ? (_) =>
+                              _setGrid(_grid.copyWith(mode: GridMode.sequence))
+                        : null,
                   ),
-                  if (supportsSceneInferenceOnCurrentPlatform) ...[
-                    CheckboxListTile(
-                      key: const Key('protect-people-option'),
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        StitchLocalizations.of(context).protectPeople,
-                      ),
-                      subtitle: Text(
-                        StitchLocalizations.of(context).protectPeopleHelp,
-                      ),
-                      value: _protectPeople,
-                      onChanged: enabled ? _updateProtectPeople : null,
-                    ),
-                    CheckboxListTile(
-                      key: const Key('smooth-water-option'),
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(StitchLocalizations.of(context).smoothWater),
-                      subtitle: Text(
-                        StitchLocalizations.of(context).smoothWaterHelp,
-                      ),
-                      value: _smoothWater,
-                      onChanged: enabled ? _updateSmoothWater : null,
-                    ),
-                  ],
                 ],
               ),
-            ExpansionTile(
-              key: const Key('registration-threshold-expansion'),
-              tilePadding: EdgeInsets.zero,
-              title: Text(
-                '${StitchLocalizations.of(context).maxEdgeReprojectionRms}: '
-                '${_maxEdgeReprojectionRmsPixels.toStringAsFixed(1)}',
-              ),
-              subtitle: Text(_maxEdgeReprojectionRmsPixels.toStringAsFixed(1)),
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        StitchLocalizations.of(
-                          context,
-                        ).maxEdgeReprojectionRmsHelp,
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  SizedBox(
+                    width: 92,
+                    child: TextField(
+                      controller: _rows,
+                      enabled: enabled && _grid.mode == GridMode.sequence,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(context).text('行'),
+                        isDense: true,
                       ),
-                      if (!enabled)
-                        Text(
-                          StitchLocalizations.of(
-                            context,
-                          ).maxEdgeReprojectionRmsLocked,
+                    ),
+                  ),
+                  SizedBox(
+                    width: 92,
+                    child: TextField(
+                      controller: _columns,
+                      enabled: enabled && _grid.mode == GridMode.sequence,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(context).text('列'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: _mobile ? 140 : null,
+                    child: DropdownButton<TraversalAxis>(
+                      value: _grid.axis,
+                      isExpanded: _mobile,
+                      onChanged: enabled && _grid.mode == GridMode.sequence
+                          ? (value) => _changeTraversal(axis: value)
+                          : null,
+                      items: const [
+                        DropdownMenuItem(
+                          value: TraversalAxis.row,
+                          child: Text('逐行拍摄'),
                         ),
-                      if (_maxEdgeReprojectionRmsPixels > 12)
-                        Text(
-                          StitchLocalizations.of(
-                            context,
-                          ).maxEdgeReprojectionRmsWarning,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                          ),
+                        DropdownMenuItem(
+                          value: TraversalAxis.column,
+                          child: Text('逐列拍摄'),
                         ),
-                      Slider(
-                        key: const Key('max-edge-reprojection-rms-slider'),
-                        min: 6,
-                        max: 24,
-                        divisions: 36,
-                        value: _maxEdgeReprojectionRmsPixels,
-                        label:
-                            '${StitchLocalizations.of(context).maxEdgeReprojectionRms}: '
-                            '${_maxEdgeReprojectionRmsPixels.toStringAsFixed(1)}',
-                        semanticFormatterCallback: (value) {
-                          final formatted = value.toStringAsFixed(1);
-                          return StitchLocalizations.of(context).isChinese
-                              ? '$formatted 像素'
-                              : '$formatted pixels';
-                        },
-                        onChanged: enabled
-                            ? _updateMaxEdgeReprojectionRmsPixels
-                            : null,
+                      ],
+                    ),
+                  ),
+                  SizedBox(
+                    width: _mobile ? 155 : null,
+                    child: DropdownButton<StartCorner>(
+                      value: _grid.startCorner,
+                      isExpanded: _mobile,
+                      onChanged: enabled && _grid.mode == GridMode.sequence
+                          ? (value) => _changeTraversal(corner: value)
+                          : null,
+                      items: const [
+                        DropdownMenuItem(
+                          value: StartCorner.topLeft,
+                          child: Text('左上起拍'),
+                        ),
+                        DropdownMenuItem(
+                          value: StartCorner.topRight,
+                          child: Text('右上起拍'),
+                        ),
+                        DropdownMenuItem(
+                          value: StartCorner.bottomLeft,
+                          child: Text('左下起拍'),
+                        ),
+                        DropdownMenuItem(
+                          value: StartCorner.bottomRight,
+                          child: Text('右下起拍'),
+                        ),
+                      ],
+                    ),
+                  ),
+                  FilterChip(
+                    label: const Text('蛇形'),
+                    selected: _grid.serpentine,
+                    onSelected: enabled && _grid.mode == GridMode.sequence
+                        ? (value) => _changeTraversal(serpentine: value)
+                        : null,
+                  ),
+                ],
+              ),
+              Wrap(
+                spacing: 8,
+                children: [
+                  SizedBox(
+                    width: 145,
+                    child: TextField(
+                      controller: _fx,
+                      enabled: enabled,
+                      onChanged: (_) => _cameraCalibrationTouched = true,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(
+                          context,
+                        ).text('焦距像素（可选）'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  TextButton.icon(
+                    onPressed:
+                        enabled &&
+                            task.photos.isNotEmpty &&
+                            task.photos.first.width == 3840 &&
+                            task.photos.first.height == 2160
+                        ? () {
+                            final width = task.photos.first.width;
+                            const nominalFx = 75000.0;
+                            final nominalFov =
+                                2 *
+                                math.atan(width / (2 * nominalFx)) *
+                                180 /
+                                math.pi;
+                            setState(() {
+                              _fx.text = '$nominalFx';
+                              _fov.text = nominalFov.toStringAsFixed(4);
+                              _cameraCalibrationTouched = true;
+                            });
+                          }
+                        : null,
+                    icon: const Icon(Icons.center_focus_strong),
+                    label: const Text('DWARF 固定视角（名义值）'),
+                  ),
+                  SizedBox(
+                    width: 110,
+                    child: TextField(
+                      controller: _memory,
+                      enabled: enabled,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(
+                          context,
+                        ).text('渲染内存 MiB'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 90,
+                    child: TextField(
+                      controller: _workers,
+                      enabled: enabled,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(
+                          context,
+                        ).text('工作线程数'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Text(
+                'DWARF 固定视角快捷项使用名义 fx=75000 px，尚未校准；cx/cy 根据照片尺寸计算。',
+                style: TextStyle(fontSize: 12),
+              ),
+              if (task.cameraProfileId == 'dwarf3-tele-nominal-150mm')
+                Text(
+                  '已按照片 EXIF 识别 DWARFLAB / DWARF3 / TELE；使用名义 150 mm 配置 fx=${(75000 * task.photos.first.width / 3840).round()} px（随图像宽度缩放），未校准。实际 EXIF 焦距：${task.photos.first.exifFocalLengthMm?.toStringAsFixed(1) ?? '未记录'} mm。',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              SwitchListTile.adaptive(
+                key: const Key('force-grid-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('强制网格合成'),
+                subtitle: const Text('自动重叠关闭时，无法可靠匹配的方向才会按焦距/视角和手动重叠率估算网格位置。'),
+                value: _forceGridFallback,
+                onChanged: enabled && !_autoGridOverlap
+                    ? (value) => setState(() => _forceGridFallback = value)
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('auto-grid-overlap-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('从中间照片估算水平/垂直重叠并按网格合成'),
+                subtitle: Text(
+                  _cameraCalibrationTouched ||
+                          task.cameraProfileId == 'dwarf3-tele-nominal-150mm'
+                      ? '最多检查 24 组中心相邻照片；结果是网格估算值，尚未校准，仍需目视检查接缝。'
+                      : '重叠率由照片实测；未知镜头的视角仍需填写。当前视角用于球面投影，默认 45° 不是照片测量值。最多检查 24 组中心相邻照片，结果仍需目视检查接缝。',
+                ),
+                value: _autoGridOverlap,
+                onChanged: enabled
+                    ? (value) => _updateAutoGridOverlap(value ?? true)
+                    : null,
+              ),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                children: [
+                  SizedBox(
+                    width: 145,
+                    child: TextField(
+                      key: const Key('horizontal-overlap-field'),
+                      controller: _horizontalOverlap,
+                      enabled: enabled && !_autoGridOverlap,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(
+                          context,
+                        ).text('手动水平重叠率 %'),
+                        helperText: StitchLocalizations.of(
+                          context,
+                        ).text('15–80；自动模式忽略此值，实测结果见报告'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 145,
+                    child: TextField(
+                      key: const Key('vertical-overlap-field'),
+                      controller: _verticalOverlap,
+                      enabled: enabled && !_autoGridOverlap,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: StitchLocalizations.of(
+                          context,
+                        ).text('手动垂直重叠率 %'),
+                        helperText: StitchLocalizations.of(
+                          context,
+                        ).text('15–80；自动模式忽略此值，实测结果见报告'),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Text(
+                '渲染内存预算用于缓存和活动图像/瓦片估算；配准阶段 OpenCV 与进程其他内存另计。',
+                style: TextStyle(fontSize: 12),
+              ),
+              if (!_mobile || _android)
+                ExpansionTile(
+                  key: const Key('stitch-quality-expansion'),
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('输出与画质'),
+                  children: [
+                    CheckboxListTile(
+                      key: const Key('refine-grid-neighbors-option'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('精细校正相邻照片位置'),
+                      subtitle: const Text(
+                        '结合八个方向相邻照片的可靠匹配校正位置；匹配不可靠时会降低其影响，可能需要更长时间。',
+                      ),
+                      value: _refineGridNeighbors,
+                      onChanged: enabled ? _updateRefineGridNeighbors : null,
+                    ),
+                    CheckboxListTile(
+                      key: const Key('deghost-blending-option'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('抑制接缝重影'),
+                      subtitle: const Text(
+                        '重叠区域优先采用更清晰的照片来源以减少重影；没有更清晰的邻图时仍会保留原片。关闭可与传统羽化结果对照。',
+                      ),
+                      value: _seamBlendMode == SeamBlendMode.deghost,
+                      onChanged: enabled
+                          ? (value) => _updateSeamBlendMode(
+                              value == true
+                                  ? SeamBlendMode.deghost
+                                  : SeamBlendMode.feather,
+                            )
+                          : null,
+                    ),
+                    CheckboxListTile(
+                      key: const Key('local-texture-warp-option'),
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('局部纹理校正'),
+                      secondary: const Tooltip(
+                        message: '在相邻重叠区域限制局部变形，减少纹理错位',
+                        child: Icon(Icons.info_outline),
+                      ),
+                      value: _localTextureWarp,
+                      onChanged: enabled ? _updateLocalTextureWarp : null,
+                    ),
+                    if (supportsSceneInferenceOnCurrentPlatform) ...[
+                      CheckboxListTile(
+                        key: const Key('protect-people-option'),
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(
+                          StitchLocalizations.of(context).protectPeople,
+                        ),
+                        subtitle: Text(
+                          StitchLocalizations.of(context).protectPeopleHelp,
+                        ),
+                        value: _protectPeople,
+                        onChanged: enabled ? _updateProtectPeople : null,
+                      ),
+                      CheckboxListTile(
+                        key: const Key('smooth-water-option'),
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(
+                          StitchLocalizations.of(context).smoothWater,
+                        ),
+                        subtitle: Text(
+                          StitchLocalizations.of(context).smoothWaterHelp,
+                        ),
+                        value: _smoothWater,
+                        onChanged: enabled ? _updateSmoothWater : null,
                       ),
                     ],
+                  ],
+                ),
+              ExpansionTile(
+                key: const Key('registration-threshold-expansion'),
+                tilePadding: EdgeInsets.zero,
+                title: Text(
+                  '${StitchLocalizations.of(context).maxEdgeReprojectionRms}: '
+                  '${_maxEdgeReprojectionRmsPixels.toStringAsFixed(1)}',
+                ),
+                subtitle: Text(
+                  _maxEdgeReprojectionRmsPixels.toStringAsFixed(1),
+                ),
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          StitchLocalizations.of(
+                            context,
+                          ).maxEdgeReprojectionRmsHelp,
+                        ),
+                        if (!enabled)
+                          Text(
+                            StitchLocalizations.of(
+                              context,
+                            ).maxEdgeReprojectionRmsLocked,
+                          ),
+                        if (_maxEdgeReprojectionRmsPixels > 12)
+                          Text(
+                            StitchLocalizations.of(
+                              context,
+                            ).maxEdgeReprojectionRmsWarning,
+                            style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                            ),
+                          ),
+                        Slider(
+                          key: const Key('max-edge-reprojection-rms-slider'),
+                          min: 6,
+                          max: 24,
+                          divisions: 36,
+                          value: _maxEdgeReprojectionRmsPixels,
+                          label:
+                              '${StitchLocalizations.of(context).maxEdgeReprojectionRms}: '
+                              '${_maxEdgeReprojectionRmsPixels.toStringAsFixed(1)}',
+                          semanticFormatterCallback: (value) {
+                            final formatted = value.toStringAsFixed(1);
+                            return StitchLocalizations.of(context).isChinese
+                                ? '$formatted 像素'
+                                : '$formatted pixels';
+                          },
+                          onChanged: enabled
+                              ? _updateMaxEdgeReprojectionRmsPixels
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              Text('提速测试选项', style: Theme.of(context).textTheme.titleMedium),
+              const Text(
+                '选项会随任务保存；正在处理或等待恢复的任务使用已提交参数。最终整图仍使用全部原片和完整分辨率。',
+                style: TextStyle(fontSize: 12),
+              ),
+              CheckboxListTile(
+                key: const Key('parallel-matching-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('并行图像匹配'),
+                subtitle: _autoGridOverlap && _refineGridNeighbors
+                    ? const Text('中心照片提供水平/垂直估算；启用精细校正后，此项用于八个方向相邻照片配准。')
+                    : _autoGridOverlap
+                    ? const Text('自动网格只估算中心相邻照片；启用精细校正后可并行配准八个方向的相邻照片。')
+                    : null,
+                value: _performanceOptions.parallelMatching,
+                onChanged:
+                    enabled && (!_autoGridOverlap || _refineGridNeighbors)
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(parallelMatching: value),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('parallel-rendering-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('并行分块渲染'),
+                value: _performanceOptions.parallelRendering,
+                onChanged: enabled
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(parallelRendering: value),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('source-cache-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用原片纹理缓存'),
+                value: _performanceOptions.useSourceCache,
+                onChanged: enabled
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(useSourceCache: value),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('alignment-cache-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('缓存图像配准结果'),
+                subtitle: const Text('缓存保存在任务输入目录旁的应用任务目录中。'),
+                value: _performanceOptions.useAlignmentCache,
+                onChanged: enabled
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(useAlignmentCache: value),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('fast-registration-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('快速配准'),
+                subtitle: const Text('使用 0.6 MP 配准图；关闭时使用 2.0 MP。最终渲染仍为全分辨率。'),
+                value: _performanceOptions.fastRegistration,
+                onChanged: enabled
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(fastRegistration: value),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('orb-features-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('ORB 快速特征'),
+                subtitle: Text(
+                  _autoGridOverlap && _refineGridNeighbors
+                      ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
+                      : _autoGridOverlap
+                      ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
+                      : _performanceOptions.orbFeatures
+                      ? 'ORB 使用 BF 匹配；FLANN 已关闭。'
+                      : '默认使用 SIFT 特征。',
+                ),
+                value: _performanceOptions.orbFeatures,
+                onChanged:
+                    enabled && (!_autoGridOverlap || _refineGridNeighbors)
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(
+                          orbFeatures: value,
+                          flannMatching: value == true
+                              ? false
+                              : _performanceOptions.flannMatching,
+                        ),
+                      )
+                    : null,
+              ),
+              CheckboxListTile(
+                key: const Key('flann-matching-option'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('FLANN 近似匹配'),
+                subtitle: Text(
+                  _autoGridOverlap && _refineGridNeighbors
+                      ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
+                      : _autoGridOverlap
+                      ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
+                      : _performanceOptions.orbFeatures
+                      ? 'ORB 模式不可用；请先切回 SIFT。'
+                      : '默认使用 BF 精确匹配。',
+                ),
+                value: _performanceOptions.effectiveFlannMatching,
+                onChanged:
+                    enabled &&
+                        (!_autoGridOverlap || _refineGridNeighbors) &&
+                        !_performanceOptions.orbFeatures
+                    ? (value) => _updatePerformanceOptions(
+                        _performanceOptions.copyWith(flannMatching: value),
+                      )
+                    : null,
+              ),
+              const ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('GPU 加速'),
+                subtitle: Text('当前 CPU 原生包未提供 GPU 后端。'),
+                trailing: Checkbox(value: false, onChanged: null),
+              ),
+              if (error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(
+                    error,
+                    style: const TextStyle(color: Colors.deepOrange),
                   ),
                 ),
-              ],
-            ),
-            Text('提速测试选项', style: Theme.of(context).textTheme.titleMedium),
-            const Text(
-              '选项会随任务保存；正在处理或等待恢复的任务使用已提交参数。最终整图仍使用全部原片和完整分辨率。',
-              style: TextStyle(fontSize: 12),
-            ),
-            CheckboxListTile(
-              key: const Key('parallel-matching-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('并行图像匹配'),
-              subtitle: _autoGridOverlap && _refineGridNeighbors
-                  ? const Text('中心照片提供水平/垂直估算；启用精细校正后，此项用于八个方向相邻照片配准。')
-                  : _autoGridOverlap
-                  ? const Text('自动网格只估算中心相邻照片；启用精细校正后可并行配准八个方向的相邻照片。')
-                  : null,
-              value: _performanceOptions.parallelMatching,
-              onChanged: enabled && (!_autoGridOverlap || _refineGridNeighbors)
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(parallelMatching: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('parallel-rendering-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('并行分块渲染'),
-              value: _performanceOptions.parallelRendering,
-              onChanged: enabled
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(parallelRendering: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('source-cache-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('启用原片纹理缓存'),
-              value: _performanceOptions.useSourceCache,
-              onChanged: enabled
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(useSourceCache: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('alignment-cache-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('缓存图像配准结果'),
-              subtitle: const Text('缓存保存在任务输入目录旁的应用任务目录中。'),
-              value: _performanceOptions.useAlignmentCache,
-              onChanged: enabled
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(useAlignmentCache: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('fast-registration-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('快速配准'),
-              subtitle: const Text('使用 0.6 MP 配准图；关闭时使用 2.0 MP。最终渲染仍为全分辨率。'),
-              value: _performanceOptions.fastRegistration,
-              onChanged: enabled
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(fastRegistration: value),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('orb-features-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('ORB 快速特征'),
-              subtitle: Text(
-                _autoGridOverlap && _refineGridNeighbors
-                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
-                    : _autoGridOverlap
-                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
-                    : _performanceOptions.orbFeatures
-                    ? 'ORB 使用 BF 匹配；FLANN 已关闭。'
-                    : '默认使用 SIFT 特征。',
-              ),
-              value: _performanceOptions.orbFeatures,
-              onChanged: enabled && (!_autoGridOverlap || _refineGridNeighbors)
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(
-                        orbFeatures: value,
-                        flannMatching: value == true
-                            ? false
-                            : _performanceOptions.flannMatching,
-                      ),
-                    )
-                  : null,
-            ),
-            CheckboxListTile(
-              key: const Key('flann-matching-option'),
-              contentPadding: EdgeInsets.zero,
-              title: const Text('FLANN 近似匹配'),
-              subtitle: Text(
-                _autoGridOverlap && _refineGridNeighbors
-                    ? '中心重叠估算固定使用 SIFT/BF；此项用于启用中的八方向相邻照片配准。'
-                    : _autoGridOverlap
-                    ? '自动网格估算固定使用 SIFT/BF；启用精细校正后可测试八方向相邻照片配准。'
-                    : _performanceOptions.orbFeatures
-                    ? 'ORB 模式不可用；请先切回 SIFT。'
-                    : '默认使用 BF 精确匹配。',
-              ),
-              value: _performanceOptions.effectiveFlannMatching,
-              onChanged:
-                  enabled &&
-                      (!_autoGridOverlap || _refineGridNeighbors) &&
-                      !_performanceOptions.orbFeatures
-                  ? (value) => _updatePerformanceOptions(
-                      _performanceOptions.copyWith(flannMatching: value),
-                    )
-                  : null,
-            ),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              title: Text('GPU 加速'),
-              subtitle: Text('当前 CPU 原生包未提供 GPU 后端。'),
-              trailing: Checkbox(value: false, onChanged: null),
-            ),
-            if (error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(
-                  error,
-                  style: const TextStyle(color: Colors.deepOrange),
+              if (enabled)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton.icon(
+                    onPressed: _saveOptions,
+                    icon: const Icon(Icons.check),
+                    label: const Text('保存任务设置'),
+                  ),
                 ),
-              ),
-            if (enabled)
-              Align(
-                alignment: Alignment.centerRight,
-                child: TextButton.icon(
-                  onPressed: _saveOptions,
-                  icon: const Icon(Icons.check),
-                  label: const Text('保存任务设置'),
-                ),
-              ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -5332,7 +5666,15 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (value == ExportFormat.jpegXl && !_jpegXlAvailable) return;
     final task = _task;
     setState(() => _exportFormat = value);
-    if (task != null) _persistQuality(task.copyWith(exportFormat: value));
+    if (task != null) {
+      _persistQuality(task.copyWith(exportFormat: value));
+    } else if (widget.settingsController != null) {
+      final settings = widget.settingsController!.settings.copyWith(
+        exportFormat: value,
+        exportFormatExplicitlySet: true,
+      );
+      unawaited(widget.settingsController!.update(settings));
+    }
   }
 
   void _updateRefineGridNeighbors(bool? value) {
@@ -5422,13 +5764,11 @@ class _StitchHomePageState extends State<StitchHomePage>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '照片与网格映射（${_mappingCells.length}/${task.photos.length}）',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            Text(
-              StitchLocalizations.of(context).text(
-                '照片不会从网格移除；照片上的锁定按钮可固定其网格位置。点按照片可选中一张，Shift+点按可添加或移除多张；“锁定所选照片的网格位置”可批量锁定。锁定会跳过该照片的相邻纹理匹配，仅适用于顺序已确认的原片。长按可查看完整文件名。',
+              StitchLocalizations.of(context).photoGridMappingTitle(
+                mappedPhotoCount: _mappingCells.length,
+                totalPhotoCount: task.photos.length,
               ),
+              style: Theme.of(context).textTheme.titleMedium,
             ),
             PhotoGridSelectionActions(
               selectionCount: _selectedPhotoPaths.length,
@@ -5442,6 +5782,22 @@ class _StitchHomePageState extends State<StitchHomePage>
               onUnlock: () =>
                   unawaited(_changeSelectedPhotoLocks(locked: false)),
             ),
+            if (_registrationIssues.isNotEmpty)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton.tonalIcon(
+                  key: const Key('grid-auto-lock-issues-action'),
+                  onPressed: canEditGrid
+                      ? () => unawaited(_lockRegistrationIssuePhotos(task))
+                      : null,
+                  icon: const Icon(Icons.push_pin),
+                  label: Text(
+                    StitchLocalizations.of(context).text(
+                      '自动锁定超标关系涉及的 ${_registrationIssuePhotoPaths(task).length} 张照片',
+                    ),
+                  ),
+                ),
+              ),
             PhotoGridIssueList(
               issues: _registrationIssues,
               handled: _issueHandled,

@@ -52,6 +52,44 @@ void main() {
         expect(find.byType(SelectableText), findsOneWidget);
       },
     );
+
+    testWidgets(
+      '${locale.languageCode}: unknown native errors show localized summaries and retain diagnostics',
+      (tester) async {
+        const raw =
+            'UNRECOGNIZED_NATIVE_FAILURE: encoder stopped unexpectedly (errno=47)';
+        await tester.pumpWidget(
+          MaterialApp(
+            locale: locale,
+            supportedLocales: StitchLocalizations.supportedLocales,
+            localizationsDelegates: const [
+              StitchLocalizations.delegate,
+              GlobalMaterialLocalizations.delegate,
+              GlobalWidgetsLocalizations.delegate,
+              GlobalCupertinoLocalizations.delegate,
+            ],
+            home: const Scaffold(body: StitchStatusMessage(message: raw)),
+          ),
+        );
+
+        expect(
+          find.text(
+            locale.languageCode == 'zh'
+                ? '操作失败；请展开查看技术详情。'
+                : 'Operation failed. See technical details below.',
+          ),
+          findsOneWidget,
+        );
+        expect(find.text(raw), findsNothing);
+        final tile = find.byType(ExpansionTile);
+        await tester.tap(
+          find.descendant(of: tile, matching: find.byType(material.Text)),
+        );
+        await tester.pumpAndSettle();
+        expect(find.text(raw), findsOneWidget);
+        expect(find.byType(SelectableText), findsOneWidget);
+      },
+    );
   }
 
   for (final locale in [const Locale('en'), const Locale('zh')]) {
