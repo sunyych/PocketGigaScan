@@ -736,7 +736,6 @@ void main() {
         find.text('Photo-to-grid mapping (2/2)'),
         delta: 800,
       );
-      final firstCell = find.byKey(const Key('grid-photo-select-0-0'));
       final secondCell = find.byKey(const Key('grid-photo-select-0-1'));
       final firstCoordinateLabel = find.byKey(
         const Key('grid-photo-coordinate-label-0-0'),
