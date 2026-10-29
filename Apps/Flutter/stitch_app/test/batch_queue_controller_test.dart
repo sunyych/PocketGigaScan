@@ -45,6 +45,12 @@ class _MemoryTasks extends TaskRepository {
   int duplicateCount = 0;
 
   @override
+  Future<Directory> root() async {
+    await taskRoot.create(recursive: true);
+    return taskRoot;
+  }
+
+  @override
   Future<Directory> directoryFor(String id) async =>
       Directory('${taskRoot.path}${Platform.pathSeparator}$id');
 
@@ -61,6 +67,7 @@ class _MemoryTasks extends TaskRepository {
 
   @override
   Future<void> removeTaskRecord(String id) async {
+    await super.removeTaskRecord(id);
     removed.add(id);
     values.remove(id);
   }
@@ -999,6 +1006,9 @@ void main() {
       final taskId = failingController.queues.single.items.single.taskId!;
       final task = tasks.values[taskId]!;
       final original = File(task.photos.first.storedPath);
+      final sourceOriginal = File(
+        '${parent.path}${Platform.pathSeparator}queue-save-denied${Platform.pathSeparator}image1.jpg',
+      );
       final output = Directory(task.outputDirectory)
         ..createSync(recursive: true);
       final exported = File(
@@ -1007,7 +1017,7 @@ void main() {
       failingQueues.failNextSave = true;
 
       await expectLater(
-        failingController.removeTask(taskId),
+        failingController.removeTask(taskId, deleteOwnedFiles: true),
         throwsA(
           isA<FileSystemException>().having(
             (error) => error.osError?.errorCode,
@@ -1024,15 +1034,17 @@ void main() {
       );
       expect(tasks.values.containsKey(taskId), isFalse);
       expect(tasks.removed, contains(taskId));
-      expect(original.existsSync(), isTrue);
-      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+      expect(original.existsSync(), isFalse);
+      expect(sourceOriginal.existsSync(), isTrue);
+      expect(exported.existsSync(), isFalse);
 
-      await failingController.removeTask(taskId);
+      await failingController.removeTask(taskId, deleteOwnedFiles: true);
 
       expect(failingController.queues.single.items, isEmpty);
       expect((await failingQueues.loadAll()).single.items, isEmpty);
-      expect(original.existsSync(), isTrue);
-      expect(exported.readAsBytesSync(), [8, 7, 6, 5]);
+      expect(original.existsSync(), isFalse);
+      expect(sourceOriginal.existsSync(), isTrue);
+      expect(exported.existsSync(), isFalse);
     },
   );
 

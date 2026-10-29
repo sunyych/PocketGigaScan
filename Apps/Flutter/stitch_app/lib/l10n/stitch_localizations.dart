@@ -703,6 +703,43 @@ class StitchLocalizations {
           ? source
           : 'Task imported; source cleanup failed and files were retained: ${usbSourceCleanupFailure[1]}';
     }
+    if (source == '任务记录已删除；任务拥有的本地副本和已验证导出文件已清理。') {
+      return isChinese
+          ? source
+          : 'Task record deleted; task-owned local copies and verified exports were removed.';
+    }
+    if (source == '任务记录已删除；任务文件已保留。') {
+      return isChinese ? source : 'Task record deleted; task files were kept.';
+    }
+    final cleanupFailure = RegExp(
+      r'^任务记录已删除；部分文件清理失败：(.*)$',
+    ).firstMatch(source);
+    if (cleanupFailure != null) {
+      return isChinese
+          ? source
+          : 'Task record deleted; some files could not be cleaned up: ${cleanupFailure[1]}';
+    }
+    final clearedFailedTasks = RegExp(
+      r'^已删除 (\d+) 条任务记录；任务文件按所选选项处理。$',
+    ).firstMatch(source);
+    if (clearedFailedTasks != null) {
+      return isChinese
+          ? source
+          : 'Deleted ${clearedFailedTasks[1]} task record(s); task files were handled using the selected options.';
+    }
+    final queueClearSummary = RegExp(
+      r'^已清空 (\d+) 个失败任务(?:。文件未清理：(.*?))?(?:。移除失败：(.*?))?。?$',
+    ).firstMatch(source);
+    if (queueClearSummary != null) {
+      if (isChinese) return source;
+      return [
+        'Cleared ${queueClearSummary[1]} failed task(s).',
+        if (queueClearSummary[2] != null)
+          'Files were not cleaned up: ${queueClearSummary[2]}.',
+        if (queueClearSummary[3] != null)
+          'Could not remove: ${queueClearSummary[3]}',
+      ].join(' ');
+    }
     final deletedCount = RegExp(
       r'^已删除 (\d+) 条任务记录；原片、瓦片和导出照片已保留。$',
     ).firstMatch(source);
@@ -726,6 +763,22 @@ class StitchLocalizations {
       return isChinese
           ? source
           : 'This will delete ${deleteSelected[1]} task record(s) and queue references. Source photos, rendered tiles, and exported images will be kept.';
+    }
+    final deleteSelectedRecords = RegExp(
+      r'^将删除 (\d+) 条任务记录和队列引用。$',
+    ).firstMatch(source);
+    if (deleteSelectedRecords != null) {
+      return isChinese
+          ? source
+          : 'This will delete ${deleteSelectedRecords[1]} task record(s) and queue references.';
+    }
+    final removedTaskCleanup = RegExp(
+      r'^任务已移除，但部分文件未清理：(.*)$',
+    ).firstMatch(source);
+    if (removedTaskCleanup != null) {
+      return isChinese
+          ? source
+          : 'Task removed, but some files were not cleaned up: ${removedTaskCleanup[1]}';
     }
     final changedFormat = RegExp(r'^输出格式已改为 (.+)$').firstMatch(source);
     if (changedFormat != null) {
@@ -1430,6 +1483,25 @@ class StitchLocalizations {
     '应用': 'Apply',
     '保留': 'Keep',
     '删除任务记录': 'Delete task record',
+    '删除任务': 'Delete task',
+    '清空失败任务': 'Clear failed tasks',
+    '清空失败任务？': 'Clear failed tasks?',
+    '同时删除任务文件': 'Also delete task files',
+    '同时删除失败任务文件': 'Also delete failed-task files',
+    '同时删除其他任务文件': 'Also delete other task files',
+    '清理任务拥有的文件': 'Delete task-owned files',
+    '默认勾选': 'Checked by default',
+    '默认保留': 'Kept by default',
+    '删除任务记录及队列引用。可选择清理应用为任务保存的输入副本、瓦片和已验证导出文件。':
+        'Delete the task record and queue references. You can also delete app-owned input copies, tiles, and verified exports.',
+    '移除任务记录和队列项目。处理中任务会先请求停止。':
+        'Remove the task record and queue item. Active work is stopped first.',
+    '此项目没有本地任务记录；只移除队列项目，来源文件保留。':
+        'This item has no local task record. Only the queue item is removed; source files are kept.',
+    '没有任务记录的失败项目只会从队列移除，来源文件会保留。':
+        'Failed items without a task record are removed from the queue; source files are kept.',
+    '将移除所有失败队列项目及其任务记录。':
+        'Remove all failed queue items and their task records.',
     '删除本地任务？': 'Delete local task?',
     '删除任务记录？': 'Delete task record?',
     '只删除任务记录和队列引用。已导入原片、渲染瓦片及导出照片都会保留。':

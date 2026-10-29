@@ -12,6 +12,7 @@ import 'services/mobile_storage_service.dart';
 import 'services/mobile_runtime_service.dart';
 import 'services/platform_file_dialogs.dart';
 import 'services/settings_controller.dart';
+import 'services/task_deletion_selection.dart';
 import 'services/power_service.dart';
 import 'models/stitch_task.dart';
 import 'dwarf_device_page.dart';
@@ -546,32 +547,150 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   }
 
   Future<void> _removeItem(BatchQueue queue, BatchQueueItem item) async {
-    final confirmed = await showDialog<bool>(
+    var selection = TaskDeletionSelection.forQueueItem(item.state);
+    final choice = await showDialog<(bool, bool)>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除本地任务？'),
-        content: const Text('只移除任务记录和队列项目。原片、渲染瓦片及已导出照片都会保留。处理中任务会先请求停止。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('保留'),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
+          title: const Text('删除本地任务？'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('移除任务记录和队列项目。处理中任务会先请求停止。'),
+              if (item.taskId == null)
+                const Text('此项目没有本地任务记录；只移除队列项目，来源文件保留。'),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: selection.deleteFailedFiles,
+                title: const Text('同时删除任务文件'),
+                subtitle: Text(
+                  item.state == BatchItemState.failed ? '默认勾选' : '默认保留',
+                ),
+                onChanged: (value) => setDialogState(
+                  () => selection = selection.copyWith(
+                    deleteFailedFiles: value == true,
+                  ),
+                ),
+              ),
+            ],
           ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除任务记录'),
-          ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('保留'),
+            ),
+            FilledButton.tonal(
+              onPressed: () =>
+                  Navigator.pop(context, (true, selection.deleteFailedFiles)),
+              child: const Text('删除任务'),
+            ),
+          ],
+        ),
       ),
     );
-    if (confirmed != true || !mounted) return;
+    if (choice == null || !choice.$1 || !mounted) return;
     try {
-      await _controller.removeQueueItem(queue.id, item.id);
+      final removal = await _controller.removeQueueItem(
+        queue.id,
+        item.id,
+        deleteOwnedFiles: choice.$2,
+      );
+      if (removal.failures.isNotEmpty && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('任务已移除，但部分文件未清理：${removal.failures.join('；')}'),
+          ),
+        );
+      }
     } on Object catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('没有删除队列项目：$error')));
       }
+    }
+  }
+
+  Future<void> _clearFailedQueueItems() async {
+    final failed = <(BatchQueue, BatchQueueItem)>[
+      for (final queue in _controller.queues)
+        for (final item in queue.items)
+          if (item.state == BatchItemState.failed) (queue, item),
+    ];
+    if (failed.isEmpty || _busy || _controller.loading) return;
+    var selection = TaskDeletionSelection.forTasks(
+      failed.map((entry) => StitchPhase.failed),
+    );
+    final choice = await showDialog<(bool, bool)>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
+          title: const Text('清空失败任务？'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text('将移除所有失败队列项目及其任务记录。'),
+              if (failed.any((entry) => entry.$2.taskId == null))
+                const Text('没有任务记录的失败项目只会从队列移除，来源文件会保留。'),
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                value: selection.deleteFailedFiles,
+                title: const Text('同时删除任务文件'),
+                subtitle: const Text('默认勾选'),
+                onChanged: (value) => setDialogState(
+                  () => selection = selection.copyWith(
+                    deleteFailedFiles: value == true,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('保留'),
+            ),
+            FilledButton.tonal(
+              onPressed: () =>
+                  Navigator.pop(context, (true, selection.deleteFailedFiles)),
+              child: const Text('清空失败任务'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null || !choice.$1 || !mounted) return;
+    setState(() => _busy = true);
+    var removed = 0;
+    final errors = <String>[];
+    final cleanup = <String>[];
+    for (final (queue, item) in failed) {
+      try {
+        final result = await _controller.removeQueueItem(
+          queue.id,
+          item.id,
+          deleteOwnedFiles: choice.$2,
+        );
+        removed++;
+        cleanup.addAll(
+          result.failures.map((failure) => '${item.name}: $failure'),
+        );
+      } on Object catch (error) {
+        errors.add('${item.name}: $error');
+      }
+    }
+    if (mounted) {
+      setState(() => _busy = false);
+      final details = <String>[
+        '已清空 $removed 个失败任务',
+        if (cleanup.isNotEmpty) '文件未清理：${cleanup.join('；')}',
+        if (errors.isNotEmpty) '移除失败：${errors.join('；')}',
+      ];
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(details.join('。'))));
     }
   }
 
@@ -767,6 +886,23 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                       label: const Text('添加批次'),
                     ),
                   ],
+                ),
+                ListTile(
+                  key: const Key('clear-failed-queue-items'),
+                  leading: const Icon(Icons.delete_sweep_outlined),
+                  title: const Text('清空失败任务'),
+                  trailing: Text(
+                    '${_controller.queues.expand((queue) => queue.items).where((item) => item.state == BatchItemState.failed).length}',
+                  ),
+                  enabled:
+                      !_busy &&
+                      !_controller.loading &&
+                      _controller.queues.any(
+                        (queue) => queue.items.any(
+                          (item) => item.state == BatchItemState.failed,
+                        ),
+                      ),
+                  onTap: _clearFailedQueueItems,
                 ),
                 for (final queue in _controller.queues) ...[
                   _queueHeader(queue),

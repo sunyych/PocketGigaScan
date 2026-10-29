@@ -111,6 +111,21 @@ void main() {
       isNull,
     );
     expect(english.text('批量删除本地任务？'), 'Delete selected local tasks?');
+    expect(english.text('清空失败任务'), 'Clear failed tasks');
+    expect(english.text('默认勾选'), 'Checked by default');
+    expect(
+      english.text('将删除 3 条任务记录和队列引用。'),
+      'This will delete 3 task record(s) and queue references.',
+    );
+    expect(english.text('已清空 2 个失败任务'), 'Cleared 2 failed task(s).');
+    expect(
+      english.text('已清空 2 个失败任务。文件未清理：render目录保留。移除失败：item-a: disk denied'),
+      'Cleared 2 failed task(s). Files were not cleaned up: render目录保留. Could not remove: item-a: disk denied',
+    );
+    expect(
+      english.text('任务已移除，但部分文件未清理：已发布的外部副本已保留，请在目标位置删除'),
+      'Task removed, but some files were not cleaned up: 已发布的外部副本已保留，请在目标位置删除',
+    );
     expect(english.text('已选 3 项'), '3 selected');
 
     final englishParts = english.statusMessageParts(

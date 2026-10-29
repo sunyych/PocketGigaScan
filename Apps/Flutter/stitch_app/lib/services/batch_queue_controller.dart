@@ -2201,9 +2201,13 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   /// Removes a local task only after any native job is confirmed stopped.
-  /// The task repository keeps a durable tombstone and never deletes inputs,
-  /// tiles or exported images.
-  Future<void> removeTask(String taskId) async {
+  /// Task-owned inputs, render data and verified exports are kept by default;
+  /// when explicitly requested, the repository safely removes eligible files
+  /// while retaining the durable tombstone.
+  Future<TaskRemovalResult> removeTask(
+    String taskId, {
+    bool deleteOwnedFiles = false,
+  }) async {
     if (_loading || _importing) {
       throw StateError('队列正在恢复或导入，请稍后再删除任务');
     }
@@ -2243,7 +2247,10 @@ class BatchQueueController extends ChangeNotifier {
       // Commit the task tombstone before dropping durable queue ownership. If
       // storage denies the metadata write, leave the queue reference available
       // for an explicit retry and keep the task visible in the local cache.
-      await _taskRepository.removeTaskRecord(taskId);
+      final removal = await _taskRepository.removeTaskRecordWithCleanup(
+        task,
+        deleteOwnedFiles: deleteOwnedFiles,
+      );
       for (final ref in refs) {
         while (true) {
           final current = _find(ref.$1.id, ref.$2.id);
@@ -2272,6 +2279,7 @@ class BatchQueueController extends ChangeNotifier {
         _inFlight.remove(ref.$2.id);
       }
       notifyListeners();
+      return removal;
     } finally {
       for (final ref in refs) {
         _deletingTaskIds.remove(ref.$2.id);
@@ -2279,12 +2287,15 @@ class BatchQueueController extends ChangeNotifier {
     }
   }
 
-  Future<void> removeQueueItem(String queueId, String itemId) async {
+  Future<TaskRemovalResult> removeQueueItem(
+    String queueId,
+    String itemId, {
+    bool deleteOwnedFiles = false,
+  }) async {
     final found = _find(queueId, itemId);
-    if (found == null) return;
+    if (found == null) return const TaskRemovalResult();
     if (found.item.taskId != null) {
-      await removeTask(found.item.taskId!);
-      return;
+      return removeTask(found.item.taskId!, deleteOwnedFiles: deleteOwnedFiles);
     }
     if (_loading || _importing) {
       throw StateError('队列正在恢复或导入，请稍后再删除');
@@ -2304,6 +2315,7 @@ class BatchQueueController extends ChangeNotifier {
     _queues[found.index] = queue;
     await _save(queue);
     notifyListeners();
+    return const TaskRemovalResult();
   }
 
   Future<String> _nativeState(String jobId) async =>

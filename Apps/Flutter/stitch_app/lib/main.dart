@@ -32,6 +32,7 @@ import 'services/scene_model_service.dart';
 import 'services/registration_issues.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
+import 'services/task_deletion_selection.dart';
 import 'services/task_thumbnail_service.dart';
 import 'services/jpeg_dimension_estimator.dart';
 import 'services/task_record_service.dart';
@@ -3242,24 +3243,13 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   Future<void> _deleteTask(StitchTask task) async {
     if (!_canDeleteTask(task)) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('删除本地任务？'),
-        content: const Text('只删除任务记录和队列引用。已导入原片、渲染瓦片及导出照片都会保留。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('保留'),
-          ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除任务记录'),
-          ),
-        ],
-      ),
+    final choice = await _confirmTaskDeletion(
+      [task],
+      title: '删除本地任务？',
+      description: '删除任务记录及队列引用。可选择清理应用为任务保存的输入副本、瓦片和已验证导出文件。',
     );
-    if (confirmed != true ||
+    if (choice == null ||
+        !choice.$1 ||
         !mounted ||
         !_batchOwnershipReady ||
         _isActivelyBatchOwned(task)) {
@@ -3274,11 +3264,21 @@ class _StitchHomePageState extends State<StitchHomePage>
     try {
       await _performanceSaveQueue.enqueue(() async {});
       final batchController = _batchController;
+      final deleteFiles = task.phase == StitchPhase.failed
+          ? choice.$3
+          : choice.$2;
+      TaskRemovalResult removal;
       if (batchController != null) {
-        await batchController.removeTask(task.id);
+        removal = await batchController.removeTask(
+          task.id,
+          deleteOwnedFiles: deleteFiles,
+        );
       } else {
         await _stopNativeTask(task);
-        await _repository.removeTaskRecord(task.id);
+        removal = await _repository.removeTaskRecordWithCleanup(
+          task,
+          deleteOwnedFiles: deleteFiles,
+        );
       }
       if (!mounted) return;
       if (_task?.id == task.id) _clearPhotoGridIssueState();
@@ -3292,7 +3292,11 @@ class _StitchHomePageState extends State<StitchHomePage>
           _manifest = null;
           _mappingCells = const [];
         }
-        _message = '任务记录已删除；原片、瓦片和已导出照片已保留。';
+        _message = removal.cleanupComplete
+            ? deleteFiles
+                  ? '任务记录已删除；任务拥有的本地副本和已验证导出文件已清理。'
+                  : '任务记录已删除；任务文件已保留。'
+            : '任务记录已删除；部分文件清理失败：${removal.failures.join('；')}';
       });
       await _refreshTasks();
     } on Object catch (error) {
@@ -3317,6 +3321,74 @@ class _StitchHomePageState extends State<StitchHomePage>
         StitchPhase.pausing,
         StitchPhase.exporting,
       }.contains(task.phase);
+
+  Future<(bool, bool, bool)?> _confirmTaskDeletion(
+    List<StitchTask> tasks, {
+    required String title,
+    required String description,
+  }) async {
+    var selection = TaskDeletionSelection.forTasks(
+      tasks.map((task) => task.phase),
+    );
+    final hasSuccessful = tasks.any((task) => task.phase != StitchPhase.failed);
+    final hasFailed = tasks.any((task) => task.phase == StitchPhase.failed);
+    return showDialog<(bool, bool, bool)>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
+          title: Text(title),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(description),
+              if (hasSuccessful)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: selection.deleteOtherFiles,
+                  title: Text(
+                    tasks.length == 1 || !hasFailed ? '同时删除任务文件' : '同时删除其他任务文件',
+                  ),
+                  subtitle: const Text('默认保留'),
+                  onChanged: (value) => setDialogState(
+                    () => selection = selection.copyWith(
+                      deleteOtherFiles: value == true,
+                    ),
+                  ),
+                ),
+              if (hasFailed)
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  value: selection.deleteFailedFiles,
+                  title: Text(tasks.length == 1 ? '同时删除任务文件' : '同时删除失败任务文件'),
+                  subtitle: const Text('默认勾选'),
+                  onChanged: (value) => setDialogState(
+                    () => selection = selection.copyWith(
+                      deleteFailedFiles: value == true,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('保留'),
+            ),
+            FilledButton.tonal(
+              onPressed: () => Navigator.pop(context, (
+                true,
+                selection.deleteOtherFiles,
+                selection.deleteFailedFiles,
+              )),
+              child: const Text('删除任务'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   void _toggleTaskSelection(StitchTask task) {
     if (!_canDeleteTask(task)) return;
@@ -3343,24 +3415,12 @@ class _StitchHomePageState extends State<StitchHomePage>
       }
       return;
     }
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('批量删除本地任务？'),
-        content: Text('将删除 ${selected.length} 条任务记录和队列引用。原片、渲染瓦片及已导出照片都会保留。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('保留'),
-          ),
-          FilledButton.tonal(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('删除任务记录'),
-          ),
-        ],
-      ),
+    final choice = await _confirmTaskDeletion(
+      selected,
+      title: '批量删除本地任务？',
+      description: '将删除 ${selected.length} 条任务记录和队列引用。',
     );
-    if (confirmed != true || !mounted) return;
+    if (choice == null || !choice.$1 || !mounted) return;
     setState(() {
       _busy = true;
       _message = null;
@@ -3369,16 +3429,23 @@ class _StitchHomePageState extends State<StitchHomePage>
     _poll?.cancel();
     var deleted = 0;
     final errors = <String>[];
+    final cleanupFailures = <String>[];
     final batchController = _batchController;
     for (final task in selected) {
       try {
         await _performanceSaveQueue.enqueue(() async {});
-        if (batchController != null) {
-          await batchController.removeTask(task.id);
-        } else {
-          await _stopNativeTask(task);
-          await _repository.removeTaskRecord(task.id);
-        }
+        final deleteFiles = task.phase == StitchPhase.failed
+            ? choice.$3
+            : choice.$2;
+        final removal = batchController != null
+            ? await batchController.removeTask(
+                task.id,
+                deleteOwnedFiles: deleteFiles,
+              )
+            : await _removeTaskWithoutBatchController(task, deleteFiles);
+        cleanupFailures.addAll(
+          removal.failures.map((failure) => '${task.id}: $failure'),
+        );
         deleted++;
         if (_task?.id == task.id) _clearPhotoGridIssueState();
       } on Object catch (error) {
@@ -3391,12 +3458,47 @@ class _StitchHomePageState extends State<StitchHomePage>
         (id) => selected.any((task) => task.id == id),
       );
       _taskSelectionMode = false;
-      _message = errors.isEmpty
-          ? '已删除 $deleted 条任务记录；原片、瓦片和导出照片已保留。'
-          : '已删除 $deleted 条任务记录；${errors.length} 条未删除：${errors.join('；')}';
+      _message = [
+        '已删除 $deleted 条任务记录；任务文件按所选选项处理。',
+        if (cleanupFailures.isNotEmpty)
+          '文件清理失败 ${cleanupFailures.length} 项：${cleanupFailures.join('；')}',
+        if (errors.isNotEmpty) '${errors.length} 条任务未删除：${errors.join('；')}',
+      ].join(' ');
     });
     await _refreshTasks();
     if (mounted) setState(() => _busy = false);
+  }
+
+  Future<void> _clearFailedTasks() async {
+    final failed = _tasks
+        .where((task) => task.phase == StitchPhase.failed)
+        .where(_canDeleteTask)
+        .toList();
+    if (failed.isEmpty || _busy) return;
+    final priorSelectionMode = _taskSelectionMode;
+    final priorSelection = Set<String>.of(_selectedTaskIds);
+    setState(() {
+      _taskSelectionMode = true;
+      _selectedTaskIds = failed.map((task) => task.id).toSet();
+    });
+    await _deleteSelectedTasks();
+    if (mounted && _taskSelectionMode) {
+      setState(() {
+        _taskSelectionMode = priorSelectionMode;
+        _selectedTaskIds = priorSelection;
+      });
+    }
+  }
+
+  Future<TaskRemovalResult> _removeTaskWithoutBatchController(
+    StitchTask task,
+    bool deleteFiles,
+  ) async {
+    await _stopNativeTask(task);
+    return _repository.removeTaskRecordWithCleanup(
+      task,
+      deleteOwnedFiles: deleteFiles,
+    );
   }
 
   Future<void> _stopNativeTask(StitchTask task) async {
@@ -4192,10 +4294,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                   width: railWidth,
                   child: Row(
                     children: [
-                      SizedBox(
-                        width: railWidth - 12,
-                        child: _taskRail(),
-                      ),
+                      SizedBox(width: railWidth - 12, child: _taskRail()),
                       _taskRailResizeHandle(
                         railWidth: railWidth,
                         textScale: textScale,
@@ -4503,6 +4602,21 @@ class _StitchHomePageState extends State<StitchHomePage>
                       }),
                 icon: const Icon(Icons.checklist),
               ),
+      ),
+      ListTile(
+        key: const Key('clear-failed-tasks'),
+        leading: const Icon(Icons.delete_sweep_outlined),
+        title: const Text('清空失败任务'),
+        trailing: Text(
+          '${_tasks.where((task) => task.phase == StitchPhase.failed).length}',
+        ),
+        enabled:
+            !_busy &&
+            _tasks.any(
+              (task) =>
+                  task.phase == StitchPhase.failed && _canDeleteTask(task),
+            ),
+        onTap: _clearFailedTasks,
       ),
       if (_deviceTransfers.isNotEmpty) ...[
         ListTile(
