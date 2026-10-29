@@ -46,7 +46,7 @@ Planned provider: Free code signing provided by SignPath.io, certificate by Sign
 - On Windows/macOS, optionally protect complete people at seams and smooth water overlap. The two settings are independent and default off; the bundled model runs offline. Phones hide these controls and keep semantic inference disabled.
 - Open completed results in a tiled viewer with wheel zoom and drag. Task removal deletes only task records, never originals or exported images.
 - Completed tasks hide processing settings/progress; create a copy to change settings and stitch again. Stitch details/logs open on demand.
-- Open Settings to choose system/English/Chinese language, system/light/dark appearance, accent color, output quality, performance defaults and output folder. Processing defaults apply to new tasks; saved tasks retain their options.
+- Open Settings to choose system/English/Chinese language, system/light/dark appearance, accent color, output quality, performance defaults, output folder and text size. Text size follows the system by default; manual scaling ranges from 100% to 200% in 10% steps, with a 150% Large text shortcut, a 100% reset and live preview. Processing defaults apply to new tasks; saved tasks retain their options.
 - Expand Stitching log separately from Stitch details to see localized steps with timestamps and start/finish/total wall-clock time, including pauses and automatic export. Legacy tasks without timestamps show unknown times.
 
 Android adds folder access through the system document picker, streamed save/share,
@@ -77,6 +77,15 @@ Settings includes an automatic/manual shared memory budget using current OS
 total/available memory. Larger desktop budgets increase source-cache capacity;
 they are allocated on demand. Existing reservations drain safely when lowering
 the budget. Android retains conservative mobile headroom and concurrency limits.
+
+## User manuals
+
+- [Chinese functional manual](output/pdf/PocketGigaScan_Functional_Manual_ZH.pdf)
+- [English functional manual](output/pdf/PocketGigaScan_Functional_Manual_EN.pdf)
+- [Manual sources, screenshots and reproduction steps](docs/user-manual/README.md)
+
+Manual screenshots are isolated Flutter widget renders using synthetic fixtures;
+they are not captures of the installed application's GUI.
 
 Each task has one atomic, versioned `task.json` master record. It keeps source
 hashes, grid and lock provenance, reconciled native poses/intrinsics/local warps,

@@ -1,0 +1,306 @@
+{
+  "zh": {
+    "metadata": {
+      "title": "PocketGigaScan 功能说明书",
+      "subject": "全景照片的导入、排列、拼接与导出"
+    },
+    "cover": {
+      "title": "PocketGigaScan",
+      "subtitle": "全景照片拼接功能说明书",
+      "edition": "中文版本 | 按当前应用界面编写",
+      "overview": "导入同一全景的 JPEG 原片，核对网格和配准，选择输出格式，在本机拼接并检查结果。照片导入后复制到应用任务目录；拼接与导出均在本机执行。",
+      "screenshot": "zh-01-home.png",
+      "caption": "主工作区示例（合成纹理示例）。实际界面随安装版本而变化。"
+    },
+    "sections": [
+      {
+        "title": "导入照片并核对排列",
+        "intro": "在主窗口点击“选择多张 JPEG 原片”或“导入照片”按钮，选取同一全景的 .jpg/.jpeg 照片。创建任务后展开“排列与相机”，确认每张照片在网格中的位置。",
+        "steps": [
+          "文件名含有可识别的行列信息时，优先使用“自动读取文件名行列”；否则选择“按选择顺序排列”。",
+          "手动排列时输入行数和列数，并选择逐行/逐列、起拍角及蛇形顺序。",
+          "逐行查看缩略图与坐标，确认顺序、行列没有错位后再拼接。",
+          "单击照片会选择它；使用明确的锁定操作才会固定网格位置。"
+        ],
+        "note": {"label": "准确边界", "body": "标准单任务导入只接受 JPEG/JPG。文件名推断和相机排列可能不准确；强制网格放置是估算位置，应人工检查。原片复制到本机任务目录，不会因导入而上传。"},
+        "screenshot": "zh-02-arrangement.png",
+        "caption": "排列与相机参数和照片网格。"
+      },
+      {
+        "title": "双击预览与配准诊断",
+        "intro": "网格照片可双击打开原片预览。此操作不改变照片选择或位置锁定状态。任务界面还会列出相邻照片配准问题，便于定位检查。",
+        "steps": [
+          "在网格照片上快速双击，打开深色背景的预览窗口。",
+          "拖动或缩放查看照片细节，点关闭按钮返回网格。",
+          "展开配准问题并选择一条记录，查看相关的相邻照片。",
+          "确认网格、纹理和重叠关系后再决定是否修正或锁定照片。"
+        ],
+        "note": {"label": "预览限制", "body": "预览使用受限尺寸解码，最长边最多 2,048 像素；它用于查看来源照片，不是全分辨率编辑器。低纹理、视差、移动物体或邻片没有干净覆盖都可能影响自动配准。"},
+      "screenshot": "zh-04-preview.png",
+        "caption": "双击网格照片打开原片预览。"
+      },
+      {
+        "title": "选择输出格式和画质",
+        "intro": "拼接前展开“输出与画质”，为当前任务选择整图格式。Windows/macOS 初始默认 JPEG、Android 为 TIFF、iOS 为 PNG；已保存任务保留自己的处理设置。",
+        "steps": [
+          "根据后续用途选择 PNG、TIFF/BigTIFF、JPEG XL 或 JPEG。",
+          "检查接缝融合、局部纹理校正等选项；不确定时保留默认值。",
+          "Windows/macOS 可选人物保护和水面平滑；两项独立且默认关闭。",
+          "开始前确认格式、输出位置和任务设置。"
+        ],
+        "note": {"label": "JPEG 与 JPEG XL", "body": "JPEG 为有损质量 90，透明区域铺白底。任一边长超过 65,500 像素时会按比例缩小；如需保留更大边长，考虑 TIFF/BigTIFF。JPEG XL 当前只有有损编码，并且需要程序加载 libjxl 才能使用。"},
+      "screenshot": "zh-03-output.png",
+        "caption": "整图输出格式和质量选项。"
+      },
+      {
+        "title": "运行任务并阅读状态",
+        "intro": "任务状态卡显示拼接阶段与进度。“合成详情”和“合成日志”是两个独立面板，分别用于查看任务/结果信息和处理步骤。",
+        "steps": [
+          "确认任务处于可运行状态，再启动拼接。大型网格可能消耗较多时间和内存。",
+          "在界面提供的情况下使用暂停、继续或取消；手机切到后台时可能请求协作暂停。",
+          "展开“合成详情”查看输出格式和诊断；展开“合成日志”查看时间戳和阶段记录。",
+          "发生错误时先读摘要和技术详情，再检查照片排列、存储空间与输出目录。"
+        ],
+        "note": {"label": "时间信息", "body": "较新的任务有阶段计时；旧任务可能显示时间未知。自动拼接结果仍应打开查看器检查。"},
+        "caption": "任务状态卡以及可展开的详情、日志面板。"
+      },
+      {
+        "title": "查看全景并检查来源",
+        "intro": "完成任务可在分块查看器中打开全景，使用缩放与拖动检查接缝、边缘及细节。手机端支持触控查看。",
+        "steps": [
+          "打开导出图像查看器，先适配窗口查看整张全景。",
+          "放大检查接缝和可能有运动物体的区域，拖动浏览其他位置。",
+          "选择“检查像素来源”后点击全景位置，查看几何覆盖该点的来源照片。",
+          "用桌面端的“在文件夹中显示图像”或手机端的保存/分享操作访问结果。"
+        ],
+        "note": {"label": "来源检查不等于混合追踪", "body": "来源面板列出几何上覆盖该处的原片及邻片诊断，不推断渲染器最终混合像素来自哪张照片。部分遮挡没有邻片干净覆盖，无法保证消除。"},
+        "screenshot": "zh-05-result.png",
+        "caption": "原生引擎渲染的合成纹理示例；6 张中有 4 张的相对位置由网格估算，需视觉复核，不代表拼接画质验收。"
+      },
+      {
+        "title": "处理批量文件夹",
+        "intro": "批处理队列适合将多组全景分开存放的工作流：选择一个母目录，每个直接子目录成为一个独立的全景任务。",
+        "steps": [
+          "在主界面打开“批处理队列”，选择包含各全景子目录的母目录。",
+          "确认每个子目录只放一组全景原片，避免混入其他照片。",
+          "必要时编辑某个任务的行列与视角，然后启动队列。",
+          "检查队列中每个任务的状态；可按需添加新批次。"
+        ],
+        "note": {"label": "处理范围", "body": "批处理按母目录的直接子目录建立任务，不表示会递归扫描任意层级。并发由设备资源策略限制。"},
+        "screenshot": "zh-06-queue.png",
+        "caption": "批处理队列入口；尚未选择母目录。"
+      },
+      {
+        "title": "设置输出和性能默认值",
+        "intro": "齿轮按钮打开“设置”，可选择语言、外观、强调色、输出文件夹、画质与性能默认值。默认值用于新任务，已建立任务保留各自设置。",
+        "steps": [
+          "按偏好设置系统/中文/English、浅色或深色外观以及强调色。",
+          "选择常用输出格式和默认输出文件夹。Windows/macOS 会写入所选文件夹。",
+          "查看性能默认值和共享内存预算；不确定时保持自动或推荐设置。",
+          "Android 会先保留应用私有结果，再复制到持久输出文件夹；复制失败可重试。"
+        ],
+        "note": {"label": "修改已完成任务", "body": "完成任务隐藏处理设置。需要用新参数重做时，先新建副本，再修改副本设置。删除任务只删除记录和队列引用，保留原片和导出图像。"},
+        "screenshot": "zh-07-settings.png",
+        "caption": "应用语言、输出和默认设置。"
+      },
+      {
+        "title": "调整界面文字大小",
+        "intro": "在“设置”中使用“文字大小”控制界面文字的缩放方式。默认开启“跟随系统文字大小”，应用随设备的系统文字比例显示。",
+        "steps": [
+          "保留“跟随系统文字大小”以使用设备当前的系统文字比例。",
+          "关闭此选项后，可手动设置 100%–200% 文字大小，滑块每次调整 10%。",
+          "点击“大字体 150%”可快速调整到 150%；点击“恢复 100%”返回标准比例。",
+          "观察实时预览，再返回应用检查任务页、设置页和查看器中的文字。"
+        ],
+        "note": {"label": "旧设置", "body": "旧版配置中没有字号选项时，默认跟随系统文字大小。提高文字比例后，部分长标签可能换行；内容区域可滚动。"},
+        "screenshot": "zh-09-large-text.png",
+        "caption": "文字大小选项、快捷调整和实时预览。"
+      },
+      {
+        "title": "性能选项与移动端 DWARF3",
+        "intro": "桌面端可以调整匹配、渲染、缓存与内存选项。移动端另提供 DWARF3 全景原片下载入口；两类功能都受设备和网络条件影响。",
+        "steps": [
+          "只有了解设备资源与效果取舍时才修改并行、缓存或快速配准默认值。",
+          "在移动设备中连接可访问相机的本地 Wi-Fi，再打开 DWARF3 全景页面。",
+          "核对设备地址（默认 192.168.88.1），连接或刷新列表，选择全景并下载。",
+          "下载完打开任务，检查排列后按普通本地拼接流程继续。"
+        ],
+        "note": {"label": "平台边界", "body": "人物保护/水面平滑仅 Windows 和 macOS 提供，模型离线运行；手机端隐藏此项。DWARF3 入口只下载原片，不远程拍摄或控制相机；需在实际局域网和设备验证连接。"},
+        "screenshot": "zh-08-performance.png",
+        "caption": "性能默认值示例；DWARF3 仅在移动端提供。"
+      },
+      {
+        "title": "格式比较与常见问题",
+        "intro": "选择格式前考虑兼容性、体积和是否需要无损后处理。以下为功能差异摘要；实际输出也受设备资源和编码限制。",
+        "format_table": [
+          ["格式", "压缩", "用途", "注意事项"],
+          ["PNG", "无损", "通用查看、后续处理", "可能较大；保留透明像素。"],
+          ["TIFF / BigTIFF", "无损", "高保真、大型文件", "接收软件需支持相应 TIFF 类型。"],
+        ["JPEG XL", "有损", "较高压缩效率", "需要程序加载 libjxl；兼容性取决于查看器。"],
+          ["JPEG", "有损质量 90", "广泛分享", "透明铺白；边长上限 65,500，超出缩小。"]
+        ],
+        "troubleshooting": [
+          ["问题", "先检查"],
+          ["顺序不正确", "网格模式、行列数、起拍角和逐行/逐列设置。"],
+          ["照片配准失败", "相邻区域是否有清晰纹理与足够重叠；检查问题照片。"],
+          ["接缝有重影", "运动物体或视差；查看桌面接缝选项和结果，不保证彻底修复。"],
+          ["无法导出", "磁盘空间、文件夹权限和所选格式；Android 可重试输出复制。"],
+          ["找不到已删除任务的图片", "删除任务不会删除原片和导出图像，检查其保留位置。"]
+        ],
+        "note": {"label": "结果复核", "body": "自动排列、网格位置和重叠率可能是估算。移动物体、视差和邻片没有干净覆盖时可能留下瑕疵；请放大查看实际结果。"}
+      }
+    ]
+  },
+  "en": {
+    "metadata": {
+      "title": "PocketGigaScan Feature Manual",
+      "subject": "Importing, arranging, stitching and exporting panoramas"
+    },
+    "cover": {
+      "title": "PocketGigaScan",
+      "subtitle": "Panorama Stitching Feature Manual",
+      "edition": "English edition | Based on the current application interface",
+      "overview": "Import JPEG originals from one panorama, check the grid and registration, choose an output format, stitch locally and inspect the result. Photos are copied into an app-owned task directory; stitching and export run on this device.",
+      "screenshot": "en-01-home.png",
+      "caption": "Main workspace example with a synthetic texture. The installed version may differ."
+    },
+    "sections": [
+      {
+        "title": "Import Photos and Check Their Arrangement",
+        "intro": "Select Import photos in the main window, then choose .jpg/.jpeg photos from one panorama. After task creation, expand Grid and camera and check each photo's position.",
+        "steps": [
+          "If filenames contain recognizable row and column information, start with Read row and column from filenames. Otherwise choose Arrange in selection order.",
+          "For manual arrangement, enter rows and columns, then choose row-wise or column-wise traversal, the starting corner and serpentine order.",
+          "Review thumbnails and coordinates across the grid. Correct any ordering or row/column errors before stitching.",
+          "Clicking a photo selects it; use an explicit lock action to pin its grid position."
+        ],
+        "note": {"label": "Accuracy boundary", "body": "Standard single-task import accepts JPEG/JPG only. Filename inference and camera traversal may be wrong; forced grid placement is an estimate and needs review. Originals are copied to a local task directory and are not uploaded by importing."},
+        "screenshot": "en-02-arrangement.png",
+        "caption": "Grid and camera settings with the photo thumbnails."
+      },
+      {
+        "title": "Double-Click Preview and Registration Diagnostics",
+        "intro": "Double-click a grid photo to preview the original. Previewing does not change photo selection or grid lock state. The task page also lists neighboring-photo registration issues to review.",
+        "steps": [
+          "Double-click a photo in the grid to open the preview on a dark background.",
+          "Pan or zoom to inspect details, then select the close button to return to the grid.",
+          "Expand registration issues and select an entry to inspect the related neighboring photos.",
+          "Check grid mapping, texture and overlap before deciding whether to correct or lock a photo."
+        ],
+        "note": {"label": "Preview limits", "body": "The preview uses size-limited decoding, capped at a 2,048-pixel edge. It is for viewing the source photo, not full-resolution editing. Low texture, parallax, moving objects or no clean neighboring coverage can affect automatic registration."},
+      "screenshot": "en-04-preview.png",
+        "caption": "Double-click a grid photo to preview its source."
+      },
+      {
+        "title": "Choose Output Format and Quality",
+        "intro": "Before stitching, expand Output and quality and choose a panorama format for the current task. Initial defaults are JPEG on Windows/macOS, TIFF on Android and PNG on iOS; saved tasks keep their own processing settings.",
+        "steps": [
+          "Choose PNG, TIFF/BigTIFF, JPEG XL or JPEG according to how the image will be used.",
+          "Review seam blending and local texture warp; keep the defaults if unsure.",
+          "People protection and water smoothing are available on Windows/macOS; both are independent and off by default.",
+          "Confirm the format, output location and task settings before starting."
+        ],
+        "note": {"label": "JPEG and JPEG XL", "body": "JPEG is lossy at fixed quality 90 and flattens transparency onto white. If either edge exceeds 65,500 pixels, the image is proportionally reduced. Consider TIFF/BigTIFF for a larger edge. JPEG XL is lossy only and requires the app to load libjxl."},
+      "screenshot": "en-03-output.png",
+        "caption": "Panorama output format and quality options."
+      },
+      {
+        "title": "Run a Task and Read Its Status",
+        "intro": "The task status card shows the stitching stage and progress. Stitch details and Stitching log are separate panels for task/result information and processing steps.",
+        "steps": [
+          "Confirm the task is ready, then start stitching. Large grids may require significant time and memory.",
+          "Use pause, resume or cancel when available. A mobile app sent to the background may request a cooperative pause.",
+          "Expand Stitch details for output format and diagnostics; expand Stitching log for timestamps and processing stages.",
+          "If an error occurs, read its summary and technical details, then check photo arrangement, storage and output folder."
+        ],
+        "note": {"label": "Timing information", "body": "Recent tasks include stage timing; older tasks may show unknown time. Open the viewer to inspect automatic stitching results."},
+        "caption": "Task status and expandable details and log panels."
+      },
+      {
+        "title": "View a Panorama and Inspect Sources",
+        "intro": "Open a completed panorama in the tiled viewer and use zoom and drag to inspect seams, edges and details. Mobile devices support touch gestures.",
+        "steps": [
+          "Open the exported image viewer and fit the panorama to the window.",
+          "Zoom into seams and areas with possible movement, then drag to inspect other locations.",
+          "Select Inspect pixel source and click a location to view photos that geometrically cover it.",
+          "Use Show image in folder on desktop or the save/share action on mobile to access the export."
+        ],
+        "note": {"label": "Source inspection is not blend tracing", "body": "The source panel lists geometrically covering photos and neighbor diagnostics. It does not infer which photo supplied the renderer's final blended pixels. Some obstructions have no clean neighboring coverage and cannot be guaranteed to disappear."},
+        "screenshot": "en-05-result.png",
+        "caption": "Native-rendered synthetic example; 4 of 6 tile positions are grid-estimated and need visual review. This is not image-quality acceptance."
+      },
+      {
+        "title": "Process Folders in a Batch",
+        "intro": "The batch queue supports workflows where each panorama is stored separately: choose a parent folder and each direct child folder becomes an independent panorama task.",
+        "steps": [
+          "Open Batch queue and choose a parent folder containing panorama subfolders.",
+          "Confirm that each child folder contains originals for one panorama only.",
+          "Edit rows, columns and field of view for a task if needed, then start the queue.",
+          "Check each task's status in the queue and add another batch when needed."
+        ],
+        "note": {"label": "Processing scope", "body": "The batch workflow uses direct child folders; it does not promise recursive scanning at arbitrary depth. Concurrency is bounded by the device resource policy."},
+        "screenshot": "en-06-queue.png",
+        "caption": "Batch queue entry point before selecting a parent folder."
+      },
+      {
+        "title": "Set Output and Performance Defaults",
+        "intro": "The gear button opens Settings for language, appearance, accent color, output folder, quality and performance defaults. Defaults apply to new tasks; existing tasks retain their saved options.",
+        "steps": [
+          "Choose system, Chinese or English; select light/dark appearance and an accent color.",
+          "Choose a common output format and default output folder. Windows/macOS write directly to the selected folder.",
+          "Review performance defaults and the shared memory budget. Keep automatic or recommended settings if unsure.",
+          "Android keeps a private result and copies it to a persistent output folder; a failed copy can be retried."
+        ],
+        "note": {"label": "Changing a completed task", "body": "Completed tasks hide processing settings. Create a copy before changing options and stitching again. Removing a task removes its record and queue reference but keeps the originals and exported images."},
+        "screenshot": "en-07-settings.png",
+        "caption": "Application language, output and default settings."
+      },
+      {
+        "title": "Adjust Interface Text Size",
+        "intro": "Use Text size in Settings to choose how the interface scales text. Follow system text size is on by default, so the app follows the device's system text scale.",
+        "steps": [
+          "Leave Follow system text size on to use the current system text scale.",
+          "Turn it off to set text size manually from 100% to 200% in 10% steps.",
+          "Select Large text 150% for a quick 150% setting, or Reset to 100% to return to the standard scale.",
+          "Review the live preview, then check text on task, settings and viewer screens."
+        ],
+        "note": {"label": "Older settings", "body": "Configurations without a saved text-size option default to following the system text scale. Long labels may wrap at larger scales; content areas can scroll."},
+        "screenshot": "en-09-large-text.png",
+        "caption": "Text-size controls, quick adjustments and live preview."
+      },
+      {
+        "title": "Performance Options and Mobile DWARF3",
+        "intro": "Desktop users can adjust matching, rendering, caches and memory options. Mobile also provides DWARF3 panorama downloads. Both features depend on device and network conditions.",
+        "steps": [
+          "Change parallel, cache or fast-registration defaults only when you understand the resource and quality tradeoffs.",
+          "On mobile, connect to a local Wi-Fi network that can reach the camera, then open the DWARF3 panoramas page.",
+          "Check the device address (default 192.168.88.1), connect or refresh the list, select panoramas and download.",
+          "Open a downloaded task, check its arrangement and continue with local stitching."
+        ],
+        "note": {"label": "Platform boundary", "body": "People protection and water smoothing are Windows/macOS-only, use an offline bundled model and are hidden on phones. DWARF3 downloads originals; it does not remotely capture or control the camera. Verify connectivity on the target network and device."},
+        "screenshot": "en-08-performance.png",
+        "caption": "Performance defaults; DWARF3 import is available on mobile."
+      },
+      {
+        "title": "Format Comparison and Common Issues",
+        "intro": "Choose a format based on compatibility, file size and whether you need lossless editing. Actual output is also limited by device resources and encoder constraints.",
+        "format_table": [
+          ["Format", "Compression", "Useful for", "Notes"],
+          ["PNG", "Lossless", "General viewing and editing", "Can be large; preserves transparent pixels."],
+          ["TIFF / BigTIFF", "Lossless", "High fidelity and large files", "Target software must support the TIFF variant."],
+        ["JPEG XL", "Lossy", "Higher compression efficiency", "Requires libjxl to be loaded; viewer compatibility varies."],
+          ["JPEG", "Lossy quality 90", "Broad sharing", "White transparency; 65,500-pixel edge limit, then reduced."]
+        ],
+        "troubleshooting": [
+          ["Issue", "Check first"],
+          ["Order is wrong", "Grid mode, row/column counts, starting corner and traversal direction."],
+          ["Photos do not register", "Clear texture and overlap between neighbors; inspect flagged photos."],
+          ["Ghosting at a seam", "Moving objects or parallax. Review desktop seam options and the result; full repair is not guaranteed."],
+          ["Export does not finish", "Disk space, folder permissions and selected format; Android can retry output copying."],
+          ["An image is missing after task removal", "Removing a task keeps originals and exports. Check their retained locations."]
+        ],
+        "note": {"label": "Review the result", "body": "Automatic arrangement, grid placement and overlap rates may be estimates. Movement, parallax and no clean neighboring coverage can leave visible artifacts; zoom in to inspect the actual result."}
+      }
+    ]
+  }
+}

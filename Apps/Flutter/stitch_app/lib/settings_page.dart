@@ -35,6 +35,7 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   int? _draggingMemoryMiB;
+  double? _draggingTextScale;
 
   @override
   Widget build(BuildContext context) {
@@ -62,98 +63,223 @@ class _SettingsPageState extends State<SettingsPage> {
             _draggingMemoryMiB ?? memory.selectedMiB,
             memory.maximumMiB,
           );
+          final stackedDropdowns = _useStackedDropdowns(context);
           return ListView(
             children: [
-              ListTile(
-                title: Text(l.language),
-                trailing: DropdownButton<AppLanguage>(
-                  value: s.language,
-                  items: AppLanguage.values
-                      .map(
-                        (v) => DropdownMenuItem(
-                          value: v,
-                          child: Text(l.settingsOption(v.name)),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      widget.controller.update(s.copyWith(language: v));
-                    }
-                  },
-                ),
+              _selectionControl<AppLanguage>(
+                context: context,
+                title: l.language,
+                stacked: stackedDropdowns,
+                value: s.language,
+                items: AppLanguage.values
+                    .map(
+                      (v) => DropdownMenuItem(
+                        value: v,
+                        child: Text(l.settingsOption(v.name)),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    widget.controller.update(s.copyWith(language: v));
+                  }
+                },
               ),
-              ListTile(
-                title: Text(l.appearance),
-                trailing: DropdownButton<AppThemeMode>(
-                  value: s.themeMode,
-                  items: AppThemeMode.values
-                      .map(
-                        (v) => DropdownMenuItem(
-                          value: v,
-                          child: Text(l.settingsOption(v.name)),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      widget.controller.update(s.copyWith(themeMode: v));
-                    }
-                  },
-                ),
+              _selectionControl<AppThemeMode>(
+                context: context,
+                title: l.appearance,
+                stacked: stackedDropdowns,
+                value: s.themeMode,
+                items: AppThemeMode.values
+                    .map(
+                      (v) => DropdownMenuItem(
+                        value: v,
+                        child: Text(l.settingsOption(v.name)),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    widget.controller.update(s.copyWith(themeMode: v));
+                  }
+                },
               ),
-              ListTile(
-                title: Text(l.accentColor),
-                trailing: DropdownButton<AppAccent>(
-                  value: s.accent,
-                  items: AppAccent.values
-                      .map(
-                        (v) => DropdownMenuItem(
-                          value: v,
-                          child: Text(l.settingsOption(v.name)),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      widget.controller.update(s.copyWith(accent: v));
-                    }
-                  },
+              _selectionControl<AppAccent>(
+                context: context,
+                title: l.accentColor,
+                stacked: stackedDropdowns,
+                value: s.accent,
+                items: AppAccent.values
+                    .map(
+                      (v) => DropdownMenuItem(
+                        value: v,
+                        child: Text(l.settingsOption(v.name)),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    widget.controller.update(s.copyWith(accent: v));
+                  }
+                },
+              ),
+              ExpansionTile(
+                key: const Key('text-size-settings'),
+                title: Text(l.text('文字大小')),
+                subtitle: Text(
+                  s.textSizeMode == TextSizeMode.system
+                      ? l.text('跟随系统')
+                      : '${l.text('手动')} · ${_textScaleLabel(s.effectiveTextScale)}',
                 ),
+                children: [
+                  SwitchListTile(
+                    key: const Key('text-size-follow-system'),
+                    title: Text(l.text('跟随系统文字大小')),
+                    subtitle: Text(l.text('关闭后可手动调整应用内文字大小。')),
+                    value: s.textSizeMode == TextSizeMode.system,
+                    onChanged: (followSystem) {
+                      _draggingTextScale = null;
+                      widget.controller.updateWith(
+                        (latest) => latest.copyWith(
+                          textSizeMode: followSystem
+                              ? TextSizeMode.system
+                              : TextSizeMode.custom,
+                        ),
+                      );
+                    },
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          key: const Key('text-size-150'),
+                          style: OutlinedButton.styleFrom(
+                            minimumSize: const Size(48, 48),
+                          ),
+                          icon: const Icon(Icons.text_increase),
+                          label: Text(l.text('大字体 150%')),
+                          onPressed: () => _setTextScale(1.5),
+                        ),
+                        TextButton.icon(
+                          key: const Key('text-size-100'),
+                          style: TextButton.styleFrom(
+                            minimumSize: const Size(48, 48),
+                          ),
+                          icon: const Icon(Icons.restart_alt),
+                          label: Text(l.text('恢复 100%')),
+                          onPressed: () => _setTextScale(1.0),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (s.textSizeMode == TextSizeMode.custom) ...[
+                    ListTile(
+                      title: Text(l.text('当前大小')),
+                      trailing: Text(
+                        _textScaleLabel(
+                          _draggingTextScale ?? s.effectiveTextScale,
+                        ),
+                        key: const Key('text-size-value'),
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                    ),
+                    Slider(
+                      key: const Key('text-size-slider'),
+                      value: (_draggingTextScale ?? s.effectiveTextScale).clamp(
+                        1.0,
+                        2.0,
+                      ),
+                      min: 1.0,
+                      max: 2.0,
+                      divisions: 10,
+                      label: _textScaleLabel(
+                        _draggingTextScale ?? s.effectiveTextScale,
+                      ),
+                      onChanged: (value) => setState(
+                        () => _draggingTextScale = value.clamp(1.0, 2.0),
+                      ),
+                      onChangeEnd: (value) {
+                        _draggingTextScale = null;
+                        widget.controller.updateWith(
+                          (latest) => latest.copyWith(
+                            textSizeMode: TextSizeMode.custom,
+                            textScale: value.clamp(1.0, 2.0),
+                          ),
+                        );
+                      },
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: MediaQuery(
+                            data: s.textSizeMode == TextSizeMode.custom
+                                ? MediaQuery.of(context).copyWith(
+                                    textScaler: TextScaler.linear(
+                                      _draggingTextScale ??
+                                          s.effectiveTextScale,
+                                    ),
+                                  )
+                                : MediaQuery.of(context),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(l.text('实时预览')),
+                                const SizedBox(height: 8),
+                                Text(
+                                  l.text('文字会按当前大小显示。'),
+                                  key: const Key('text-size-preview'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
               ExpansionTile(
                 title: Text(l.outputQuality),
                 children: [
-                  ListTile(
-                    title: Text(l.outputFormat),
+                  _selectionControl<ExportFormat>(
+                    context: context,
+                    title: l.outputFormat,
                     subtitle: s.exportFormat == ExportFormat.jpeg
-                        ? Text(
-                            l.text(
-                              'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。',
-                            ),
+                        ? l.text(
+                            'JPEG：质量 90，有损压缩；透明区域铺白底；超过 65500 像素的边长会按比例缩小。',
                           )
                         : null,
-                    trailing: DropdownButton<ExportFormat>(
-                      value: s.exportFormat,
-                      items: ExportFormat.values
-                          .map(
-                            (v) => DropdownMenuItem(
-                              value: v,
-                              child: Text(l.text(v.label)),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (v) {
-                        if (v != null) {
-                          widget.controller.update(
-                            s.copyWith(
-                              exportFormat: v,
-                              exportFormatExplicitlySet: true,
-                            ),
-                          );
-                        }
-                      },
-                    ),
+                    stacked: stackedDropdowns,
+                    value: s.exportFormat,
+                    items: ExportFormat.values
+                        .map(
+                          (v) => DropdownMenuItem(
+                            value: v,
+                            child: Text(l.text(v.label)),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) {
+                        widget.controller.update(
+                          s.copyWith(
+                            exportFormat: v,
+                            exportFormatExplicitlySet: true,
+                          ),
+                        );
+                      }
+                    },
                   ),
                   SwitchListTile(
                     title: Text(l.refineNeighbors),
@@ -162,26 +288,24 @@ class _SettingsPageState extends State<SettingsPage> {
                       s.copyWith(refineGridNeighbors: v),
                     ),
                   ),
-                  ListTile(
-                    title: Text(l.seamBlend),
-                    trailing: DropdownButton<SeamBlendMode>(
-                      value: s.seamBlendMode,
-                      items: SeamBlendMode.values
-                          .map(
-                            (v) => DropdownMenuItem(
-                              value: v,
-                              child: Text(l.settingsOption(v.name)),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: (v) {
-                        if (v != null) {
-                          widget.controller.update(
-                            s.copyWith(seamBlendMode: v),
-                          );
-                        }
-                      },
-                    ),
+                  _selectionControl<SeamBlendMode>(
+                    context: context,
+                    title: l.seamBlend,
+                    stacked: stackedDropdowns,
+                    value: s.seamBlendMode,
+                    items: SeamBlendMode.values
+                        .map(
+                          (v) => DropdownMenuItem(
+                            value: v,
+                            child: Text(l.settingsOption(v.name)),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) {
+                        widget.controller.update(s.copyWith(seamBlendMode: v));
+                      }
+                    },
                   ),
                   SwitchListTile(
                     title: Text(l.localTextureWarp),
@@ -449,6 +573,62 @@ class _SettingsPageState extends State<SettingsPage> {
       memoryMiB >= 1024 && memoryMiB % 1024 == 0
       ? '${memoryMiB ~/ 1024} GiB'
       : '$memoryMiB MiB';
+
+  bool _useStackedDropdowns(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final scaledBodySize = MediaQuery.textScalerOf(context).scale(14);
+    return width < 600 || scaledBodySize >= 18;
+  }
+
+  Widget _selectionControl<T>({
+    required BuildContext context,
+    required String title,
+    String? subtitle,
+    required bool stacked,
+    required T value,
+    required List<DropdownMenuItem<T>> items,
+    required ValueChanged<T?> onChanged,
+  }) {
+    final dropdown = DropdownButton<T>(
+      value: value,
+      isExpanded: stacked,
+      itemHeight: stacked ? null : kMinInteractiveDimension,
+      items: items,
+      onChanged: onChanged,
+    );
+    if (!stacked) {
+      return ListTile(
+        title: Text(title),
+        subtitle: subtitle == null ? null : Text(subtitle),
+        trailing: dropdown,
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: Theme.of(context).textTheme.titleMedium),
+          if (subtitle != null) ...[
+            const SizedBox(height: 4),
+            Text(subtitle, style: Theme.of(context).textTheme.bodyMedium),
+          ],
+          const SizedBox(height: 8),
+          dropdown,
+        ],
+      ),
+    );
+  }
+
+  String _textScaleLabel(double scale) => '${(scale * 100).round()}%';
+
+  void _setTextScale(double scale) {
+    _draggingTextScale = null;
+    widget.controller.updateWith(
+      (latest) =>
+          latest.copyWith(textSizeMode: TextSizeMode.custom, textScale: scale),
+    );
+  }
 
   Widget _toggle(String label, bool value, dynamic Function(bool) update) =>
       SwitchListTile(

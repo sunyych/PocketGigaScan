@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/material.dart';
 import 'package:stitch_app/main.dart' show LumiaStitchApp;
@@ -58,6 +59,245 @@ void main() {
     expect(settings.language, AppLanguage.system);
     expect(settings.exportFormat, ExportFormat.jpeg);
     expect(settings.seamBlendMode, SeamBlendMode.deghost);
+    expect(settings.textSizeMode, TextSizeMode.system);
+    expect(settings.textScale, 1.0);
+  });
+
+  test('text size settings round trip and sanitize invalid scales', () {
+    const custom = AppSettings(
+      textSizeMode: TextSizeMode.custom,
+      textScale: 1.5,
+    );
+    final restored = AppSettings.decode(jsonEncode(custom.toJson()));
+    expect(restored.textSizeMode, TextSizeMode.custom);
+    expect(restored.textScale, 1.5);
+    expect(const AppSettings(textScale: double.nan).effectiveTextScale, 1.0);
+    expect(
+      AppSettings.fromJson({
+        ...custom.toJson(),
+        'textScale': double.nan,
+      }).textScale,
+      1.0,
+    );
+    expect(
+      AppSettings.fromJson({...custom.toJson(), 'textScale': 99}).textScale,
+      2.0,
+    );
+    expect(
+      AppSettings.fromJson({...custom.toJson(), 'textScale': -1}).textScale,
+      1.0,
+    );
+  });
+
+  testWidgets(
+    'system text scale is preserved and custom scale is not multiplied',
+    (tester) async {
+      tester.platformDispatcher.textScaleFactorTestValue = 1.8;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      var observedScale = 0.0;
+      final controller = SettingsController(
+        repository: repository,
+        initial: const AppSettings(),
+      );
+      await tester.pumpWidget(
+        LumiaStitchApp(
+          settingsController: controller,
+          home: Builder(
+            builder: (context) {
+              observedScale = MediaQuery.textScalerOf(context).scale(1);
+              return const SizedBox.shrink();
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(observedScale, 1.8);
+
+      tester.platformDispatcher.textScaleFactorTestValue = 2.2;
+      await tester.pumpAndSettle();
+      expect(observedScale, 2.2);
+
+      await tester.runAsync(
+        () => controller.update(
+          const AppSettings(textSizeMode: TextSizeMode.custom, textScale: 2.0),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(observedScale, 2.0);
+      controller.dispose();
+    },
+  );
+
+  testWidgets('large text settings fit a narrow English phone layout', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(360, 760);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = SettingsController(
+      repository: repository,
+      initial: const AppSettings(
+        language: AppLanguage.en,
+        textSizeMode: TextSizeMode.custom,
+        textScale: 2.0,
+      ),
+    );
+    await tester.pumpWidget(
+      LumiaStitchApp(
+        settingsController: controller,
+        home: SettingsPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('text-size-settings')),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('text-size-settings')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('text-size-slider')), findsOneWidget);
+    expect(find.byKey(const Key('text-size-150')), findsOneWidget);
+    expect(find.byKey(const Key('text-size-100')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    controller.dispose();
+  });
+
+  testWidgets(
+    'Chinese system mode exposes 150 percent and 100 percent shortcuts',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 760);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final controller = SettingsController(
+        repository: _InMemorySettingsRepository(),
+        initial: const AppSettings(language: AppLanguage.zh),
+      );
+      await tester.pumpWidget(
+        LumiaStitchApp(
+          settingsController: controller,
+          home: SettingsPage(controller: controller),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('text-size-settings')),
+        240,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('text-size-settings')));
+      await tester.pumpAndSettle();
+      expect(find.text('文字大小'), findsOneWidget);
+      expect(find.text('大字体 150%'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('text-size-150')));
+      await tester.pumpAndSettle();
+      expect(controller.settings.textSizeMode, TextSizeMode.custom);
+      expect(controller.settings.effectiveTextScale, 1.5);
+      expect(find.text('手动 · 150%'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('text-size-100')));
+      await tester.pumpAndSettle();
+      expect(controller.settings.effectiveTextScale, 1.0);
+      controller.dispose();
+    },
+  );
+
+  testWidgets('large text uses stacked full-width setting dropdowns', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = SettingsController(
+      repository: _InMemorySettingsRepository(),
+      initial: const AppSettings(
+        language: AppLanguage.zh,
+        textSizeMode: TextSizeMode.custom,
+        textScale: 1.5,
+      ),
+    );
+    await tester.pumpWidget(
+      LumiaStitchApp(
+        settingsController: controller,
+        home: SettingsPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('输出画质'),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('输出画质'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<DropdownButton<ExportFormat>>(
+            find.byType(DropdownButton<ExportFormat>),
+          )
+          .isExpanded,
+      isTrue,
+    );
+    expect(
+      tester
+          .widget<DropdownButton<SeamBlendMode>>(
+            find.byType(DropdownButton<SeamBlendMode>),
+          )
+          .isExpanded,
+      isTrue,
+    );
+    expect(find.text('输出格式'), findsOneWidget);
+    expect(find.text('接缝融合'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    controller.dispose();
+  });
+
+  testWidgets('long format labels can wrap in large text dropdown menus', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final controller = SettingsController(
+      repository: _InMemorySettingsRepository(),
+      initial: const AppSettings(
+        language: AppLanguage.en,
+        textSizeMode: TextSizeMode.custom,
+        textScale: 2.0,
+        exportFormat: ExportFormat.tiff,
+      ),
+    );
+    await tester.pumpWidget(
+      LumiaStitchApp(
+        settingsController: controller,
+        home: SettingsPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('Output quality'),
+      240,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('Output quality'));
+    await tester.pumpAndSettle();
+    final dropdownFinder = find.byType(DropdownButton<ExportFormat>);
+    final dropdown = tester.widget<DropdownButton<ExportFormat>>(
+      dropdownFinder,
+    );
+    expect(dropdown.isExpanded, isTrue);
+    expect(dropdown.itemHeight, isNull);
+    final longLabel = find.text('TIFF (lossless; BigTIFF for large images)');
+    expect(longLabel, findsOneWidget);
+    expect(tester.getRect(longLabel).height, greaterThan(48));
+    await tester.tap(dropdownFinder);
+    await tester.pumpAndSettle();
+    expect(longLabel, findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+    controller.dispose();
   });
 
   test('platform defaults use JPEG on desktop and preserve mobile choices', () {
@@ -241,6 +481,14 @@ class _DelayedSettingsRepository extends SettingsRepository {
   final loaded = Completer<AppSettings>();
   @override
   Future<AppSettings> load() => loaded.future;
+  @override
+  Future<void> save(AppSettings settings) async {}
+}
+
+class _InMemorySettingsRepository extends SettingsRepository {
+  @override
+  Future<AppSettings> load() async => const AppSettings();
+
   @override
   Future<void> save(AppSettings settings) async {}
 }

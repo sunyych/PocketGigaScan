@@ -176,6 +176,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
+          scrollable: true,
           title: const Text('批量整图格式'),
           content: RadioGroup<ExportFormat>(
             groupValue: selectedFormat,
@@ -290,6 +291,26 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     }
   }
 
+  Widget _labeledDialogField({
+    required String label,
+    required TextEditingController controller,
+    required TextInputType keyboardType,
+  }) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label),
+      const SizedBox(height: 8),
+      Semantics(
+        label: label,
+        child: TextField(
+          controller: controller,
+          keyboardType: keyboardType,
+          decoration: const InputDecoration(isDense: true),
+        ),
+      ),
+    ],
+  );
+
   Future<void> _settings(BatchQueue queue, BatchQueueItem item) async {
     final initial = await _controller.settingsFor(queue.id, item.id);
     if (!mounted) return;
@@ -299,6 +320,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     final result = await showDialog<(int, int, double)>(
       context: context,
       builder: (context) => AlertDialog(
+        scrollable: true,
         title: Text('设置 ${item.name}'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -317,13 +339,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                 labelText: StitchLocalizations.of(context).text('列数'),
               ),
             ),
-            TextField(
+            const SizedBox(height: 12),
+            _labeledDialogField(
+              label: StitchLocalizations.of(context).text('水平视角（度）'),
               controller: fov,
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
-              ),
-              decoration: InputDecoration(
-                labelText: StitchLocalizations.of(context).text('水平视角（度）'),
               ),
             ),
           ],
@@ -397,32 +418,27 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       final values = await showDialog<(int, int, int)>(
         context: context,
         builder: (context) => AlertDialog(
+          scrollable: true,
           title: const Text('批处理资源'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
+              _labeledDialogField(
+                label: StitchLocalizations.of(context).text('总 CPU 工作线程'),
                 controller: cpu,
                 keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: StitchLocalizations.of(context).text('总 CPU 工作线程'),
-                ),
               ),
-              TextField(
+              const SizedBox(height: 12),
+              _labeledDialogField(
+                label: StitchLocalizations.of(context).text('总内存预算（MiB）'),
                 controller: memory,
                 keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: StitchLocalizations.of(context).text('总内存预算（MiB）'),
-                ),
               ),
-              TextField(
+              const SizedBox(height: 12),
+              _labeledDialogField(
+                label: StitchLocalizations.of(context).text('并发任务数（最多 8）'),
                 controller: jobs,
                 keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  labelText: StitchLocalizations.of(
-                    context,
-                  ).text('并发任务数（最多 8）'),
-                ),
               ),
             ],
           ),

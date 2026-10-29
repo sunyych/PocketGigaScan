@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:path/path.dart' as p;
 import 'package:stitch_app/batch_queue_page.dart';
+import 'package:stitch_app/l10n/stitch_localizations.dart';
 import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/native_job_api.dart';
@@ -246,6 +250,123 @@ void main() {
       platformGoldenFile('goldens/batch_queue_mobile.png'),
     );
   });
+
+  testWidgets('large text format dialog scrolls to choices and actions', (
+    tester,
+  ) async {
+    _setSize(tester, const Size(390, 844));
+    final originalSelector = FileSelectorPlatform.instance;
+    final selector = _DialogFileSelector()..directory = 'Scans/Parent';
+    FileSelectorPlatform.instance = selector;
+    addTearDown(() => FileSelectorPlatform.instance = originalSelector);
+    await tester.pumpWidget(_largeTextDialogPage(const []));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('选择母目录').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('批量整图格式'), findsOneWidget);
+    for (final label in [
+      'PNG（无损）',
+      'TIFF（无损，大图自动 BigTIFF）',
+      'JPEG（有损，质量 90）',
+      'JPEG XL（有损）',
+    ]) {
+      final choice = find.text(label);
+      expect(choice, findsOneWidget);
+      await tester.ensureVisible(choice);
+      await tester.pumpAndSettle();
+      expect(choice.hitTestable(), findsOneWidget, reason: label);
+    }
+    await tester.ensureVisible(find.text('继续'));
+    await tester.pumpAndSettle();
+    expect(find.text('继续').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('large text task grid dialog scrolls through every field', (
+    tester,
+  ) async {
+    _setSize(tester, const Size(390, 844));
+    await tester.pumpWidget(
+      _largeTextDialogPage([_fixtureQueue()], locale: const Locale('en')),
+    );
+    await tester.pumpAndSettle();
+
+    final itemCard = find.byKey(const Key('batch-item-item-6'));
+    await tester.scrollUntilVisible(
+      itemCard,
+      220,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.ensureVisible(itemCard);
+    await tester.pumpAndSettle();
+    final settings = find.descendant(
+      of: itemCard,
+      matching: find.byTooltip('Set grid and camera field of view'),
+    );
+    await tester.tap(settings);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Settings 07_InteriorRoom'), findsOneWidget);
+    for (var index = 0; index < 3; index++) {
+      final label = [
+        'Rows',
+        'Columns',
+        'Horizontal field of view (degrees)',
+      ][index];
+      final field = find.text(label);
+      expect(field, findsOneWidget);
+      final input = find.byType(TextField).at(index);
+      await tester.ensureVisible(input);
+      await tester.pumpAndSettle();
+      expect(input.hitTestable(), findsOneWidget, reason: label);
+      _expectCompleteFieldLabel(tester, input, label);
+    }
+    await tester.ensureVisible(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Save').hitTestable(), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.tap(find.text('Back'));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets(
+    'large text resource dialog keeps all fields and actions reachable',
+    (tester) async {
+      _setSize(tester, const Size(390, 844));
+      await tester.pumpWidget(
+        _largeTextDialogPage(const [], locale: const Locale('en')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Batch resource settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Batch resources'), findsOneWidget);
+      for (var index = 0; index < 3; index++) {
+        final label = [
+          'Total CPU worker threads',
+          'Total memory budget (MiB)',
+          'Concurrent tasks (max 8)',
+        ][index];
+        final field = find.text(label);
+        expect(field, findsOneWidget);
+        final input = find.byType(TextField).at(index);
+        await tester.ensureVisible(input);
+        await tester.pumpAndSettle();
+        expect(input.hitTestable(), findsOneWidget, reason: label);
+        _expectCompleteFieldLabel(tester, input, label);
+      }
+      await tester.ensureVisible(find.text('Apply'));
+      await tester.pumpAndSettle();
+      expect(find.text('Apply').hitTestable(), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    },
+  );
 }
 
 Widget _desktopPage(List<BatchQueue> queues) {
@@ -267,6 +388,88 @@ Widget _mobilePage() {
       androidOverride: true,
     ),
   );
+}
+
+Widget _largeTextDialogPage(
+  List<BatchQueue> queues, {
+  Locale locale = const Locale('zh'),
+}) {
+  final controller = _DialogController(fixtureQueues: queues);
+  addTearDown(controller.dispose);
+  return MaterialApp(
+    locale: locale,
+    supportedLocales: StitchLocalizations.supportedLocales,
+    localizationsDelegates: const [
+      StitchLocalizations.delegate,
+      GlobalMaterialLocalizations.delegate,
+      GlobalWidgetsLocalizations.delegate,
+      GlobalCupertinoLocalizations.delegate,
+    ],
+    home: MediaQuery(
+      data: const MediaQueryData(
+        size: Size(390, 844),
+        textScaler: TextScaler.linear(2),
+      ),
+      child: BatchQueuePage(api: _DialogApi(), controller: controller),
+    ),
+  );
+}
+
+void _expectCompleteFieldLabel(
+  WidgetTester tester,
+  Finder field,
+  String label,
+) {
+  final labelFinder = find.text(label);
+  expect(labelFinder, findsOneWidget, reason: 'complete label: $label');
+  final paragraph = tester.renderObject<RenderParagraph>(labelFinder);
+  expect(
+    paragraph.didExceedMaxLines,
+    isFalse,
+    reason: 'label must not be ellipsized: $label',
+  );
+  final valueFinder = find.descendant(
+    of: field,
+    matching: find.byType(EditableText),
+  );
+  expect(valueFinder, findsOneWidget, reason: 'editable value: $label');
+  final labelRect = tester.getRect(labelFinder);
+  final valueRect = tester.getRect(valueFinder);
+  expect(
+    labelRect.bottom + 4,
+    lessThanOrEqualTo(valueRect.top),
+    reason: 'label and editable value must have 4 dp clearance: $label',
+  );
+}
+
+class _DialogController extends _ScreenshotController {
+  _DialogController({required super.fixtureQueues});
+
+  @override
+  Future<(int, int, double)> settingsFor(String queueId, String itemId) async =>
+      (2, 4, 45.0);
+}
+
+class _DialogApi extends _ScreenshotApi {
+  @override
+  Future<Map<String, Object?>> capabilities() async => {
+    'ok': true,
+    'capabilities': {
+      'jpegXlAvailable': true,
+      'totalCpuWorkers': 8,
+      'totalMemoryBudgetMiB': 8192,
+      'maxConcurrentJobs': 4,
+    },
+  };
+}
+
+class _DialogFileSelector extends FileSelectorPlatform {
+  String? directory;
+
+  @override
+  Future<String?> getDirectoryPathWithOptions(
+    FileDialogOptions options,
+  ) async => directory;
 }
 
 void _setSize(WidgetTester tester, Size size) {

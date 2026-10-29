@@ -11,6 +11,8 @@ enum AppAccent { teal, blue, purple, orange }
 
 enum MemoryBudgetMode { automatic, manual }
 
+enum TextSizeMode { system, custom }
+
 class AppSettings {
   const AppSettings({
     this.language = AppLanguage.system,
@@ -26,6 +28,8 @@ class AppSettings {
     this.memoryBudgetMode = MemoryBudgetMode.automatic,
     this.totalMemoryBudgetMiB = 512,
     this.performance = const PerformanceOptions(),
+    this.textSizeMode = TextSizeMode.system,
+    this.textScale = 1.0,
     this.outputDirectory,
   });
 
@@ -42,6 +46,10 @@ class AppSettings {
   final MemoryBudgetMode memoryBudgetMode;
   final int totalMemoryBudgetMiB;
   final PerformanceOptions performance;
+  final TextSizeMode textSizeMode;
+  final double textScale;
+
+  double get effectiveTextScale => _safeTextScale(textScale);
 
   /// Filesystem path on desktop or a platform document URI on Android.
   final String? outputDirectory;
@@ -71,6 +79,8 @@ class AppSettings {
     MemoryBudgetMode? memoryBudgetMode,
     int? totalMemoryBudgetMiB,
     PerformanceOptions? performance,
+    TextSizeMode? textSizeMode,
+    double? textScale,
     String? outputDirectory,
     bool clearOutputDirectory = false,
   }) => AppSettings(
@@ -88,6 +98,8 @@ class AppSettings {
     memoryBudgetMode: memoryBudgetMode ?? this.memoryBudgetMode,
     totalMemoryBudgetMiB: totalMemoryBudgetMiB ?? this.totalMemoryBudgetMiB,
     performance: performance ?? this.performance,
+    textSizeMode: textSizeMode ?? this.textSizeMode,
+    textScale: textScale ?? this.textScale,
     outputDirectory: clearOutputDirectory
         ? null
         : outputDirectory ?? this.outputDirectory,
@@ -108,6 +120,8 @@ class AppSettings {
     'memoryBudgetMode': memoryBudgetMode.name,
     'totalMemoryBudgetMiB': totalMemoryBudgetMiB,
     'performance': performance.toJson(),
+    'textSizeMode': textSizeMode.name,
+    'textScale': effectiveTextScale,
     'outputDirectory': outputDirectory,
   };
 
@@ -154,6 +168,12 @@ class AppSettings {
       performance: PerformanceOptions.fromJson(
         (json['performance'] as Map?)?.cast<String, Object?>(),
       ),
+      textSizeMode: enumValue(
+        TextSizeMode.values,
+        json['textSizeMode'],
+        TextSizeMode.system,
+      ),
+      textScale: _safeTextScale(json['textScale']),
       outputDirectory: json['outputDirectory'] as String?,
     );
   }
@@ -169,5 +189,11 @@ class AppSettings {
             result == result.roundToDouble() =>
       result.toInt(),
     _ => null,
+  };
+
+  static double _safeTextScale(Object? value) => switch (value) {
+    num scale when scale.isFinite =>
+      scale.toDouble().clamp(1.0, 2.0).toDouble(),
+    _ => 1.0,
   };
 }

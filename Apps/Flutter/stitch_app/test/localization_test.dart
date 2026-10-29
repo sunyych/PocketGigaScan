@@ -727,12 +727,12 @@ void main() {
           for (final (key, label, helper) in const [
             (
               'horizontal-overlap-field',
-              'Manual horizontal overlap %',
+              'Horizontal overlap %',
               '15–80; ignored in automatic mode. See measured values in the report.',
             ),
             (
               'vertical-overlap-field',
-              'Manual vertical overlap %',
+              'Vertical overlap %',
               '15–80; ignored in automatic mode. See measured values in the report.',
             ),
           ]) {

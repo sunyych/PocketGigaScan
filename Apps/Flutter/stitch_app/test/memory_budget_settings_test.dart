@@ -118,7 +118,13 @@ void main() {
       );
       await tester.tap(find.text('App memory budget'));
       await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Manual'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('Manual'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('total-memory-budget-slider')),
+      );
       await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('total-memory-budget-slider')),

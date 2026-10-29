@@ -121,6 +121,7 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
       );
       return MaterialApp(
         title: 'PocketGigaScan',
+        debugShowCheckedModeBanner: false,
         locale: locale,
         themeMode: s.themeMode == AppThemeMode.system
             ? ThemeMode.system
@@ -151,6 +152,16 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
           brightness: Brightness.dark,
           useMaterial3: true,
         ),
+        builder: (context, child) {
+          final systemMediaQuery = MediaQuery.of(context);
+          final textScaler = s.textSizeMode == TextSizeMode.system
+              ? systemMediaQuery.textScaler
+              : TextScaler.linear(s.effectiveTextScale);
+          return MediaQuery(
+            data: systemMediaQuery.copyWith(textScaler: textScaler),
+            child: child ?? const SizedBox.shrink(),
+          );
+        },
         home: widget.home ?? StitchHomePage(settingsController: _settings),
       );
     },
@@ -5090,9 +5101,46 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   Widget _optionsCard(StitchTask task, String? error) {
     final enabled = _editable && !_busy;
+    final localizations = StitchLocalizations.of(context);
+    final stackTraversalDropdowns =
+        MediaQuery.sizeOf(context).width < 600 ||
+        MediaQuery.textScalerOf(context).scale(14) >= 18;
+    final textScaleFactor = MediaQuery.textScalerOf(context).scale(14) / 14;
+    final maxGridFieldWidth = (MediaQuery.sizeOf(context).width - 72)
+        .clamp(120.0, 1200.0)
+        .toDouble();
+    double fieldWidth(double baseWidth) => stackTraversalDropdowns
+        ? math.min(baseWidth * textScaleFactor, maxGridFieldWidth).toDouble()
+        : baseWidth;
     final dimensions = task.photos.isEmpty
         ? null
         : '${task.photos.first.width}×${task.photos.first.height}';
+    final traversalAxisDropdown = DropdownButton<TraversalAxis>(
+      value: _grid.axis,
+      isExpanded: stackTraversalDropdowns || _mobile,
+      itemHeight: stackTraversalDropdowns ? null : kMinInteractiveDimension,
+      onChanged: enabled && _grid.mode == GridMode.sequence
+          ? (value) => _changeTraversal(axis: value)
+          : null,
+      items: const [
+        DropdownMenuItem(value: TraversalAxis.row, child: Text('逐行拍摄')),
+        DropdownMenuItem(value: TraversalAxis.column, child: Text('逐列拍摄')),
+      ],
+    );
+    final startCornerDropdown = DropdownButton<StartCorner>(
+      value: _grid.startCorner,
+      isExpanded: stackTraversalDropdowns || _mobile,
+      itemHeight: stackTraversalDropdowns ? null : kMinInteractiveDimension,
+      onChanged: enabled && _grid.mode == GridMode.sequence
+          ? (value) => _changeTraversal(corner: value)
+          : null,
+      items: const [
+        DropdownMenuItem(value: StartCorner.topLeft, child: Text('左上起拍')),
+        DropdownMenuItem(value: StartCorner.topRight, child: Text('右上起拍')),
+        DropdownMenuItem(value: StartCorner.bottomLeft, child: Text('左下起拍')),
+        DropdownMenuItem(value: StartCorner.bottomRight, child: Text('右下起拍')),
+      ],
+    );
     return Card(
       key: const Key('stitch-options-card'),
       child: ExpansionTile(
@@ -5138,7 +5186,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                 runSpacing: 8,
                 children: [
                   SizedBox(
-                    width: 92,
+                    width: fieldWidth(92),
                     child: TextField(
                       controller: _rows,
                       enabled: enabled && _grid.mode == GridMode.sequence,
@@ -5150,7 +5198,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                     ),
                   ),
                   SizedBox(
-                    width: 92,
+                    width: fieldWidth(92),
                     child: TextField(
                       controller: _columns,
                       enabled: enabled && _grid.mode == GridMode.sequence,
@@ -5161,54 +5209,16 @@ class _StitchHomePageState extends State<StitchHomePage>
                       ),
                     ),
                   ),
-                  SizedBox(
-                    width: _mobile ? 140 : null,
-                    child: DropdownButton<TraversalAxis>(
-                      value: _grid.axis,
-                      isExpanded: _mobile,
-                      onChanged: enabled && _grid.mode == GridMode.sequence
-                          ? (value) => _changeTraversal(axis: value)
-                          : null,
-                      items: const [
-                        DropdownMenuItem(
-                          value: TraversalAxis.row,
-                          child: Text('逐行拍摄'),
-                        ),
-                        DropdownMenuItem(
-                          value: TraversalAxis.column,
-                          child: Text('逐列拍摄'),
-                        ),
-                      ],
+                  if (!stackTraversalDropdowns)
+                    SizedBox(
+                      width: _mobile ? 140 : null,
+                      child: traversalAxisDropdown,
                     ),
-                  ),
-                  SizedBox(
-                    width: _mobile ? 155 : null,
-                    child: DropdownButton<StartCorner>(
-                      value: _grid.startCorner,
-                      isExpanded: _mobile,
-                      onChanged: enabled && _grid.mode == GridMode.sequence
-                          ? (value) => _changeTraversal(corner: value)
-                          : null,
-                      items: const [
-                        DropdownMenuItem(
-                          value: StartCorner.topLeft,
-                          child: Text('左上起拍'),
-                        ),
-                        DropdownMenuItem(
-                          value: StartCorner.topRight,
-                          child: Text('右上起拍'),
-                        ),
-                        DropdownMenuItem(
-                          value: StartCorner.bottomLeft,
-                          child: Text('左下起拍'),
-                        ),
-                        DropdownMenuItem(
-                          value: StartCorner.bottomRight,
-                          child: Text('右下起拍'),
-                        ),
-                      ],
+                  if (!stackTraversalDropdowns)
+                    SizedBox(
+                      width: _mobile ? 155 : null,
+                      child: startCornerDropdown,
                     ),
-                  ),
                   FilterChip(
                     label: const Text('蛇形'),
                     selected: _grid.serpentine,
@@ -5218,20 +5228,35 @@ class _StitchHomePageState extends State<StitchHomePage>
                   ),
                 ],
               ),
+              if (stackTraversalDropdowns) ...[
+                const SizedBox(height: 12),
+                Text(
+                  localizations.text('遍历方向'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                traversalAxisDropdown,
+                const SizedBox(height: 12),
+                Text(
+                  localizations.text('起始角'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                startCornerDropdown,
+              ],
               Wrap(
                 spacing: 8,
                 children: [
                   SizedBox(
-                    width: 145,
+                    width: fieldWidth(145),
                     child: TextField(
                       controller: _fx,
                       enabled: enabled,
                       onChanged: (_) => _cameraCalibrationTouched = true,
                       keyboardType: TextInputType.number,
                       decoration: InputDecoration(
-                        labelText: StitchLocalizations.of(
-                          context,
-                        ).text('焦距像素（可选）'),
+                        label: Text(
+                          StitchLocalizations.of(context).text('焦距像素（可选）'),
+                          maxLines: stackTraversalDropdowns ? 2 : null,
+                        ),
                         isDense: true,
                       ),
                     ),
@@ -5261,7 +5286,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                     label: const Text('DWARF 固定视角（名义值）'),
                   ),
                   SizedBox(
-                    width: 110,
+                    width: fieldWidth(110),
                     child: TextField(
                       controller: _memory,
                       enabled: enabled,
@@ -5275,7 +5300,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                     ),
                   ),
                   SizedBox(
-                    width: 90,
+                    width: fieldWidth(90),
                     child: TextField(
                       controller: _workers,
                       enabled: enabled,
@@ -5329,7 +5354,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                 runSpacing: 8,
                 children: [
                   SizedBox(
-                    width: 145,
+                    width: fieldWidth(145),
                     child: TextField(
                       key: const Key('horizontal-overlap-field'),
                       controller: _horizontalOverlap,
@@ -5344,12 +5369,13 @@ class _StitchHomePageState extends State<StitchHomePage>
                         helperText: StitchLocalizations.of(
                           context,
                         ).text('15–80；自动模式忽略此值，实测结果见报告'),
+                        helperMaxLines: stackTraversalDropdowns ? 4 : null,
                         isDense: true,
                       ),
                     ),
                   ),
                   SizedBox(
-                    width: 145,
+                    width: fieldWidth(145),
                     child: TextField(
                       key: const Key('vertical-overlap-field'),
                       controller: _verticalOverlap,
@@ -5364,6 +5390,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                         helperText: StitchLocalizations.of(
                           context,
                         ).text('15–80；自动模式忽略此值，实测结果见报告'),
+                        helperMaxLines: stackTraversalDropdowns ? 4 : null,
                         isDense: true,
                       ),
                     ),
