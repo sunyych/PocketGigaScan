@@ -48,6 +48,13 @@ import 'widgets/photo_grid_issues.dart';
 
 enum _JpegDimensionChoice { keepScaledJpeg, useJpegXl }
 
+class _PhotoTapCapture {
+  const _PhotoTapCapture({required this.extendSelection, required this.epoch});
+
+  final bool extendSelection;
+  final int epoch;
+}
+
 void main() => runApp(const LumiaStitchApp());
 
 class LumiaStitchApp extends StatefulWidget {
@@ -275,7 +282,8 @@ class _StitchHomePageState extends State<StitchHomePage>
   double _maxEdgeReprojectionRmsPixels = 12;
   List<GridCell> _mappingCells = const [];
   Set<String> _selectedPhotoPaths = {};
-  final Map<String, bool> _photoTapShiftByPath = {};
+  final Map<String, _PhotoTapCapture> _photoTapCaptures = {};
+  int _photoSelectionEpoch = 0;
   bool _taskSelectionMode = false;
   Set<String> _selectedTaskIds = {};
   List<RegistrationIssue> _registrationIssues = const [];
@@ -837,6 +845,8 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   void _clearPhotoGridIssueState() {
     _registrationIssueGeneration++;
+    _photoSelectionEpoch++;
+    _photoTapCaptures.clear();
     _selectedPhotoPaths = {};
     _registrationIssues = const [];
   }
@@ -906,6 +916,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   void _selectGridPhoto(String path, {required bool extendSelection}) {
+    _photoSelectionEpoch++;
     setState(() {
       if (!extendSelection) {
         _selectedPhotoPaths = {path};
@@ -917,8 +928,30 @@ class _StitchHomePageState extends State<StitchHomePage>
     });
   }
 
+  void _prepareGridPhotoPointerDown(ImportedPhoto photo) {
+    _photoTapCaptures.putIfAbsent(
+      photo.storedPath,
+      () => _PhotoTapCapture(
+        extendSelection: HardwareKeyboard.instance.isShiftPressed,
+        epoch: _photoSelectionEpoch,
+      ),
+    );
+  }
+
+  void _selectGridPhotoFromTap(String path) {
+    final capture = _photoTapCaptures.remove(path);
+    if (capture == null || capture.epoch != _photoSelectionEpoch) return;
+    _selectGridPhoto(path, extendSelection: capture.extendSelection);
+  }
+
+  void _clearSelectedGridPhotos() {
+    _photoSelectionEpoch++;
+    setState(() => _selectedPhotoPaths = {});
+  }
+
   void _selectIssuePhotos(RegistrationIssue issue) {
     final currentPaths = _task?.photos.map((photo) => photo.storedPath).toSet();
+    _photoSelectionEpoch++;
     setState(() {
       _selectedPhotoPaths = {
         if (currentPaths?.contains(issue.fromPhotoPath) == true)
@@ -942,6 +975,7 @@ class _StitchHomePageState extends State<StitchHomePage>
   Future<void> _lockRegistrationIssuePhotos(StitchTask task) async {
     final paths = _registrationIssuePhotoPaths(task);
     if (paths.length < 2 || !_canEditPhotoGridLocks) return;
+    _photoSelectionEpoch++;
     setState(() => _selectedPhotoPaths = paths);
     await _changeSelectedPhotoLocks(locked: true);
   }
@@ -1036,6 +1070,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             ) &&
             _sameGridTopology(copy.grid, gridSnapshot)) {
           _registrationIssueGeneration++;
+          _photoSelectionEpoch++;
           setState(() {
             _registrationIssues = issueSnapshot;
             _selectedPhotoPaths = selectedPathSnapshot;
@@ -1822,6 +1857,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     WidgetsBinding.instance.removeObserver(this);
     _registrationRepairPromptTimer?.cancel();
     _registrationRepairPromptTimer = null;
+    _photoTapCaptures.clear();
     widget.settingsController?.removeListener(_applySettingsDefaults);
     unawaited(_runtimeTimeoutSubscription?.cancel());
     if (widget.mobileRuntimeService == null) {
@@ -5857,7 +5893,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                   _selectedPhotoPaths.length >= 2 &&
                   selectedLockedCount < _selectedPhotoPaths.length,
               canUnlock: canEditGrid && selectedLockedCount > 0,
-              onClear: () => setState(() => _selectedPhotoPaths = {}),
+              onClear: _clearSelectedGridPhotos,
               onLock: () => unawaited(_changeSelectedPhotoLocks(locked: true)),
               onUnlock: () =>
                   unawaited(_changeSelectedPhotoLocks(locked: false)),
@@ -5982,199 +6018,198 @@ class _StitchHomePageState extends State<StitchHomePage>
                                   if (forced) '强制按网格放置',
                                   if (issueSummary.isNotEmpty) issueSummary,
                                 ].join(' · '),
-                                child: Listener(
-                                  onPointerDown: (_) {
-                                    _photoTapShiftByPath.putIfAbsent(
-                                      photo.storedPath,
-                                      () => HardwareKeyboard
-                                          .instance
-                                          .isShiftPressed,
-                                    );
-                                  },
-                                  onPointerCancel: (_) => _photoTapShiftByPath
-                                      .remove(photo.storedPath),
-                                  child: GestureDetector(
-                                    key: ValueKey(
-                                      'grid-photo-select-${cell.row}-${cell.column}',
-                                    ),
-                                    behavior: HitTestBehavior.opaque,
-                                    onTap: () => _selectGridPhoto(
-                                      photo.storedPath,
-                                      extendSelection:
-                                          _photoTapShiftByPath.remove(
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    Positioned.fill(
+                                      child: Listener(
+                                        onPointerDown: (_) =>
+                                            _prepareGridPhotoPointerDown(photo),
+                                        onPointerCancel: (_) =>
+                                            _photoTapCaptures.remove(
+                                              photo.storedPath,
+                                            ),
+                                        child: GestureDetector(
+                                          key: ValueKey(
+                                            'grid-photo-select-${cell.row}-${cell.column}',
+                                          ),
+                                          behavior: HitTestBehavior.opaque,
+                                          onTap: () => _selectGridPhotoFromTap(
                                             photo.storedPath,
-                                          ) ??
-                                          false,
-                                    ),
-                                    onTapCancel: () => _photoTapShiftByPath
-                                        .remove(photo.storedPath),
-                                    onDoubleTap: () {
-                                      _photoTapShiftByPath.remove(
-                                        photo.storedPath,
-                                      );
-                                      _showPhotoPreview(photo);
-                                    },
-                                    child: Stack(
-                                      fit: StackFit.expand,
-                                      children: [
-                                        Container(
-                                          color: Colors.black12,
-                                          alignment: Alignment.center,
-                                          child: Image.file(
-                                            File(photo.storedPath),
-                                            key: ValueKey(
-                                              'photo-grid-image-${cell.row}-${cell.column}',
-                                            ),
-                                            fit: BoxFit.contain,
-                                            cacheWidth: 256,
-                                            errorBuilder: (_, _, _) =>
-                                                const Icon(Icons.broken_image),
                                           ),
-                                        ),
-                                        Positioned(
-                                          left: 2,
-                                          bottom: 2,
+                                          onTapCancel: () => _photoTapCaptures
+                                              .remove(photo.storedPath),
+                                          onDoubleTap: () {
+                                            final capture = _photoTapCaptures
+                                                .remove(photo.storedPath);
+                                            if (capture != null &&
+                                                capture.epoch !=
+                                                    _photoSelectionEpoch) {
+                                              return;
+                                            }
+                                            _showPhotoPreview(photo);
+                                          },
                                           child: Container(
-                                            color: Colors.black54,
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 3,
+                                            color: Colors.black12,
+                                            alignment: Alignment.center,
+                                            child: Image.file(
+                                              File(photo.storedPath),
+                                              key: ValueKey(
+                                                'photo-grid-image-${cell.row}-${cell.column}',
+                                              ),
+                                              fit: BoxFit.contain,
+                                              cacheWidth: 256,
+                                              errorBuilder: (_, _, _) =>
+                                                  const Icon(
+                                                    Icons.broken_image,
+                                                  ),
                                             ),
-                                            child: Text(
-                                              '${cell.row + 1},${cell.column + 1}',
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 9,
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    Positioned(
+                                      left: 2,
+                                      bottom: 2,
+                                      child: IgnorePointer(
+                                        child: Container(
+                                          key: ValueKey(
+                                            'grid-photo-coordinate-label-${cell.row}-${cell.column}',
+                                          ),
+                                          color: Colors.black54,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 3,
+                                          ),
+                                          child: Text(
+                                            '${cell.row + 1},${cell.column + 1}',
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 9,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    if (issuePaths.isNotEmpty)
+                                      Positioned(
+                                        left: 0,
+                                        top: 0,
+                                        child: IgnorePointer(
+                                          child: Icon(
+                                            Icons.warning_amber_rounded,
+                                            key: ValueKey(
+                                              'grid-photo-issue-${cell.row}-${cell.column}',
+                                            ),
+                                            color: Colors.red.shade700,
+                                            size: 20,
+                                          ),
+                                        ),
+                                      ),
+                                    if (forced)
+                                      Positioned.fill(
+                                        child: IgnorePointer(
+                                          child: DecoratedBox(
+                                            decoration: BoxDecoration(
+                                              border: Border.all(
+                                                color: Colors.amber,
+                                                width: 3,
                                               ),
                                             ),
                                           ),
                                         ),
-                                        if (issuePaths.isNotEmpty)
-                                          Positioned(
-                                            left: 0,
-                                            top: 0,
-                                            child: Icon(
-                                              Icons.warning_amber_rounded,
-                                              key: ValueKey(
-                                                'grid-photo-issue-${cell.row}-${cell.column}',
-                                              ),
-                                              color: Colors.red.shade700,
-                                              size: 20,
-                                            ),
-                                          ),
-                                        if (forced)
-                                          Positioned.fill(
-                                            child: IgnorePointer(
-                                              child: DecoratedBox(
-                                                decoration: BoxDecoration(
-                                                  border: Border.all(
-                                                    color: Colors.amber,
-                                                    width: 3,
-                                                  ),
-                                                ),
+                                      ),
+                                    if (selected)
+                                      Positioned.fill(
+                                        child: IgnorePointer(
+                                          child: DecoratedBox(
+                                            decoration: BoxDecoration(
+                                              border: Border.all(
+                                                color: Colors.blue,
+                                                width: 3,
                                               ),
                                             ),
                                           ),
-                                        if (selected)
-                                          Positioned.fill(
-                                            child: IgnorePointer(
-                                              child: DecoratedBox(
-                                                decoration: BoxDecoration(
-                                                  border: Border.all(
-                                                    color: Colors.blue,
-                                                    width: 3,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
+                                        ),
+                                      ),
+                                    if (forced)
+                                      Positioned(
+                                        right: 0,
+                                        top: 0,
+                                        child: IconButton(
+                                          key: ValueKey(
+                                            'grid-lock-${cell.row}-${cell.column}',
                                           ),
-                                        if (forced)
-                                          Positioned(
-                                            right: 0,
-                                            top: 0,
-                                            child: IconButton(
-                                              key: ValueKey(
-                                                'grid-lock-${cell.row}-${cell.column}',
-                                              ),
-                                              tooltip:
-                                                  StitchLocalizations.of(
-                                                    context,
-                                                  ).text(
-                                                    placement.origin ==
-                                                            GridConstraintOrigin
-                                                                .legacyUnknown
-                                                        ? '旧任务锁定位置来源未知；点按可解除锁定'
-                                                        : '解除网格位置锁定',
-                                                  ),
-                                              visualDensity:
-                                                  VisualDensity.compact,
-                                              padding: EdgeInsets.zero,
-                                              constraints:
-                                                  BoxConstraints.tightFor(
-                                                    width: lockButtonSize,
-                                                    height: lockButtonSize,
-                                                  ),
-                                              onPressed: _editable
-                                                  ? () async {
-                                                      final updated = task
-                                                          .copyWith(
-                                                            grid: _grid
-                                                                .setPhotoLock(
-                                                                  cell,
-                                                                  photo
-                                                                      .storedPath,
-                                                                  locked: false,
-                                                                ),
-                                                          );
-                                                      await _persist(updated);
-                                                      _setGrid(updated.grid);
-                                                    }
-                                                  : null,
-                                              icon: Icon(
-                                                Icons.push_pin,
-                                                color: Colors.amber,
-                                                size: lockIconSize,
-                                              ),
-                                            ),
-                                          ),
-                                        if (!forced && _editable)
-                                          Positioned(
-                                            right: 0,
-                                            top: 0,
-                                            child: IconButton(
-                                              key: ValueKey(
-                                                'grid-lock-${cell.row}-${cell.column}',
-                                              ),
-                                              tooltip: StitchLocalizations.of(
+                                          tooltip:
+                                              StitchLocalizations.of(
                                                 context,
-                                              ).text('锁定网格位置'),
-                                              visualDensity:
-                                                  VisualDensity.compact,
-                                              padding: EdgeInsets.zero,
-                                              constraints:
-                                                  BoxConstraints.tightFor(
-                                                    width: lockButtonSize,
-                                                    height: lockButtonSize,
-                                                  ),
-                                              onPressed: () async {
-                                                final updated = task.copyWith(
-                                                  grid: _grid.setPhotoLock(
-                                                    cell,
-                                                    photo.storedPath,
-                                                    locked: true,
-                                                  ),
-                                                );
-                                                await _persist(updated);
-                                                _setGrid(updated.grid);
-                                              },
-                                              icon: Icon(
-                                                Icons.push_pin_outlined,
-                                                size: lockIconSize,
+                                              ).text(
+                                                placement.origin ==
+                                                        GridConstraintOrigin
+                                                            .legacyUnknown
+                                                    ? '旧任务锁定位置来源未知；点按可解除锁定'
+                                                    : '解除网格位置锁定',
                                               ),
-                                            ),
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          constraints: BoxConstraints.tightFor(
+                                            width: lockButtonSize,
+                                            height: lockButtonSize,
                                           ),
-                                      ],
-                                    ),
-                                  ),
+                                          onPressed: _editable
+                                              ? () async {
+                                                  final updated = task.copyWith(
+                                                    grid: _grid.setPhotoLock(
+                                                      cell,
+                                                      photo.storedPath,
+                                                      locked: false,
+                                                    ),
+                                                  );
+                                                  await _persist(updated);
+                                                  _setGrid(updated.grid);
+                                                }
+                                              : null,
+                                          icon: Icon(
+                                            Icons.push_pin,
+                                            color: Colors.amber,
+                                            size: lockIconSize,
+                                          ),
+                                        ),
+                                      ),
+                                    if (!forced && _editable)
+                                      Positioned(
+                                        right: 0,
+                                        top: 0,
+                                        child: IconButton(
+                                          key: ValueKey(
+                                            'grid-lock-${cell.row}-${cell.column}',
+                                          ),
+                                          tooltip: StitchLocalizations.of(
+                                            context,
+                                          ).text('锁定网格位置'),
+                                          visualDensity: VisualDensity.compact,
+                                          padding: EdgeInsets.zero,
+                                          constraints: BoxConstraints.tightFor(
+                                            width: lockButtonSize,
+                                            height: lockButtonSize,
+                                          ),
+                                          onPressed: () async {
+                                            final updated = task.copyWith(
+                                              grid: _grid.setPhotoLock(
+                                                cell,
+                                                photo.storedPath,
+                                                locked: true,
+                                              ),
+                                            );
+                                            await _persist(updated);
+                                            _setGrid(updated.grid);
+                                          },
+                                          icon: Icon(
+                                            Icons.push_pin_outlined,
+                                            size: lockIconSize,
+                                          ),
+                                        ),
+                                      ),
+                                  ],
                                 ),
                               );
                             },

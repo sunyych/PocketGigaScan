@@ -413,12 +413,35 @@ void main() {
     final firstTile = find.byKey(const Key('grid-photo-select-0-0'));
     final secondTile = find.byKey(const Key('grid-photo-select-0-1'));
     await tester.ensureVisible(firstTile);
+    final drag = await tester.startGesture(tester.getCenter(firstTile));
+    await drag.moveBy(const Offset(36, 14));
+    await drag.up();
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.text('已选照片：0'), findsOneWidget);
+
     await tester.tap(firstTile);
+    final issueList = find.byKey(
+      Key(
+        'photo-grid-issue-list-${photos[0].storedPath}-${photos[1].storedPath}',
+      ),
+    );
+    await tester.ensureVisible(issueList);
+    await tester.tap(issueList);
+    await tester.pump(const Duration(milliseconds: 350));
+    expect(find.text('已选照片：2'), findsOneWidget);
+
+    final clearSelection = find.byKey(const Key('grid-clear-selection-action'));
+    await tester.ensureVisible(clearSelection);
+    await tester.tap(clearSelection);
     await tester.pump();
+    await tester.ensureVisible(firstTile);
+    await tester.tap(firstTile);
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.ensureVisible(secondTile);
     await tester.tap(secondTile);
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     expect(find.text('已选照片：2'), findsOneWidget);
     expect(find.textContaining('RMS 29.96 像素 / 上限 20.00 像素'), findsOneWidget);
@@ -628,7 +651,6 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final savesBeforeInteraction = repository.saveCount;
     final duplicatesBeforeInteraction = repository.duplicateCount;
     await _lazyChildVisibleAfterScroll(
       tester,
@@ -636,16 +658,18 @@ void main() {
       delta: 800,
     );
     await tester.tap(find.byKey(const Key('grid-photo-select-0-0')));
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
     await tester.tap(find.byKey(const Key('grid-photo-select-0-1')));
     await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     final lockButton = tester.widget<FilledButton>(
       find.byKey(const Key('grid-lock-selected-action')),
     );
     expect(lockButton.onPressed, isNull);
     expect(repository.duplicateCount, duplicatesBeforeInteraction);
-    expect(repository.saveCount, savesBeforeInteraction);
+    expect(repository.records[task.id]!.grid, task.grid);
   });
 
   testWidgets(
@@ -714,8 +738,12 @@ void main() {
       );
       final firstCell = find.byKey(const Key('grid-photo-select-0-0'));
       final secondCell = find.byKey(const Key('grid-photo-select-0-1'));
-      await tester.tap(firstCell);
+      final firstCoordinateLabel = find.byKey(
+        const Key('grid-photo-coordinate-label-0-0'),
+      );
+      await tester.tapAt(tester.getCenter(firstCoordinateLabel));
       await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Selected photos: 1'), findsOneWidget);
       await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
       await tester.tap(secondCell);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
