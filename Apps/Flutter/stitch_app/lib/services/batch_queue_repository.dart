@@ -9,13 +9,13 @@ import '../models/batch_queue.dart';
 import 'legacy_support_directory.dart';
 
 class BatchQueueRepository {
-  BatchQueueRepository({this._rootDirectory});
-  final Directory? _rootDirectory;
+  BatchQueueRepository({this.rootDirectory});
+  final Directory? rootDirectory;
   Future<void> _writeTail = Future.value();
 
   Future<Directory> root() async {
     final base =
-        _rootDirectory ??
+        rootDirectory ??
         await legacyCompatibleSupportDirectory(
           platformSupportRoot: await getApplicationSupportDirectory(),
           dataFolder: 'batches',
@@ -76,18 +76,45 @@ class BatchQueueRepository {
 
   bool _validPaths(BatchQueue queue) {
     if (queue.parentDirectory.trim().isEmpty) return false;
-    final expectedOutput = p.normalize(
-      p.join(
-        p.dirname(p.normalize(queue.parentDirectory)),
-        '${p.basename(p.normalize(queue.parentDirectory))}_stitched',
-      ),
-    );
-    if (p.normalize(queue.outputDirectory) != expectedOutput) return false;
+    if (queue.usbSource) {
+      if (queue.usbVolumeId == null ||
+          queue.usbVolumeId!.isEmpty ||
+          !p.isAbsolute(queue.parentDirectory) ||
+          !p.isAbsolute(queue.outputDirectory) ||
+          p.equals(
+            p.normalize(queue.outputDirectory),
+            p.normalize(queue.parentDirectory),
+          ) ||
+          p.isWithin(
+            p.normalize(queue.parentDirectory),
+            p.normalize(queue.outputDirectory),
+          )) {
+        return false;
+      }
+    } else {
+      final expectedOutput = p.normalize(
+        p.join(
+          p.dirname(p.normalize(queue.parentDirectory)),
+          '${p.basename(p.normalize(queue.parentDirectory))}_stitched',
+        ),
+      );
+      if (p.normalize(queue.outputDirectory) != expectedOutput) return false;
+    }
     for (final item in queue.items) {
       if (item.id.isEmpty || item.name.isEmpty) return false;
       if (item.sourceDirectory.isEmpty ||
-          p.dirname(p.normalize(item.sourceDirectory)) !=
-              p.normalize(queue.parentDirectory)) {
+          !p.isAbsolute(item.sourceDirectory) ||
+          (queue.usbSource
+              ? !(p.equals(
+                      p.normalize(item.sourceDirectory),
+                      p.normalize(queue.parentDirectory),
+                    ) ||
+                    p.isWithin(
+                      p.normalize(queue.parentDirectory),
+                      p.normalize(item.sourceDirectory),
+                    ))
+              : p.dirname(p.normalize(item.sourceDirectory)) !=
+                    p.normalize(queue.parentDirectory))) {
         return false;
       }
       if (item.taskId != null &&

@@ -555,6 +555,29 @@ class _SettingsPageState extends State<SettingsPage> {
                   ],
                 ),
               ),
+              _selectionControl<TaskDateFormat>(
+                context: context,
+                title: l.text('本地任务日期格式'),
+                stacked: stackedDropdowns,
+                value: s.taskDateFormat,
+                items: TaskDateFormat.values
+                    .map(
+                      (value) => DropdownMenuItem(
+                        value: value,
+                        child: Text(
+                          value == TaskDateFormat.yearMonthDay
+                              ? 'YYYY-MM-DD'
+                              : 'MM/DD/YYYY',
+                        ),
+                      ),
+                    )
+                    .toList(),
+                onChanged: (value) {
+                  if (value != null) {
+                    widget.controller.update(s.copyWith(taskDateFormat: value));
+                  }
+                },
+              ),
               if (widget.controller.error case final error?)
                 ListTile(
                   title: Text(

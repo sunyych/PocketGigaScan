@@ -89,6 +89,72 @@ void main() {
     );
   });
 
+  test(
+    'task date format and rail width persist and sanitize old values',
+    () async {
+      final controller = SettingsController(
+        repository: repository,
+        initial: const AppSettings(),
+      );
+      await controller.update(
+        const AppSettings(
+          taskDateFormat: TaskDateFormat.monthDayYear,
+          taskRailWidth: 312,
+        ),
+      );
+      final restarted = SettingsController(repository: repository);
+      await restarted.ready;
+      expect(restarted.settings.taskDateFormat, TaskDateFormat.monthDayYear);
+      expect(restarted.settings.taskRailWidth, 312);
+      final legacy = AppSettings.fromJson({
+        'taskDateFormat': 'unknown',
+        'taskRailWidth': double.infinity,
+      });
+      expect(legacy.taskDateFormat, TaskDateFormat.yearMonthDay);
+      expect(legacy.taskRailWidth, 230);
+      expect(AppSettings.fromJson({'taskRailWidth': 900}).taskRailWidth, 520);
+      controller.dispose();
+      restarted.dispose();
+    },
+  );
+
+  test('task dates format in either supported order and retain time', () {
+    final local = DateTime(2026, 10, 29, 9, 7);
+    expect(
+      formatTaskDateTime(local, TaskDateFormat.yearMonthDay),
+      '2026-10-29 09:07',
+    );
+    expect(
+      formatTaskDateTime(local, TaskDateFormat.monthDayYear),
+      '10/29/2026 09:07',
+    );
+  });
+
+  testWidgets('task date format can be switched from settings immediately', (
+    tester,
+  ) async {
+    final controller = SettingsController(
+      repository: _InMemorySettingsRepository(),
+      initial: const AppSettings(language: AppLanguage.zh),
+    );
+    await tester.pumpWidget(
+      LumiaStitchApp(
+        settingsController: controller,
+        home: SettingsPage(controller: controller),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final selector = find.byType(DropdownButton<TaskDateFormat>);
+    expect(selector, findsOneWidget);
+    await tester.tap(selector);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('MM/DD/YYYY').last);
+    await tester.pumpAndSettle();
+    expect(controller.settings.taskDateFormat, TaskDateFormat.monthDayYear);
+    expect(find.text('MM/DD/YYYY').first, findsOneWidget);
+    controller.dispose();
+  });
+
   testWidgets(
     'system text scale is preserved and custom scale is not multiplied',
     (tester) async {

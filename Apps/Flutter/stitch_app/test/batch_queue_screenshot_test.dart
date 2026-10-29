@@ -373,7 +373,11 @@ Widget _desktopPage(List<BatchQueue> queues) {
   final controller = _ScreenshotController(fixtureQueues: queues);
   addTearDown(controller.dispose);
   return ChineseTestApp(
-    home: BatchQueuePage(api: _ScreenshotApi(), controller: controller),
+    home: BatchQueuePage(
+      api: _ScreenshotApi(),
+      controller: controller,
+      autoUsbDiscoveryOverride: false,
+    ),
   );
 }
 
@@ -386,6 +390,7 @@ Widget _mobilePage() {
       controller: controller,
       mobileOverride: true,
       androidOverride: true,
+      autoUsbDiscoveryOverride: false,
     ),
   );
 }
@@ -410,7 +415,11 @@ Widget _largeTextDialogPage(
         size: Size(390, 844),
         textScaler: TextScaler.linear(2),
       ),
-      child: BatchQueuePage(api: _DialogApi(), controller: controller),
+      child: BatchQueuePage(
+        api: _DialogApi(),
+        controller: controller,
+        autoUsbDiscoveryOverride: false,
+      ),
     ),
   );
 }

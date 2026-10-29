@@ -1,4 +1,5 @@
 import 'package:stitch_app/models/batch_queue.dart';
+import 'package:stitch_app/models/app_settings.dart';
 import 'package:stitch_app/services/batch_queue_controller.dart';
 import 'package:stitch_app/services/task_repository.dart';
 
@@ -18,4 +19,11 @@ class EmptyBatchQueueController extends BatchQueueController {
 
   @override
   Future<void> initialize() async {}
+
+  @override
+  void setUsbAutoDiscoveryEnabled(
+    bool enabled, {
+    Duration interval = const Duration(seconds: 30),
+    AppSettings? settings,
+  }) {}
 }

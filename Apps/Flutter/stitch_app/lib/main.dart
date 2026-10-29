@@ -326,6 +326,10 @@ class _StitchHomePageState extends State<StitchHomePage>
   Future<void> _resourceSyncTail = Future<void>.value();
   int _resourceSyncRevision = 0;
   int _appMaxConcurrentJobs = 2;
+  double? _taskRailDragWidth;
+  double? _taskRailDragStartWidth;
+  double _taskRailAccumulatedDragDelta = 0;
+  double _taskRailFallbackBaseWidth = 230;
 
   bool get _mobile =>
       widget.mobileOverride ?? (Platform.isAndroid || Platform.isIOS);
@@ -576,9 +580,11 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   void _applySettingsDefaults({bool force = false}) {
     unawaited(_syncAppResources());
-    if (!mounted ||
-        (!force && _task != null) ||
-        widget.settingsController == null) {
+    if (!mounted || widget.settingsController == null) return;
+    if (!force && _task != null) {
+      // The selected task owns stitching defaults, while presentation settings
+      // such as task date format and rail width still need an immediate rebuild.
+      setState(() {});
       return;
     }
     final s = _appSettings;
@@ -4167,10 +4173,37 @@ class _StitchHomePageState extends State<StitchHomePage>
       body: LayoutBuilder(
         builder: (context, constraints) {
           final narrow = constraints.maxWidth < 760;
+          final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
+          final savedRailWidth =
+              widget.settingsController?.settings.taskRailWidth ??
+              _taskRailFallbackBaseWidth;
+          final minimumRailWidth = 180 * textScale;
+          final maximumRailWidth = (constraints.maxWidth - 360)
+              .clamp(minimumRailWidth, 520 * textScale)
+              .toDouble();
+          final railWidth = (_taskRailDragWidth ?? savedRailWidth * textScale)
+              .clamp(minimumRailWidth, maximumRailWidth)
+              .toDouble();
           return Row(
             children: [
               if (!narrow && constraints.maxWidth > 900)
-                SizedBox(width: 230, child: _taskRail()),
+                SizedBox(
+                  key: const Key('task-rail-panel'),
+                  width: railWidth,
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: railWidth - 12,
+                        child: _taskRail(),
+                      ),
+                      _taskRailResizeHandle(
+                        railWidth: railWidth,
+                        textScale: textScale,
+                        maxWidth: maximumRailWidth,
+                      ),
+                    ],
+                  ),
+                ),
               Expanded(
                 child: ListView(
                   key: const Key('stitch-main-scroll'),
@@ -4212,6 +4245,110 @@ class _StitchHomePageState extends State<StitchHomePage>
               label: const Text('导入原片'),
             )
           : null,
+    );
+  }
+
+  Widget _taskRailResizeHandle({
+    required double railWidth,
+    required double textScale,
+    required double maxWidth,
+  }) {
+    void saveWidth(double width) {
+      final controller = widget.settingsController;
+      final baseWidth = (width / textScale).clamp(180.0, 520.0).toDouble();
+      _taskRailFallbackBaseWidth = baseWidth;
+      setState(() => _taskRailDragWidth = null);
+      if (controller == null) return;
+      unawaited(
+        controller.updateWith(
+          (latest) => latest.copyWith(taskRailWidth: baseWidth),
+        ),
+      );
+    }
+
+    final minimumWidth = 180 * textScale;
+    double adjustWidth(double requested) =>
+        requested.clamp(minimumWidth, maxWidth).toDouble();
+
+    return Tooltip(
+      message: StitchLocalizations.of(context).text('双击或按 Home 恢复默认宽度'),
+      child: Semantics(
+        slider: true,
+        label: StitchLocalizations.of(context).text('调整本地任务栏宽度'),
+        value: '${railWidth.round()} px',
+        increasedValue: '${adjustWidth(railWidth + 16).round()} px',
+        decreasedValue: '${adjustWidth(railWidth - 16).round()} px',
+        hint: StitchLocalizations.of(context).text('双击或按 Home 恢复默认宽度'),
+        onIncrease: () {
+          final next = adjustWidth(railWidth + 16);
+          setState(() => _taskRailDragWidth = next);
+          saveWidth(next);
+        },
+        onDecrease: () {
+          final next = adjustWidth(railWidth - 16);
+          setState(() => _taskRailDragWidth = next);
+          saveWidth(next);
+        },
+        child: Focus(
+          onKeyEvent: (node, event) {
+            if (event is! KeyDownEvent) return KeyEventResult.ignored;
+            if (event.logicalKey == LogicalKeyboardKey.arrowRight ||
+                event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+              final direction =
+                  event.logicalKey == LogicalKeyboardKey.arrowRight ? 1 : -1;
+              final next = adjustWidth(railWidth + direction * 16);
+              setState(() => _taskRailDragWidth = next);
+              saveWidth(next);
+              return KeyEventResult.handled;
+            }
+            if (event.logicalKey == LogicalKeyboardKey.home) {
+              setState(() => _taskRailDragWidth = null);
+              saveWidth(230 * textScale);
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: MouseRegion(
+            cursor: SystemMouseCursors.resizeColumn,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragStart: (_) {
+                _taskRailDragStartWidth = railWidth;
+                _taskRailAccumulatedDragDelta = 0;
+              },
+              onHorizontalDragUpdate: (details) {
+                final start = _taskRailDragStartWidth ?? railWidth;
+                _taskRailAccumulatedDragDelta += details.delta.dx;
+                setState(
+                  () => _taskRailDragWidth = adjustWidth(
+                    start + _taskRailAccumulatedDragDelta,
+                  ),
+                );
+              },
+              onHorizontalDragEnd: (_) {
+                final width = _taskRailDragWidth ?? railWidth;
+                _taskRailDragStartWidth = null;
+                saveWidth(width);
+              },
+              onDoubleTap: () {
+                setState(() => _taskRailDragWidth = null);
+                saveWidth(230 * textScale);
+              },
+              child: SizedBox(
+                key: const Key('task-rail-resize-handle'),
+                width: 12,
+                child: Center(
+                  child: Container(
+                    width: 2,
+                    height: double.infinity,
+                    color: Theme.of(context).dividerColor,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
@@ -4419,7 +4556,14 @@ class _StitchHomePageState extends State<StitchHomePage>
                       : null,
                 )
               : _taskThumbnail(task),
-          title: Text(task.createdAt.toLocal().toString().substring(0, 16)),
+          title: Text(
+            formatTaskDateTime(
+              task.createdAt,
+              widget.settingsController?.settings.taskDateFormat ??
+                  TaskDateFormat.yearMonthDay,
+            ),
+            key: Key('task-date-${task.id}'),
+          ),
           subtitle: Text(
             StitchLocalizations.of(context).taskSummary(
               photoCount: task.photos.length,

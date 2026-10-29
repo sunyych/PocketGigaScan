@@ -26,6 +26,7 @@ import 'task_record_service.dart';
 import 'jpeg_dimension_estimator.dart';
 import 'dwarf_download_service.dart';
 import 'scene_model_service.dart';
+import 'usb_dwarf_import_service.dart';
 
 class BatchQueueController extends ChangeNotifier {
   BatchQueueController({
@@ -38,9 +39,11 @@ class BatchQueueController extends ChangeNotifier {
     this.runtimeService,
     this.storageService,
     this.sceneModelService,
+    UsbDwarfImportService? usbImportService,
   }) : _queueRepository = queueRepository ?? BatchQueueRepository(),
        _taskRepository = taskRepository ?? TaskRepository(),
        _importer = importer ?? BatchFolderImporter(),
+       _usbImportService = usbImportService ?? UsbDwarfImportService(),
        _clock = clock ?? DateTime.now;
 
   final JobApi api;
@@ -48,6 +51,7 @@ class BatchQueueController extends ChangeNotifier {
   final BatchQueueRepository _queueRepository;
   final TaskRepository _taskRepository;
   final BatchFolderImporter _importer;
+  final UsbDwarfImportService _usbImportService;
   final DateTime Function() _clock;
   bool requireLargeJobApproval;
   final MobileRuntimeService? runtimeService;
@@ -74,6 +78,7 @@ class BatchQueueController extends ChangeNotifier {
   Future<void> _queueWriteTail = Future.value();
   Future<void> _tickWork = Future.value();
   Timer? _timer;
+  Timer? _usbDiscoveryTimer;
   bool _loading = false;
   bool _importing = false;
   bool _disposed = false;
@@ -877,6 +882,7 @@ class BatchQueueController extends ChangeNotifier {
       _loading = false;
       if (!_disposed) notifyListeners();
       for (final queue in List<BatchQueue>.of(_queues)) {
+        if (queue.usbSource) continue;
         final pending = queue.items
             .where(
               (item) =>
@@ -1019,13 +1025,439 @@ class BatchQueueController extends ChangeNotifier {
     unawaited(tick());
   }
 
+  /// Scans only mounted-volume DWARF locations and persists newly discovered
+  /// panoramas as pending queue entries. No source photos are copied here.
+  Future<int> discoverUsbDwarf({
+    bool deleteSources = false,
+    AppSettings? settings,
+  }) async {
+    if (_loading || _importing || _disposed) return 0;
+    _importing = true;
+    if (!_disposed) notifyListeners();
+    try {
+      final sources = await _usbImportService.discover();
+      final imported = await _usbImportService.loadImportedIdentities();
+      var addedCount = 0;
+      for (final source in sources) {
+        var queueIndex = _queues.indexWhere(
+          (queue) => queue.usbSource && queue.usbVolumeId == source.volumeId,
+        );
+        // A successful import can outlive its queue item. Check durable
+        // history before creating a new queue so scans never leave empty
+        // phantom batches behind.
+        if (queueIndex < 0 && imported.contains(source.identity)) continue;
+        if (queueIndex < 0) {
+          final queueId = _taskRepository.createId();
+          final taskRoot = await _taskRepository.root();
+          final output = Directory(
+            p.join(taskRoot.path, 'usb-exports', queueId),
+          );
+          final queue = BatchQueue(
+            id: queueId,
+            createdAt: _clock(),
+            parentDirectory: source.mountPath,
+            outputDirectory: output.path,
+            items: const [],
+            outputFormat: settings?.exportFormat ?? ExportFormat.jpeg,
+            started: false,
+            usbSource: true,
+            usbVolumeId: source.volumeId,
+            deleteUsbSources: deleteSources,
+            performanceOptions:
+                settings?.performance ?? const PerformanceOptions(),
+            refineGridNeighbors: settings?.refineGridNeighbors ?? true,
+            seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
+            localTextureWarp: settings?.localTextureWarp ?? true,
+            protectPeople: settings?.protectPeople ?? false,
+            smoothWater: settings?.smoothWater ?? false,
+          );
+          _queues.insert(0, queue);
+          queueIndex = 0;
+        }
+        var queue = _queues[queueIndex];
+        final oldMount = p.normalize(queue.parentDirectory);
+        final newMount = p.normalize(source.mountPath);
+        if (oldMount.toLowerCase() != newMount.toLowerCase()) {
+          final remappedItems = queue.items.map((item) {
+            if (item.usbSourceIdentity == null) return item;
+            final relative = p.relative(
+              p.normalize(item.sourceDirectory),
+              from: oldMount,
+            );
+            if (p.isAbsolute(relative) ||
+                relative == '..' ||
+                relative.startsWith('..${p.separator}')) {
+              return item;
+            }
+            return item.copyWith(
+              sourceDirectory: p.normalize(p.join(newMount, relative)),
+            );
+          }).toList();
+          queue = queue.copyWith(
+            parentDirectory: source.mountPath,
+            items: remappedItems,
+          );
+          _queues[queueIndex] = queue;
+          await _save(queue);
+        }
+        final existing = queue.items.toList();
+        final foundIndex = existing.indexWhere(
+          (item) => item.usbSourceIdentity == source.identity,
+        );
+        if (foundIndex >= 0 &&
+            (existing[foundIndex].taskId != null ||
+                imported.contains(source.identity))) {
+          continue;
+        }
+        if (foundIndex < 0 && imported.contains(source.identity)) {
+          continue;
+        }
+        final signature = await _usbImportService.sourceSignature(source);
+        final now = _clock();
+        if (foundIndex >= 0) {
+          final item = existing[foundIndex];
+          final stableSince = item.usbSourceSignature == signature
+              ? item.usbStableSince ?? now
+              : now;
+          existing[foundIndex] = item.copyWith(
+            sourceDirectory: source.directory,
+            usbSourceSignature: signature,
+            usbStableSince: stableSince,
+            state: item.state == BatchItemState.failed
+                ? BatchItemState.pending
+                : item.state,
+            clearMessage: item.state == BatchItemState.failed,
+          );
+          queue = queue.copyWith(
+            parentDirectory: source.mountPath,
+            items: existing,
+            started: queue.started && item.state != BatchItemState.failed,
+          );
+        } else {
+          existing.add(
+            BatchQueueItem(
+              id: _taskRepository.createId(),
+              name: p.basename(source.directory),
+              sourceDirectory: source.directory,
+              state: BatchItemState.pending,
+              usbSourceIdentity: source.identity,
+              usbSourceSignature: signature,
+              usbStableSince: now,
+            ),
+          );
+          queue = queue.copyWith(
+            parentDirectory: source.mountPath,
+            items: existing,
+            started: false,
+          );
+          addedCount++;
+        }
+        _queues[queueIndex] = queue;
+        await _save(queue);
+      }
+      if (!_disposed) notifyListeners();
+      return addedCount;
+    } on Object catch (exception) {
+      error = '扫描 USB DWARF 设备失败：$exception';
+      return 0;
+    } finally {
+      _importing = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  void setUsbAutoDiscoveryEnabled(
+    bool enabled, {
+    Duration interval = const Duration(seconds: 30),
+    AppSettings? settings,
+  }) {
+    _usbDiscoveryTimer?.cancel();
+    _usbDiscoveryTimer = null;
+    if (!enabled || _disposed) return;
+    unawaited(discoverUsbDwarf(settings: settings));
+    _usbDiscoveryTimer = Timer.periodic(
+      interval,
+      (_) => unawaited(discoverUsbDwarf(settings: settings)),
+    );
+  }
+
+  Future<bool> _prepareUsbItems(String queueId) async {
+    if (_importing || _loading || _disposed) return false;
+    final index = _queues.indexWhere((queue) => queue.id == queueId);
+    if (index < 0 || !_queues[index].usbSource) return true;
+    _importing = true;
+    if (!_disposed) notifyListeners();
+    try {
+      var queue = _queues[index];
+      var succeeded = true;
+      for (final original in queue.items.toList()) {
+        if (original.taskId != null ||
+            !const {
+              BatchItemState.pending,
+              BatchItemState.failed,
+            }.contains(original.state)) {
+          continue;
+        }
+        final identity = original.usbSourceIdentity;
+        if (identity == null) continue;
+        try {
+          final importedHistory = await _usbImportService
+              .loadImportedIdentities();
+          if (importedHistory.contains(identity)) {
+            final existingTask = await _taskRepository.loadById(original.id);
+            if (existingTask != null) {
+              await _setUsbReady(queueId, original.id, existingTask, original);
+            } else {
+              // History is durable and records a successful import; retain the
+              // item as completed evidence instead of creating duplicate work.
+              await _replaceState(
+                queueId,
+                original.id,
+                BatchItemState.skipped,
+                message: '此全景已导入（USB 导入历史）',
+              );
+            }
+            continue;
+          }
+          final source = _usbImportService.sourceFor(
+            volumeId: queue.usbVolumeId ?? '',
+            identity: identity,
+            directory: original.sourceDirectory,
+            mountPath: queue.parentDirectory,
+          );
+          if (!await _usbImportService.isPanoramaComplete(source.directory)) {
+            await _replaceItemById(
+              queueId,
+              original.id,
+              original.copyWith(message: '等待全景预览生成；拍摄可能尚未完成'),
+            );
+            succeeded = false;
+            continue;
+          }
+          final files = await _usbImportService.selectMaximumPhotos(
+            source.directory,
+          );
+          if (files.isEmpty) throw const FormatException('没有找到可拼接的原片');
+          final signature = await _usbImportService.sourceSignature(source);
+          if (signature != original.usbSourceSignature ||
+              original.usbStableSince == null ||
+              _clock().difference(original.usbStableSince!) <
+                  const Duration(seconds: 3)) {
+            await _replaceItemById(
+              queueId,
+              original.id,
+              original.copyWith(
+                usbSourceSignature: signature,
+                usbStableSince: signature == original.usbSourceSignature
+                    ? original.usbStableSince
+                    : _clock(),
+                message: '照片目录仍在变化，刷新后再开始以确认写入完成',
+              ),
+            );
+            succeeded = false;
+            continue;
+          }
+          final taskDir = await _taskRepository.directoryFor(original.id);
+          if (await taskDir.exists()) {
+            final prior = await _taskRepository.loadById(original.id);
+            if (prior != null) {
+              await _usbImportService.markImported(identity);
+              await _setUsbReady(queueId, original.id, prior, original);
+              continue;
+            }
+            final root = await _taskRepository.root();
+            if (!_pathIsWithin(root.path, taskDir.path)) {
+              throw const FileSystemException('USB 任务目录超出应用数据目录');
+            }
+            await taskDir.delete(recursive: true);
+          }
+          final copiedDir = Directory(p.join(taskDir.path, 'usb-copy'));
+          final copied = await _usbImportService.copyVerified(
+            sources: files,
+            destinationDirectory: copiedDir.path,
+            deleteSources: false,
+          );
+          await _usbImportService.copyPreview(
+            sourceDirectory: source.directory,
+            destinationDirectory: p.join(
+              copiedDir.path,
+              '_metadata',
+              'camera-thumbnail.jpg',
+            ),
+          );
+          if (await _usbImportService.sourceSignature(source) != signature) {
+            throw const FileSystemException('复制期间照片目录新增或变化，已取消本次导入');
+          }
+          // Keep importer paths under a single directory while preserving the
+          // copier's verified file names and optional full-panorama preview.
+          final normalizedSnapshot = BatchFolderSnapshot(
+            directory: copiedDir.path,
+            files: copied.files,
+          );
+          final imported = await _importer.importFolder(
+            normalizedSnapshot,
+            taskDir.path,
+          );
+          for (final photo in imported.photos) {
+            if (copied.sha256ByName[photo.originalName.toLowerCase()] !=
+                photo.sha256) {
+              throw FileSystemException(
+                '任务输入校验与 USB 复制结果不匹配',
+                photo.originalName,
+              );
+            }
+          }
+          final task = StitchTask(
+            id: original.id,
+            createdAt: _clock(),
+            sourceDirectory: imported.inputDirectory,
+            outputDirectory: p.join(taskDir.path, 'render'),
+            photos: imported.photos,
+            grid: imported.grid,
+            horizontalFovDegrees: imported.fovDegrees ?? 45,
+            memoryBudgetMiB: newTaskMemoryBudgetMiB,
+            workers: 1,
+            phase: StitchPhase.imported,
+            cameraProfileId: imported.cameraProfileId,
+            performanceOptions: queue.performanceOptions,
+            exportFormat: queue.outputFormat,
+            previewThumbnailPath: imported.previewThumbnailPath,
+            refineGridNeighbors: queue.refineGridNeighbors,
+            seamBlendMode: queue.seamBlendMode,
+            localTextureWarp: queue.localTextureWarp,
+            protectPeople: queue.protectPeople,
+            smoothWater: queue.smoothWater,
+            exportDirectory: queue.exportDestination ?? queue.outputDirectory,
+          );
+          await _saveTask(task);
+          final refreshed = _find(queueId, original.id);
+          if (refreshed != null) {
+            await _replaceItem(
+              refreshed.index,
+              refreshed.item.copyWith(
+                taskId: task.id,
+                durableInputDirectory: imported.inputDirectory,
+                estimatedLayout: imported.estimatedLayout,
+                state: imported.needsLayout || !imported.cameraVerified
+                    ? BatchItemState.needsSettings
+                    : BatchItemState.ready,
+                message: imported.previewThumbnailPath == null
+                    ? 'USB 原片已复制并校验'
+                    : 'USB 原片已复制并校验；已保留全景预览',
+              ),
+            );
+          }
+          var historyStored = true;
+          try {
+            await _usbImportService.markImported(identity);
+          } on Object catch (historyError) {
+            historyStored = false;
+            error = '任务已导入，但 USB 去重历史写入失败：$historyError';
+          }
+          var cleanupMessage = '';
+          try {
+            if (await copiedDir.exists()) {
+              await copiedDir.delete(recursive: true);
+            }
+          } on Object catch (copyCleanupError) {
+            cleanupMessage = '；USB 临时副本清理失败：$copyCleanupError';
+          }
+          if (queue.deleteUsbSources && historyStored) {
+            try {
+              final cleanup = await _usbImportService.deleteVerifiedSources(
+                sources: files,
+                expectedHashesByName: {
+                  for (final photo in imported.photos)
+                    photo.originalName.toLowerCase(): photo.sha256,
+                },
+              );
+              if (cleanup.retained.isNotEmpty) {
+                cleanupMessage = '；${cleanup.retained.length} 个源文件因变化或无法删除而保留';
+              }
+            } on Object catch (sourceCleanupError) {
+              cleanupMessage = '；源文件清理失败并保留：$sourceCleanupError';
+            }
+          }
+          if (cleanupMessage.isNotEmpty) {
+            final current = _find(queueId, original.id);
+            if (current != null) {
+              try {
+                await _replaceItem(
+                  current.index,
+                  current.item.copyWith(message: '任务已导入$cleanupMessage'),
+                );
+              } on Object {
+                error = 'USB 任务已导入，但无法保存清理结果：$cleanupMessage';
+              }
+            }
+          }
+        } on Object catch (exception) {
+          succeeded = false;
+          await _replaceState(
+            queueId,
+            original.id,
+            BatchItemState.failed,
+            message: 'USB 导入失败，可刷新后重试：$exception',
+          );
+        }
+        final latestIndex = _queues.indexWhere((item) => item.id == queueId);
+        if (latestIndex >= 0) queue = _queues[latestIndex];
+      }
+      return succeeded;
+    } finally {
+      _importing = false;
+      if (!_disposed) notifyListeners();
+    }
+  }
+
+  Future<void> _setUsbReady(
+    String queueId,
+    String itemId,
+    StitchTask task,
+    BatchQueueItem item,
+  ) async {
+    final found = _find(queueId, itemId);
+    if (found == null) return;
+    await _replaceItem(
+      found.index,
+      item.copyWith(
+        taskId: task.id,
+        durableInputDirectory: task.sourceDirectory,
+        state:
+            item.estimatedLayout ||
+                item.state == BatchItemState.needsSettings ||
+                task.cameraProfileId == null
+            ? BatchItemState.needsSettings
+            : task.phase == StitchPhase.imported
+            ? BatchItemState.ready
+            : BatchItemState.needsSettings,
+        message: 'USB 导入已恢复',
+      ),
+    );
+  }
+
+  Future<void> _replaceItemById(
+    String queueId,
+    String itemId,
+    BatchQueueItem item,
+  ) async {
+    final found = _find(queueId, itemId);
+    if (found != null) await _replaceItem(found.index, item);
+  }
+
   Future<void> startQueue(String queueId) async {
     final index = _queues.indexWhere((queue) => queue.id == queueId);
     if (index < 0 || _loading || _importing) return;
-    final queue = _queues[index];
+    var queue = _queues[index];
     if (queue.started) return;
+    if (queue.usbSource && !await _prepareUsbItems(queueId)) return;
+    final refreshedIndex = _queues.indexWhere(
+      (candidate) => candidate.id == queueId,
+    );
+    if (refreshedIndex < 0) return;
+    queue = _queues[refreshedIndex];
     final started = queue.copyWith(started: true);
-    _queues[index] = started;
+    _queues[refreshedIndex] = started;
     await _save(started);
     if (!_disposed) notifyListeners();
     await tick();
@@ -1033,9 +1465,25 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> startAllQueues() async {
     if (_loading || _importing || _disposed) return;
+    for (final queue in _queues.toList()) {
+      if (queue.usbSource && !queue.started) {
+        await _prepareUsbItems(queue.id);
+      }
+    }
     for (var index = 0; index < _queues.length; index++) {
       final queue = _queues[index];
       if (queue.started) continue;
+      if (queue.usbSource &&
+          queue.items.any(
+            (item) =>
+                item.taskId == null &&
+                const {
+                  BatchItemState.pending,
+                  BatchItemState.failed,
+                }.contains(item.state),
+          )) {
+        continue;
+      }
       final started = queue.copyWith(started: true);
       _queues[index] = started;
       await _save(started);
@@ -1059,6 +1507,15 @@ class BatchQueueController extends ChangeNotifier {
     String queueId, {
     bool deferScheduling = false,
   }) async {
+    final requestedIndex = _queues.indexWhere((queue) => queue.id == queueId);
+    if (requestedIndex >= 0 && _queues[requestedIndex].usbSource) {
+      final before = _queues[requestedIndex].items.length;
+      await discoverUsbDwarf();
+      final afterIndex = _queues.indexWhere((queue) => queue.id == queueId);
+      return afterIndex < 0
+          ? 0
+          : (_queues[afterIndex].items.length - before).clamp(0, 1 << 30);
+    }
     if (_loading || _importing) {
       throw StateError('队列正在恢复或导入，请稍后重新扫描');
     }
@@ -1324,6 +1781,16 @@ class BatchQueueController extends ChangeNotifier {
       }
     }
     await storageService!.releaseBatchParent(parentPath);
+  }
+
+  Future<void> setUsbDeleteSources(String queueId, bool enabled) async {
+    if (_importing || _loading || _disposed) return;
+    final index = _queues.indexWhere((queue) => queue.id == queueId);
+    if (index < 0 || !_queues[index].usbSource) return;
+    final updated = _queues[index].copyWith(deleteUsbSources: enabled);
+    _queues[index] = updated;
+    await _save(updated);
+    if (!_disposed) notifyListeners();
   }
 
   Future<void> _importSnapshot(
@@ -1861,6 +2328,13 @@ class BatchQueueController extends ChangeNotifier {
   Future<void> retry(String queueId, String itemId) async {
     final found = _find(queueId, itemId);
     if (found == null) return;
+    if (found.item.usbSourceIdentity != null && found.item.taskId == null) {
+      if (_loading || _importing || _disposed) return;
+      final queue = _queues.firstWhere((value) => value.id == queueId);
+      final prepared = await _prepareUsbItems(queueId);
+      if (prepared && queue.started) unawaited(tick());
+      return;
+    }
     var task = await _loadTask(found.item);
     if (task?.nativeJobId != null) {
       _runtimeGuardUnavailableJobs.remove(task!.nativeJobId);
@@ -3766,6 +4240,7 @@ class BatchQueueController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _timer?.cancel();
+    _usbDiscoveryTimer?.cancel();
     super.dispose();
   }
 }

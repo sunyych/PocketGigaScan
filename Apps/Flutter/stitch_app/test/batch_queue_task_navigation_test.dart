@@ -112,6 +112,7 @@ void main() {
                             api: api,
                             controller: controller,
                             mobileOverride: false,
+                            autoUsbDiscoveryOverride: false,
                           ),
                         ),
                       );

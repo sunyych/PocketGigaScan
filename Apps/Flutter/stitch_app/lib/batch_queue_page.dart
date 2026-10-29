@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart' hide Text;
@@ -33,6 +34,7 @@ class BatchQueuePage extends StatefulWidget {
     this.deviceDownloader,
     this.onTransferStatus,
     this.onDeviceTaskReady,
+    this.autoUsbDiscoveryOverride,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -45,6 +47,7 @@ class BatchQueuePage extends StatefulWidget {
   final DwarfDownloadService? deviceDownloader;
   final ValueChanged<DwarfTransferStatus>? onTransferStatus;
   final Future<void> Function(String taskId)? onDeviceTaskReady;
+  final bool? autoUsbDiscoveryOverride;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -72,6 +75,20 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     _controller.addListener(_changed);
     _controller.requireLargeJobApproval = _mobile;
     if (_ownsController) _controller.initialize();
+    final autoDiscovery = widget.autoUsbDiscoveryOverride ?? !_mobile;
+    if (widget.settingsController == null) {
+      _controller.setUsbAutoDiscoveryEnabled(autoDiscovery);
+    } else {
+      unawaited(
+        widget.settingsController!.ready.then((_) {
+          if (!mounted) return;
+          _controller.setUsbAutoDiscoveryEnabled(
+            autoDiscovery,
+            settings: widget.settingsController!.settings,
+          );
+        }),
+      );
+    }
     _refreshFormatCapabilities();
   }
 
@@ -254,6 +271,40 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('无法启动队列：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _discoverUsb() async {
+    if (_busy || _controller.loading) return;
+    setState(() => _busy = true);
+    try {
+      final added = await _controller.discoverUsbDwarf(
+        settings: widget.settingsController?.settings,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            StitchLocalizations.of(context).text(
+              added == 0
+                  ? '已扫描优先 DWARF 设备；没有新的全景目录。'
+                  : '发现 $added 个新全景目录，开始前不会复制照片。',
+            ),
+          ),
+        ),
+      );
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              StitchLocalizations.of(context).text('扫描 DWARF USB 失败：$error'),
+            ),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -615,6 +666,12 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     appBar: AppBar(
       title: const Text('批处理队列'),
       actions: [
+        if (!_mobile)
+          IconButton(
+            tooltip: StitchLocalizations.of(context).text('扫描 DWARF USB 设备'),
+            onPressed: _busy || _controller.loading ? null : _discoverUsb,
+            icon: const Icon(Icons.usb),
+          ),
         if (_mobile)
           IconButton(
             tooltip: StitchLocalizations.of(context).dwarfDeviceImport,
@@ -662,6 +719,18 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                               context,
                             ).text('移动端将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
                           ),
+                        if (!_mobile)
+                          OutlinedButton.icon(
+                            onPressed: _busy || _controller.loading
+                                ? null
+                                : _discoverUsb,
+                            icon: const Icon(Icons.usb),
+                            label: Text(
+                              StitchLocalizations.of(
+                                context,
+                              ).text('扫描 DWARF USB 设备'),
+                            ),
+                          ),
                         const SizedBox(height: 12),
                         FilledButton.icon(
                           onPressed: _busy ? null : _selectParent,
@@ -680,6 +749,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                         key: const Key('start-all-queues'),
                         onPressed:
                             _busy ||
+                                _controller.loading ||
                                 (_controller.queues.every(
                                       (queue) => queue.started,
                                     ) &&
@@ -719,43 +789,66 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
               item.state == BatchItemState.exporting,
         )
         .length;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
-      child: Row(
-        children: [
-          const Icon(Icons.folder_copy_outlined),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  p.basename(queue.parentDirectory),
-                  style: Theme.of(context).textTheme.titleMedium,
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
+          child: Row(
+            children: [
+              const Icon(Icons.folder_copy_outlined),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      queue.usbSource
+                          ? '${StitchLocalizations.of(context).text('USB DWARF ·')} ${queue.parentDirectory}'
+                          : p.basename(queue.parentDirectory),
+                      style: Theme.of(context).textTheme.titleMedium,
+                    ),
+                    Text(
+                      '$completed/${queue.items.length} 已导出 · $active 项处理中',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                    Text(
+                      '整图格式：${queue.outputFormat.label}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
                 ),
-                Text(
-                  '$completed/${queue.items.length} 已导出 · $active 项处理中',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-                Text(
-                  '整图格式：${queue.outputFormat.label}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
+              ),
+              IconButton(
+                tooltip: StitchLocalizations.of(context).text('重新扫描此母目录'),
+                onPressed: _busy ? null : () => _refreshQueue(queue),
+                icon: const Icon(Icons.refresh),
+              ),
+              IconButton(
+                tooltip: StitchLocalizations.of(context).text('资源设置'),
+                onPressed: _resourceSettings,
+                icon: const Icon(Icons.settings_outlined),
+              ),
+            ],
+          ),
+        ),
+        if (queue.usbSource)
+          CheckboxListTile(
+            dense: true,
+            value: queue.deleteUsbSources,
+            onChanged: _busy || _controller.loading
+                ? null
+                : (value) =>
+                      _controller.setUsbDeleteSources(queue.id, value == true),
+            title: Text(
+              StitchLocalizations.of(
+                context,
+              ).text('复制校验并保存后，删除已复制的 USB 原片（默认关闭）'),
+            ),
+            subtitle: Text(
+              StitchLocalizations.of(context).text('只删除匹配校验值的原片文件；全景预览和文件夹保留。'),
             ),
           ),
-          IconButton(
-            tooltip: StitchLocalizations.of(context).text('重新扫描此母目录'),
-            onPressed: _busy ? null : () => _refreshQueue(queue),
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: StitchLocalizations.of(context).text('资源设置'),
-            onPressed: _resourceSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-        ],
-      ),
+      ],
     );
   }
 
@@ -926,7 +1019,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         item.state == BatchItemState.exporting) {
       return '$stateText · ${_formatElapsed(item.elapsedSeconds)}';
     }
-    return stateText;
+    return StitchLocalizations.of(context).text(stateText);
   }
 
   IconData _iconFor(BatchItemState state) => switch (state) {
@@ -961,6 +1054,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       : '已用 ${seconds ~/ 60} 分 ${seconds % 60} 秒';
   Widget _errorBanner(String value) => Card(
     color: Theme.of(context).colorScheme.errorContainer,
-    child: Padding(padding: const EdgeInsets.all(12), child: Text(value)),
+    child: Padding(
+      padding: const EdgeInsets.all(12),
+      child: Text(StitchLocalizations.of(context).text(value)),
+    ),
   );
 }

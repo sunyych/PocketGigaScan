@@ -35,6 +35,9 @@ class BatchQueueItem {
     this.lastTickAt,
     this.progressOperation,
     this.progressSamples = const [],
+    this.usbSourceIdentity,
+    this.usbSourceSignature,
+    this.usbStableSince,
   });
 
   final String id;
@@ -60,6 +63,11 @@ class BatchQueueItem {
   final String? progressOperation;
   final List<ProgressSample> progressSamples;
 
+  /// Stable volume and panorama-relative identity for removable-media imports.
+  final String? usbSourceIdentity;
+  final String? usbSourceSignature;
+  final DateTime? usbStableSince;
+
   BatchQueueItem copyWith({
     String? sourceDirectory,
     BatchItemState? state,
@@ -81,6 +89,10 @@ class BatchQueueItem {
     bool clearLastTickAt = false,
     String? progressOperation,
     List<ProgressSample>? progressSamples,
+    String? usbSourceIdentity,
+    String? usbSourceSignature,
+    DateTime? usbStableSince,
+    bool clearUsbStableSince = false,
   }) => BatchQueueItem(
     id: id,
     name: name,
@@ -103,6 +115,11 @@ class BatchQueueItem {
     lastTickAt: clearLastTickAt ? null : lastTickAt ?? this.lastTickAt,
     progressOperation: progressOperation ?? this.progressOperation,
     progressSamples: progressSamples ?? this.progressSamples,
+    usbSourceIdentity: usbSourceIdentity ?? this.usbSourceIdentity,
+    usbSourceSignature: usbSourceSignature ?? this.usbSourceSignature,
+    usbStableSince: clearUsbStableSince
+        ? null
+        : usbStableSince ?? this.usbStableSince,
   );
 
   Map<String, Object?> toJson() => {
@@ -125,6 +142,9 @@ class BatchQueueItem {
     'progressSamples': progressSamples
         .map((sample) => sample.toJson())
         .toList(),
+    'usbSourceIdentity': usbSourceIdentity,
+    'usbSourceSignature': usbSourceSignature,
+    'usbStableSince': usbStableSince?.toIso8601String(),
   };
 
   factory BatchQueueItem.fromJson(Map<String, Object?> json) => BatchQueueItem(
@@ -153,6 +173,11 @@ class BatchQueueItem {
         .whereType<Map<String, Object?>>()
         .map(ProgressSample.fromJson)
         .toList(),
+    usbSourceIdentity: json['usbSourceIdentity'] as String?,
+    usbSourceSignature: json['usbSourceSignature'] as String?,
+    usbStableSince: json['usbStableSince'] is String
+        ? DateTime.tryParse(json['usbStableSince']! as String)
+        : null,
   );
 }
 
@@ -186,6 +211,9 @@ class BatchQueue {
     this.localTextureWarp = true,
     this.protectPeople = false,
     this.smoothWater = false,
+    this.usbSource = false,
+    this.usbVolumeId,
+    this.deleteUsbSources = false,
   });
 
   final String id;
@@ -206,8 +234,13 @@ class BatchQueue {
   final bool localTextureWarp;
   final bool protectPeople;
   final bool smoothWater;
+  final bool usbSource;
+  final String? usbVolumeId;
+  final bool deleteUsbSources;
 
   BatchQueue copyWith({
+    String? parentDirectory,
+    String? outputDirectory,
     List<BatchQueueItem>? items,
     ExportFormat? outputFormat,
     bool? started,
@@ -218,11 +251,14 @@ class BatchQueue {
     bool? localTextureWarp,
     bool? protectPeople,
     bool? smoothWater,
+    bool? usbSource,
+    String? usbVolumeId,
+    bool? deleteUsbSources,
   }) => BatchQueue(
     id: id,
     createdAt: createdAt,
-    parentDirectory: parentDirectory,
-    outputDirectory: outputDirectory,
+    parentDirectory: parentDirectory ?? this.parentDirectory,
+    outputDirectory: outputDirectory ?? this.outputDirectory,
     items: items ?? this.items,
     outputFormat: outputFormat ?? this.outputFormat,
     started: started ?? this.started,
@@ -233,6 +269,9 @@ class BatchQueue {
     localTextureWarp: localTextureWarp ?? this.localTextureWarp,
     protectPeople: protectPeople ?? this.protectPeople,
     smoothWater: smoothWater ?? this.smoothWater,
+    usbSource: usbSource ?? this.usbSource,
+    usbVolumeId: usbVolumeId ?? this.usbVolumeId,
+    deleteUsbSources: deleteUsbSources ?? this.deleteUsbSources,
   );
 
   Map<String, Object?> toJson() => {
@@ -251,6 +290,9 @@ class BatchQueue {
     'localTextureWarp': localTextureWarp,
     'protectPeople': protectPeople,
     'smoothWater': smoothWater,
+    'usbSource': usbSource,
+    'usbVolumeId': usbVolumeId,
+    'deleteUsbSources': deleteUsbSources,
   };
 
   factory BatchQueue.fromJson(Map<String, Object?> json) => BatchQueue(
@@ -277,5 +319,8 @@ class BatchQueue {
     localTextureWarp: json['localTextureWarp'] as bool? ?? true,
     protectPeople: json['protectPeople'] as bool? ?? false,
     smoothWater: json['smoothWater'] as bool? ?? false,
+    usbSource: json['usbSource'] as bool? ?? false,
+    usbVolumeId: json['usbVolumeId'] as String?,
+    deleteUsbSources: json['deleteUsbSources'] as bool? ?? false,
   );
 }

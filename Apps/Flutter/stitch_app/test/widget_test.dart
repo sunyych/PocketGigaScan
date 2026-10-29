@@ -15,8 +15,11 @@ import 'package:stitch_app/models/grid_options.dart';
 import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
+import 'package:stitch_app/models/app_settings.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/services/settings_controller.dart';
+import 'package:stitch_app/services/settings_repository.dart';
 import 'package:stitch_app/services/registration_issues.dart';
 import 'package:stitch_app/services/spherical_request.dart';
 import 'support/empty_batch_queue_controller.dart';
@@ -236,6 +239,18 @@ class _MemoryTaskRepository extends TaskRepository {
     final output = Directory(task.outputDirectory);
     if (!skipOutputCreation) await output.create(recursive: true);
     return output;
+  }
+}
+
+class _WidgetSettingsRepository extends SettingsRepository {
+  AppSettings saved = const AppSettings();
+
+  @override
+  Future<AppSettings> load() async => saved;
+
+  @override
+  Future<void> save(AppSettings settings) async {
+    saved = settings;
   }
 }
 
@@ -2149,4 +2164,80 @@ void main() {
       );
     },
   );
+
+  testWidgets('task rail saves cumulative drag and follows larger text', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    tester.platformDispatcher.textScaleFactorTestValue = 1;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final temp = (await tester.runAsync(
+      () => Directory.systemTemp.createTemp('task-rail-width-'),
+    ))!;
+    addTearDown(() => tester.runAsync(() => temp.delete(recursive: true)));
+    final settings = SettingsController(
+      repository: _WidgetSettingsRepository(),
+      initial: const AppSettings(),
+    );
+    addTearDown(settings.dispose);
+    final task = StitchTask(
+      id: 'task-rail-date-fixture',
+      createdAt: DateTime(2026, 10, 29, 9, 7),
+      sourceDirectory: temp.path,
+      outputDirectory: '${temp.path}/output',
+      photos: const [],
+      grid: const GridOptions(),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 512,
+      workers: 2,
+      phase: StitchPhase.failed,
+    );
+    final repository = _MemoryTaskRepository()..records[task.id] = task;
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          initialTask: task,
+          jobApi: _WidgetJobApi(),
+          repository: repository,
+          batchQueueController: EmptyBatchQueueController(
+            api: _WidgetJobApi(),
+            taskRepository: repository,
+          ),
+          foregroundWorkLock: _TestForegroundLock(),
+          mobileOverride: false,
+          settingsController: settings,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('2026-10-29 09:07'), findsOneWidget);
+    final panel = find.byKey(const Key('task-rail-panel'));
+    final initialWidth = tester.getSize(panel).width;
+    final drag = await tester.startGesture(
+      tester.getCenter(find.byKey(const Key('task-rail-resize-handle'))),
+    );
+    await drag.moveBy(const Offset(20, 0));
+    await drag.moveBy(const Offset(15, 0));
+    await drag.moveBy(const Offset(10, 0));
+    await tester.pump();
+    // Touch dragging intentionally consumes the first 20 px as gesture slop;
+    // the remaining move events must add cumulatively.
+    expect(tester.getSize(panel).width, closeTo(initialWidth + 25, 1));
+    await drag.up();
+    await tester.pumpAndSettle();
+    expect(settings.settings.taskRailWidth, closeTo(255, 1));
+    await settings.update(settings.settings);
+
+    tester.platformDispatcher.textScaleFactorTestValue = 1.5;
+    await tester.pumpAndSettle();
+    expect(tester.getSize(panel).width, closeTo(382.5, 2));
+    await settings.update(
+      settings.settings.copyWith(taskDateFormat: TaskDateFormat.monthDayYear),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('10/29/2026 09:07'), findsOneWidget);
+  });
 }

@@ -13,6 +13,20 @@ enum MemoryBudgetMode { automatic, manual }
 
 enum TextSizeMode { system, custom }
 
+enum TaskDateFormat { yearMonthDay, monthDayYear }
+
+String formatTaskDateTime(DateTime value, TaskDateFormat format) {
+  final local = value.toLocal();
+  final year = local.year.toString().padLeft(4, '0');
+  final month = local.month.toString().padLeft(2, '0');
+  final day = local.day.toString().padLeft(2, '0');
+  final date = format == TaskDateFormat.yearMonthDay
+      ? '$year-$month-$day'
+      : '$month/$day/$year';
+  return '$date ${local.hour.toString().padLeft(2, '0')}:'
+      '${local.minute.toString().padLeft(2, '0')}';
+}
+
 class AppSettings {
   const AppSettings({
     this.language = AppLanguage.system,
@@ -31,6 +45,8 @@ class AppSettings {
     this.textSizeMode = TextSizeMode.system,
     this.textScale = 1.0,
     this.outputDirectory,
+    this.taskDateFormat = TaskDateFormat.yearMonthDay,
+    this.taskRailWidth = 230,
   });
 
   final AppLanguage language;
@@ -53,6 +69,8 @@ class AppSettings {
 
   /// Filesystem path on desktop or a platform document URI on Android.
   final String? outputDirectory;
+  final TaskDateFormat taskDateFormat;
+  final double taskRailWidth;
 
   factory AppSettings.defaults({required bool mobile, bool android = false}) =>
       AppSettings(
@@ -83,6 +101,8 @@ class AppSettings {
     double? textScale,
     String? outputDirectory,
     bool clearOutputDirectory = false,
+    TaskDateFormat? taskDateFormat,
+    double? taskRailWidth,
   }) => AppSettings(
     language: language ?? this.language,
     themeMode: themeMode ?? this.themeMode,
@@ -103,6 +123,8 @@ class AppSettings {
     outputDirectory: clearOutputDirectory
         ? null
         : outputDirectory ?? this.outputDirectory,
+    taskDateFormat: taskDateFormat ?? this.taskDateFormat,
+    taskRailWidth: _safeTaskRailWidth(taskRailWidth ?? this.taskRailWidth),
   );
 
   Map<String, Object?> toJson() => {
@@ -123,6 +145,8 @@ class AppSettings {
     'textSizeMode': textSizeMode.name,
     'textScale': effectiveTextScale,
     'outputDirectory': outputDirectory,
+    'taskDateFormat': taskDateFormat.name,
+    'taskRailWidth': _safeTaskRailWidth(taskRailWidth),
   };
 
   factory AppSettings.fromJson(Map<String, Object?> json) {
@@ -175,6 +199,12 @@ class AppSettings {
       ),
       textScale: _safeTextScale(json['textScale']),
       outputDirectory: json['outputDirectory'] as String?,
+      taskDateFormat: enumValue(
+        TaskDateFormat.values,
+        json['taskDateFormat'],
+        TaskDateFormat.yearMonthDay,
+      ),
+      taskRailWidth: _safeTaskRailWidth(json['taskRailWidth']),
     );
   }
 
@@ -195,5 +225,10 @@ class AppSettings {
     num scale when scale.isFinite =>
       scale.toDouble().clamp(1.0, 2.0).toDouble(),
     _ => 1.0,
+  };
+
+  static double _safeTaskRailWidth(Object? value) => switch (value) {
+    num width when width.isFinite => width.toDouble().clamp(180.0, 520.0),
+    _ => 230.0,
   };
 }

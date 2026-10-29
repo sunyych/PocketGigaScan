@@ -663,6 +663,46 @@ class StitchLocalizations {
     if (selectedCount != null) {
       return isChinese ? source : '${selectedCount[1]} selected';
     }
+    final usbFoundCount = RegExp(
+      r'^发现 (\d+) 个新全景目录，开始前不会复制照片。$',
+    ).firstMatch(source);
+    if (usbFoundCount != null) {
+      return isChinese
+          ? source
+          : 'Found ${usbFoundCount[1]} new panorama folder(s). Photos will be copied when you start.';
+    }
+    final usbRetainedCount = RegExp(
+      r'^(\d+) 个源文件因变化或无法删除而保留$',
+    ).firstMatch(source);
+    if (usbRetainedCount != null) {
+      return isChinese
+          ? source
+          : '${usbRetainedCount[1]} source file(s) retained because they changed or could not be deleted';
+    }
+    final usbCleanupRetained = RegExp(
+      r'^任务已导入；(\d+) 个源文件因变化或无法删除而保留$',
+    ).firstMatch(source);
+    if (usbCleanupRetained != null) {
+      return isChinese
+          ? source
+          : 'Task imported; ${usbCleanupRetained[1]} source file(s) retained because they changed or could not be deleted';
+    }
+    final usbCleanupFailure = RegExp(
+      r'^任务已导入；USB 临时副本清理失败：(.*)$',
+    ).firstMatch(source);
+    if (usbCleanupFailure != null) {
+      return isChinese
+          ? source
+          : 'Task imported; temporary USB copy cleanup failed: ${usbCleanupFailure[1]}';
+    }
+    final usbSourceCleanupFailure = RegExp(
+      r'^任务已导入；源文件清理失败并保留：(.*)$',
+    ).firstMatch(source);
+    if (usbSourceCleanupFailure != null) {
+      return isChinese
+          ? source
+          : 'Task imported; source cleanup failed and files were retained: ${usbSourceCleanupFailure[1]}';
+    }
     final deletedCount = RegExp(
       r'^已删除 (\d+) 条任务记录；原片、瓦片和导出照片已保留。$',
     ).firstMatch(source);
@@ -1250,6 +1290,9 @@ class StitchLocalizations {
     'Lumia Stitch': 'PocketGigaScan',
     'DWARF Stitch': 'PocketGigaScan',
     '本地任务': 'Local tasks',
+    '本地任务日期格式': 'Local task date format',
+    '调整本地任务栏宽度': 'Resize local task rail',
+    '双击或按 Home 恢复默认宽度': 'Double-click or press Home to reset width',
     '任务记录': 'Task history',
     '导入原片': 'Import photos',
     '导入照片': 'Import photos',
@@ -1272,6 +1315,35 @@ class StitchLocalizations {
     '已发送整图': 'Full image shared',
     '分享已取消或失败': 'Share was canceled or failed',
     '批处理队列': 'Batch queue',
+    '扫描 DWARF USB 设备': 'Scan for DWARF USB devices',
+    '已扫描优先 DWARF 设备；没有新的全景目录。':
+        'Scanned the preferred DWARF device; no new panorama folders were found.',
+    'USB DWARF ·': 'USB DWARF ·',
+    '复制校验并保存后，删除已复制的 USB 原片（默认关闭）':
+        'Delete copied USB originals after verified import (off by default)',
+    '只删除匹配校验值的原片文件；全景预览和文件夹保留。':
+        'Only originals matching the verified hashes are deleted; panorama previews and folders are kept.',
+    '扫描 DWARF USB 设备失败：': 'Could not scan DWARF USB devices: ',
+    '扫描 USB DWARF 设备失败：': 'Could not scan USB DWARF devices: ',
+    '此全景已导入（USB 导入历史）':
+        'This panorama was already imported (USB import history)',
+    'USB 原片已复制并校验': 'USB originals copied and verified',
+    'USB 原片已复制并校验；已保留全景预览':
+        'USB originals copied and verified; panorama preview retained',
+    '任务已导入，但 USB 去重历史写入失败：':
+        'Task imported, but USB deduplication history could not be saved: ',
+    '；USB 临时副本清理失败：': '; could not clean up temporary USB copies: ',
+    '；': '; ',
+    'USB 任务已导入，但无法保存清理结果：':
+        'USB task imported, but cleanup results could not be saved: ',
+    'USB 导入失败，可刷新后重试：': 'USB import failed; refresh to retry: ',
+    'USB 导入已恢复': 'USB import resumed',
+    'USB 临时副本清理失败：': 'Could not clean up temporary USB copies: ',
+    '源文件清理失败并保留：': 'Source cleanup failed; source files were retained: ',
+    'USB 任务目录超出应用数据目录':
+        'USB task directory is outside the application data directory',
+    '任务输入校验与 USB 复制结果不匹配':
+        'Task input hashes do not match the verified USB copies',
     '批准并开始': 'Approve and start',
     '确认后开始': 'Review and start',
     '确认大型任务': 'Confirm large job',
@@ -2154,6 +2226,9 @@ class StitchLocalizations {
     '设置保存失败：': '设置保存失败：',
     'Lumia Stitch': 'DWARF Stitch',
     '本地任务': '本地任务',
+    '本地任务日期格式': '本地任务日期格式',
+    '调整本地任务栏宽度': '调整本地任务栏宽度',
+    '双击或按 Home 恢复默认宽度': '双击或按 Home 恢复默认宽度',
     '任务记录': '任务记录',
     '导入原片': '导入照片',
     '合成信息 / 日志': '合成信息 / 日志',
