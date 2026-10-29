@@ -648,6 +648,130 @@ void main() {
     expect(repository.saveCount, savesBeforeInteraction);
   });
 
+  testWidgets(
+    'double tapping a grid photo previews its source without changing selection',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final temp = (await tester.runAsync(
+        () => Directory.systemTemp.createTemp('photo-grid-preview-'),
+      ))!;
+      addTearDown(() => tester.runAsync(() => temp.delete(recursive: true)));
+      final imageBytes = base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOIWnAJAAMkAc2CFM/BAAAAAElFTkSuQmCC',
+      );
+      final photos = [
+        for (var i = 0; i < 2; i++)
+          ImportedPhoto(
+            originalName: 'source-$i.png',
+            storedPath: '${temp.path}/source-$i.png',
+            sha256: 'source-hash-$i',
+            width: 6000,
+            height: 3000,
+            originalOrder: i,
+          ),
+      ];
+      for (final photo in photos) {
+        await tester.runAsync(
+          () => File(photo.storedPath).writeAsBytes(imageBytes),
+        );
+      }
+      final task = StitchTask(
+        id: 'photo-preview-task',
+        createdAt: DateTime.utc(2026),
+        sourceDirectory: temp.path,
+        outputDirectory: '${temp.path}/output',
+        photos: photos,
+        grid: const GridOptions(mode: GridMode.sequence, rows: 1, columns: 2),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 2,
+        phase: StitchPhase.imported,
+      );
+      final repository = _MemoryTaskRepository()..records[task.id] = task;
+      await tester.pumpWidget(
+        _EnglishTestApp(
+          home: StitchHomePage(
+            initialTask: task,
+            jobApi: _WidgetJobApi(),
+            repository: repository,
+            batchQueueController: EmptyBatchQueueController(
+              api: _WidgetJobApi(),
+              taskRepository: repository,
+            ),
+            foregroundWorkLock: _TestForegroundLock(),
+            mobileOverride: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await _lazyChildVisibleAfterScroll(
+        tester,
+        find.text('Photo-to-grid mapping (2/2)'),
+        delta: 800,
+      );
+      final firstCell = find.byKey(const Key('grid-photo-select-0-0'));
+      final secondCell = find.byKey(const Key('grid-photo-select-0-1'));
+      await tester.tap(firstCell);
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.tap(secondCell);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      final home = tester.widget<StitchHomePage>(find.byType(StitchHomePage));
+      await tester.pumpWidget(_EnglishTestApp(home: home));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.text('Selected photos: 2'), findsOneWidget);
+      var lockAction = tester.widget<FilledButton>(
+        find.byKey(const Key('grid-lock-selected-action')),
+      );
+      expect(lockAction.onPressed, isNotNull);
+
+      final saveCount = repository.saveCount;
+      final duplicateCount = repository.duplicateCount;
+      await tester.tap(secondCell);
+      await tester.pump(const Duration(milliseconds: 80));
+      await tester.tap(secondCell);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('photo-grid-preview-dialog')),
+        findsOneWidget,
+      );
+      expect(find.text('source-1.png'), findsOneWidget);
+      final preview = tester.widget<Image>(
+        find.byKey(const Key('photo-grid-preview-image-1')),
+      );
+      expect(preview.image, isA<ResizeImage>());
+      final resizedProvider = preview.image as ResizeImage;
+      expect(
+        resizedProvider.imageProvider,
+        FileImage(File(photos[1].storedPath)),
+      );
+      expect(resizedProvider.width, lessThanOrEqualTo(2048));
+      expect(resizedProvider.height, lessThanOrEqualTo(2048));
+      expect(resizedProvider.policy, ResizeImagePolicy.fit);
+      expect(resizedProvider.allowUpscaling, isFalse);
+      await tester.tap(find.byKey(const Key('photo-grid-preview-close')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('photo-grid-preview-dialog')), findsNothing);
+      expect(find.text('Selected photos: 2'), findsOneWidget);
+      lockAction = tester.widget<FilledButton>(
+        find.byKey(const Key('grid-lock-selected-action')),
+      );
+      expect(lockAction.onPressed, isNotNull);
+      expect(repository.saveCount, saveCount);
+      expect(repository.duplicateCount, duplicateCount);
+      await tester.tap(find.byKey(const Key('grid-lock-selected-action')));
+      await tester.pumpAndSettle();
+      expect(repository.saveCount, saveCount + 1);
+      expect(
+        repository.records[task.id]!.grid.lockedPhotoOrigins.keys.toSet(),
+        {for (final photo in photos) photo.storedPath},
+      );
+    },
+  );
+
   testWidgets('registration repair prompt locks issue endpoints and starts copy', (
     tester,
   ) async {

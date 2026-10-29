@@ -21,6 +21,23 @@ pwsh -File scripts/build-dwarf-stitch-windows.ps1 `
   -FlutterPath C:/SDKs/flutter/bin/flutter.bat
 ```
 
+For a local test build that stays unpacked, add `-DirectoryOnly` together with
+`-PrepareSigning`:
+
+```powershell
+pwsh -File scripts/build-dwarf-stitch-windows.ps1 -PrepareSigning -DirectoryOnly
+```
+
+This runs the same checks and builds the full unsigned package under
+`.build/dwarf-stitch-windows/package`, including `PocketGigaScan.exe`, the build
+manifest, and signing baseline. It reports the package directory and EXE paths
+and skips ZIP creation; the existing ZIP is left untouched. Without
+`-DirectoryOnly`, `-PrepareSigning` keeps its signing-input ZIP behavior.
+Copy the package directory to a normal user location such as Downloads before
+running the EXE, and verify it is not running at Low integrity; a development
+workspace can inherit a Low Mandatory Level label and prevent task storage in
+AppData.
+
 The builder verifies dependency versions/checksums. Its `-PlanOnly` option
 prints the pinned versions and output paths without building.
 

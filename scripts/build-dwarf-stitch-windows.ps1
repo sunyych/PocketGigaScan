@@ -8,7 +8,8 @@ param(
     [string]$FlutterPath,
     [string]$OutputDirectory,
     [switch]$PlanOnly,
-    [switch]$PrepareSigning
+    [switch]$PrepareSigning,
+    [switch]$DirectoryOnly
 )
 
 Set-StrictMode -Version Latest
@@ -469,12 +470,19 @@ function Get-BuildPlan {
         minimumMsvcToolsetVersion = '14.50'
         nativeOutputs = @('png', 'tiff', 'jpeg', 'jxl')
         releaseExecutable = Join-Path $releaseDir 'PocketGigaScan.exe'
+        directoryOnly = [bool]$DirectoryOnly
+        packageDirectory = $packageDir
+        packageExecutable = Join-Path $packageDir 'PocketGigaScan.exe'
         zip = $archivePath
         signingInputZip = $signingInputPath
         prepareSigning = [bool]$PrepareSigning
         checksum = $checksumPath
         manifest = $manifestOutputPath
     }
+}
+
+if ($DirectoryOnly -and -not $PrepareSigning) {
+    throw 'The local package directory mode requires -PrepareSigning.'
 }
 
 if ($PlanOnly) {
@@ -904,6 +912,25 @@ if ($PrepareSigning) {
         files = $baselineFiles
     }
     $baseline | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $packageDir 'signing-baseline.json') -Encoding utf8
+    if ($DirectoryOnly) {
+        Assert-WindowsReleaseAssets $packageDir
+        foreach ($requiredAsset in @(
+            'PocketGigaScan.exe',
+            'lumia_gigascan_core.dll',
+            'data/models/scene-model-v1.onnx',
+            'build-manifest.json',
+            'signing-baseline.json'
+        )) {
+            $assetPath = Join-Path $packageDir $requiredAsset
+            if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+                throw "Local package is missing a required asset: $assetPath"
+            }
+        }
+        Write-Host "Unsigned local package directory: $packageDir"
+        Write-Host "Executable: $(Join-Path $packageDir 'PocketGigaScan.exe')"
+        Write-Host "Build manifest: $(Join-Path $packageDir 'build-manifest.json')"
+        exit 0
+    }
     if (Test-Path -LiteralPath $signingInputPath) { Remove-Item -LiteralPath $signingInputPath -Force }
     Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $signingInputPath -CompressionLevel Optimal
     Assert-ZipMatchesPackage $signingInputPath $packageDir

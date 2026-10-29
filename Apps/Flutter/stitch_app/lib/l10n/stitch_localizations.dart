@@ -1556,6 +1556,7 @@ class StitchLocalizations {
         'ORB mode is unavailable. Switch back to SIFT first.',
     '默认使用 BF 精确匹配。': 'BF exact matching is used by default.',
     '照片与网格映射': 'Photo-to-grid mapping',
+    '关闭照片预览': 'Close photo preview',
     '全部 ': 'All ',
     ' 张照片保留；尺寸 ': ' photos kept; dimensions ',
     '原片尺寸不一致，核心无法共用相机内参。':
