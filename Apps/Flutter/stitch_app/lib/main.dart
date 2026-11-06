@@ -219,6 +219,8 @@ class StitchHomePage extends StatefulWidget {
 class _StitchHomePageState extends State<StitchHomePage>
     with WidgetsBindingObserver {
   late bool _showModeSelection = widget.showModeSelection;
+  bool _drawerOpen = false;
+  final _workspaceScaffoldKey = GlobalKey<ScaffoldState>();
   bool _openingBatchQueue = false;
   late final _repository = widget.repository ?? TaskRepository();
   late final TaskThumbnailService _thumbnailService = TaskThumbnailService();
@@ -4179,6 +4181,8 @@ class _StitchHomePageState extends State<StitchHomePage>
             resourceBudget: _resourceBudget,
             settingsController: widget.settingsController,
             deviceDownloader: downloader,
+            taskRepository: _repository,
+            showResultsInitially: true,
             onTransferStatus: _updateDeviceTransfer,
             onDeviceTaskReady: _openImportedDeviceTask,
           ),
@@ -4314,9 +4318,9 @@ class _StitchHomePageState extends State<StitchHomePage>
 
   @override
   Widget build(BuildContext context) => PopScope<void>(
-    canPop: !widget.showModeSelection || _showModeSelection,
+    canPop: !widget.showModeSelection || _showModeSelection || _drawerOpen,
     onPopInvokedWithResult: (didPop, _) {
-      if (!didPop && widget.showModeSelection) {
+      if (!didPop && widget.showModeSelection && !_drawerOpen) {
         setState(() => _showModeSelection = true);
       }
     },
@@ -4329,6 +4333,10 @@ class _StitchHomePageState extends State<StitchHomePage>
     final task = _task;
     final mappingError = task == null ? null : _mappingError();
     return Scaffold(
+      key: _workspaceScaffoldKey,
+      onDrawerChanged: (isOpened) {
+        if (_drawerOpen != isOpened) setState(() => _drawerOpen = isOpened);
+      },
       drawer: Drawer(child: SafeArea(child: _taskRail())),
       appBar: AppBar(
         automaticallyImplyLeading: MediaQuery.sizeOf(context).width <= 900,
@@ -4814,7 +4822,10 @@ class _StitchHomePageState extends State<StitchHomePage>
               ? () => _toggleTaskSelection(task)
               : _canSelectTaskFromRail(task)
               ? () async {
-                  await Navigator.of(context).maybePop();
+                  final scaffold = _workspaceScaffoldKey.currentState;
+                  if (scaffold?.isDrawerOpen ?? false) {
+                    scaffold!.closeDrawer();
+                  }
                   if (mounted) await _selectTask(task);
                 }
               : null,

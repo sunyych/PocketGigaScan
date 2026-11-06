@@ -439,6 +439,8 @@ void main() {
 
       await tester.tap(find.byKey(const Key('selection-batch')));
       await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('batch-open-queue')));
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('batch-item-mode-navigation-item')),
         findsOneWidget,
@@ -447,6 +449,8 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('selection-batch')), findsOneWidget);
       await tester.tap(find.byKey(const Key('selection-batch')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('batch-open-queue')));
       await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('batch-item-mode-navigation-item')),
@@ -457,6 +461,137 @@ void main() {
       expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
       expect(find.textContaining('0 张原片'), findsOneWidget);
       await tester.tap(find.byKey(const Key('back-to-mode-selection')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('selection-single')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('desktop task selection and option menus stay in the workspace', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final api = _WidgetJobApi();
+    StitchTask task(String id, int day) => StitchTask(
+      id: id,
+      createdAt: DateTime.utc(2026, 1, day),
+      sourceDirectory: 'input-$id',
+      outputDirectory: 'output-$id',
+      photos: const [],
+      grid: const GridOptions(),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 512,
+      workers: 2,
+      phase: StitchPhase.imported,
+    );
+    final first = task('desktop-first-task', 1);
+    final second = task('desktop-second-task', 2);
+    final repository = _MemoryTaskRepository()
+      ..records[first.id] = first
+      ..records[second.id] = second;
+    final controller = EmptyBatchQueueController(
+      api: api,
+      taskRepository: repository,
+    );
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          showModeSelection: true,
+          jobApi: api,
+          repository: repository,
+          batchQueueController: controller,
+          foregroundWorkLock: _TestForegroundLock(),
+          mobileOverride: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('selection-single')));
+    await tester.pumpAndSettle();
+
+    for (final id in [first.id, second.id]) {
+      final row = find.byKey(Key('task-row-$id'));
+      await tester.ensureVisible(row);
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      expect(tester.widget<ListTile>(row).selected, isTrue);
+    }
+
+    final format = find.byKey(const Key('export-format-option'));
+    await tester.ensureVisible(format);
+    await tester.tap(format);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('TIFF（无损，大图自动 BigTIFF）').last);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+    expect(find.byKey(const Key('selection-single')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'mobile drawer task selection and system back stay in workspace',
+    (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _WidgetJobApi();
+      final task = StitchTask(
+        id: 'mobile-drawer-task',
+        createdAt: DateTime.utc(2026),
+        sourceDirectory: 'input-mobile-drawer',
+        outputDirectory: 'output-mobile-drawer',
+        photos: const [],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 2,
+        phase: StitchPhase.imported,
+      );
+      final repository = _MemoryTaskRepository()..records[task.id] = task;
+      final controller = EmptyBatchQueueController(
+        api: api,
+        taskRepository: repository,
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        ChineseTestApp(
+          home: StitchHomePage(
+            showModeSelection: true,
+            jobApi: api,
+            repository: repository,
+            batchQueueController: controller,
+            foregroundWorkLock: _TestForegroundLock(),
+            mobileOverride: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('selection-single')));
+      await tester.pumpAndSettle();
+      final menu = find.byTooltip('本地任务');
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      final row = find.byKey(Key('task-row-${task.id}'));
+      await tester.tap(row);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      expect(find.byKey(const Key('selection-single')), findsNothing);
+      expect(row, findsNothing);
+
+      await tester.tap(menu);
+      await tester.pumpAndSettle();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      expect(find.byKey(const Key('selection-single')), findsNothing);
+      expect(find.byKey(Key('task-row-${task.id}')), findsNothing);
+      await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('selection-single')), findsOneWidget);
       expect(tester.takeException(), isNull);

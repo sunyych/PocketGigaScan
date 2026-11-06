@@ -79,6 +79,50 @@ class TaskThumbnailService {
     return null;
   }
 
+  /// Returns a thumbnail made only from the completed task's PNG pyramid.
+  /// Unlike [thumbnailFor], this never falls back to camera or source photos.
+  Future<File?> resultThumbnailFor(StitchTask task) async {
+    if (task.phase != StitchPhase.completed) return null;
+    for (final candidate in await _pyramidCandidates(task)) {
+      try {
+        final source = File(candidate.path);
+        final stat = await source.stat();
+        if (stat.type != FileSystemEntityType.file ||
+            stat.size == 0 ||
+            stat.size > _maxEncodedTileBytes ||
+            candidate.maxDimension == null ||
+            candidate.maxDimension! > _tileSize) {
+          continue;
+        }
+        final signature = [
+          task.id,
+          candidate.path,
+          stat.size,
+          stat.modified.microsecondsSinceEpoch,
+        ].join('|');
+        final cached = _pending[signature];
+        if (cached != null) {
+          final result = await cached;
+          if (result != null) return result;
+          if (identical(_pending[signature], cached)) {
+            _pending.remove(signature);
+          }
+          continue;
+        }
+        final future = _createCachedThumbnail(source, signature);
+        _pending[signature] = future;
+        final result = await future;
+        if (result != null) return result;
+        if (identical(_pending[signature], future)) {
+          _pending.remove(signature);
+        }
+      } on Object {
+        // A missing or unreadable pyramid tile leaves the result placeholder.
+      }
+    }
+    return null;
+  }
+
   Future<List<_ThumbnailCandidate>> _pyramidCandidates(StitchTask task) async {
     try {
       final manifest = File(p.join(task.outputDirectory, 'manifest.json'));
