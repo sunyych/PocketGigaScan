@@ -1368,6 +1368,11 @@ class StitchLocalizations {
     '已发送整图': 'Full image shared',
     '分享已取消或失败': 'Share was canceled or failed',
     '批处理队列': 'Batch queue',
+    '单张合成': 'Single stitch',
+    '批量合成': 'Batch stitch',
+    '查看和继续单个全景任务。': 'Create and manage single panorama tasks.',
+    '导入文件夹并管理批次任务。': 'Stitch photos in batches by folder.',
+    '返回首页': 'Back to home',
     '扫描 DWARF USB 设备': 'Scan for DWARF USB devices',
     '已扫描优先 DWARF 设备；没有新的全景目录。':
         'Scanned the preferred DWARF device; no new panorama folders were found.',

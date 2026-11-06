@@ -163,7 +163,12 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
             child: child ?? const SizedBox.shrink(),
           );
         },
-        home: widget.home ?? StitchHomePage(settingsController: _settings),
+        home:
+            widget.home ??
+            StitchHomePage(
+              settingsController: _settings,
+              showModeSelection: true,
+            ),
       );
     },
   );
@@ -175,6 +180,7 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
 class StitchHomePage extends StatefulWidget {
   const StitchHomePage({
     super.key,
+    this.showModeSelection = false,
     this.jobApi,
     this.powerGate,
     this.repository,
@@ -190,6 +196,7 @@ class StitchHomePage extends StatefulWidget {
     this.photoImporter,
     this.registrationIssueLoader,
   });
+  final bool showModeSelection;
   final JobApi? jobApi;
   final PowerGate? powerGate;
   final TaskRepository? repository;
@@ -211,6 +218,8 @@ class StitchHomePage extends StatefulWidget {
 
 class _StitchHomePageState extends State<StitchHomePage>
     with WidgetsBindingObserver {
+  late bool _showModeSelection = widget.showModeSelection;
+  bool _openingBatchQueue = false;
   late final _repository = widget.repository ?? TaskRepository();
   late final TaskThumbnailService _thumbnailService = TaskThumbnailService();
   late final bool _android = widget.androidOverride ?? Platform.isAndroid;
@@ -4149,6 +4158,123 @@ class _StitchHomePageState extends State<StitchHomePage>
     return false;
   }
 
+  Future<void> _openBatchQueue({bool fromModeSelection = false}) async {
+    if (_openingBatchQueue) return;
+    _openingBatchQueue = true;
+    try {
+      final navigator = Navigator.of(context);
+      await widget.settingsController?.ready;
+      if (!mounted) return;
+      final downloader = _mobile ? await _deviceDownloader : null;
+      if (!mounted) return;
+      final taskId = await navigator.push<String>(
+        MaterialPageRoute<String>(
+          builder: (_) => BatchQueuePage(
+            api: _api,
+            controller: _batchController,
+            mobileOverride: _mobile,
+            androidOverride: _android,
+            mobileStorageService: _storage,
+            runtimeService: _runtime,
+            resourceBudget: _resourceBudget,
+            settingsController: widget.settingsController,
+            deviceDownloader: downloader,
+            onTransferStatus: _updateDeviceTransfer,
+            onDeviceTaskReady: _openImportedDeviceTask,
+          ),
+        ),
+      );
+      if (!mounted || taskId == null) return;
+      if (fromModeSelection) setState(() => _showModeSelection = false);
+      await _openImportedDeviceTask(taskId);
+    } finally {
+      _openingBatchQueue = false;
+    }
+  }
+
+  Widget _modeSelectionPage(BuildContext context) {
+    Widget option({
+      required String title,
+      required String description,
+      required IconData icon,
+      required Key key,
+      required VoidCallback onTap,
+    }) => Card(
+      key: key,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 40),
+              const SizedBox(height: 12),
+              Text(
+                StitchLocalizations.of(context).text(title),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                StitchLocalizations.of(context).text(description),
+                textAlign: TextAlign.center,
+                softWrap: true,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('PocketGigaScan'),
+        actions: [
+          if (widget.settingsController != null)
+            IconButton(
+              key: const Key('selection-settings'),
+              tooltip: StitchLocalizations.of(context).settingsTitle,
+              onPressed: _openSettings,
+              icon: const Icon(Icons.settings),
+            ),
+        ],
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: option(
+                  key: const Key('selection-single'),
+                  title: '单张合成',
+                  description: '查看和继续单个全景任务。',
+                  icon: Icons.panorama_outlined,
+                  onTap: () => setState(() => _showModeSelection = false),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: option(
+                  key: const Key('selection-batch'),
+                  title: '批量合成',
+                  description: '导入文件夹并管理批次任务。',
+                  icon: Icons.queue_outlined,
+                  onTap: () =>
+                      unawaited(_openBatchQueue(fromModeSelection: true)),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _newRunCopy() async {
     await _createRunCopy(forceGridFallback: false);
   }
@@ -4187,7 +4313,19 @@ class _StitchHomePageState extends State<StitchHomePage>
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) => PopScope<void>(
+    canPop: !widget.showModeSelection || _showModeSelection,
+    onPopInvokedWithResult: (didPop, _) {
+      if (!didPop && widget.showModeSelection) {
+        setState(() => _showModeSelection = true);
+      }
+    },
+    child: _showModeSelection
+        ? _modeSelectionPage(context)
+        : _buildTaskWorkspace(context),
+  );
+
+  Widget _buildTaskWorkspace(BuildContext context) {
     final task = _task;
     final mappingError = task == null ? null : _mappingError();
     return Scaffold(
@@ -4205,6 +4343,13 @@ class _StitchHomePageState extends State<StitchHomePage>
             : null,
         title: const Text('PocketGigaScan'),
         actions: [
+          if (widget.showModeSelection)
+            IconButton(
+              key: const Key('back-to-mode-selection'),
+              tooltip: StitchLocalizations.of(context).text('返回首页'),
+              icon: const Icon(Icons.home_outlined),
+              onPressed: () => setState(() => _showModeSelection = true),
+            ),
           if (widget.settingsController != null)
             IconButton(
               tooltip: StitchLocalizations.of(context).settingsTitle,
@@ -4239,30 +4384,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             ),
           IconButton(
             tooltip: StitchLocalizations.of(context).text('批处理队列'),
-            onPressed: () async {
-              final navigator = Navigator.of(context);
-              await widget.settingsController?.ready;
-              if (!mounted) return;
-              final downloader = _mobile ? await _deviceDownloader : null;
-              final taskId = await navigator.push<String>(
-                MaterialPageRoute<String>(
-                  builder: (_) => BatchQueuePage(
-                    api: _api,
-                    controller: _batchController,
-                    mobileOverride: _mobile,
-                    androidOverride: _android,
-                    mobileStorageService: _storage,
-                    runtimeService: _runtime,
-                    resourceBudget: _resourceBudget,
-                    settingsController: widget.settingsController,
-                    deviceDownloader: downloader,
-                    onTransferStatus: _updateDeviceTransfer,
-                    onDeviceTaskReady: _openImportedDeviceTask,
-                  ),
-                ),
-              );
-              if (taskId != null) await _openImportedDeviceTask(taskId);
-            },
+            onPressed: _openBatchQueue,
             icon: const Icon(Icons.queue),
           ),
           IconButton(

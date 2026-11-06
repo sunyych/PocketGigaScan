@@ -16,10 +16,12 @@ import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/models/stitch_quality.dart';
 import 'package:stitch_app/models/app_settings.dart';
+import 'package:stitch_app/models/batch_queue.dart';
 import 'package:stitch_app/services/native_job_api.dart';
 import 'package:stitch_app/services/task_repository.dart';
 import 'package:stitch_app/services/settings_controller.dart';
 import 'package:stitch_app/services/settings_repository.dart';
+import 'package:stitch_app/settings_page.dart';
 import 'package:stitch_app/services/registration_issues.dart';
 import 'package:stitch_app/services/spherical_request.dart';
 import 'support/empty_batch_queue_controller.dart';
@@ -190,6 +192,9 @@ class _MemoryTaskRepository extends TaskRepository {
   }
 
   @override
+  Future<StitchTask?> loadById(String id) async => records[id];
+
+  @override
   Future<void> save(StitchTask task) async {
     saveCount++;
     if (!saveStarted.isCompleted) saveStarted.complete();
@@ -309,6 +314,155 @@ Future<void> _expandArrangementOptions(WidgetTester tester) async {
 }
 
 void main() {
+  for (final width in [320.0, 390.0]) {
+    testWidgets('Chinese mode home fits large text at ${width.toInt()} px', (
+      tester,
+    ) async {
+      tester.view.physicalSize = Size(width, 720);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.platformDispatcher.textScaleFactorTestValue = 1.8;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      final api = _WidgetJobApi();
+      final repository = _MemoryTaskRepository();
+      final controller = EmptyBatchQueueController(
+        api: api,
+        taskRepository: repository,
+      );
+      addTearDown(controller.dispose);
+      await tester.pumpWidget(
+        ChineseTestApp(
+          home: StitchHomePage(
+            showModeSelection: true,
+            jobApi: api,
+            repository: repository,
+            batchQueueController: controller,
+            foregroundWorkLock: _TestForegroundLock(),
+            mobileOverride: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final single = find.byKey(const Key('selection-single'));
+      final batch = find.byKey(const Key('selection-batch'));
+      expect(tester.getCenter(single).dx, lessThan(tester.getCenter(batch).dx));
+      expect(find.text('单张合成'), findsOneWidget);
+      expect(find.text('批量合成'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets(
+    'mode navigation opens and returns from the existing batch task',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _WidgetJobApi();
+      final task = StitchTask(
+        id: 'mode-navigation-task',
+        createdAt: DateTime.utc(2026),
+        sourceDirectory: 'input-mode-navigation',
+        outputDirectory: 'output-mode-navigation',
+        photos: const [],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 512,
+        workers: 2,
+        phase: StitchPhase.imported,
+      );
+      final repository = _MemoryTaskRepository()..records[task.id] = task;
+      final batchController = EmptyBatchQueueController(
+        api: api,
+        taskRepository: repository,
+        initialQueues: [
+          BatchQueue(
+            id: 'mode-navigation-queue',
+            createdAt: DateTime.utc(2026),
+            parentDirectory: 'scans',
+            outputDirectory: 'stitched',
+            items: const [
+              BatchQueueItem(
+                id: 'mode-navigation-item',
+                name: 'Saved mode task',
+                sourceDirectory: 'scans/saved',
+                taskId: 'mode-navigation-task',
+                state: BatchItemState.failed,
+              ),
+            ],
+          ),
+        ],
+      );
+      addTearDown(batchController.dispose);
+      final settings = SettingsController(
+        repository: _WidgetSettingsRepository(),
+        initial: AppSettings.defaults(mobile: false, android: false),
+      );
+      addTearDown(settings.dispose);
+      await tester.pumpWidget(
+        ChineseTestApp(
+          home: StitchHomePage(
+            showModeSelection: true,
+            jobApi: api,
+            repository: repository,
+            batchQueueController: batchController,
+            foregroundWorkLock: _TestForegroundLock(),
+            mobileOverride: false,
+            settingsController: settings,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        const StitchLocalizations(Locale('en')).text('单张合成'),
+        'Single stitch',
+      );
+      expect(
+        const StitchLocalizations(Locale('en')).text('批量合成'),
+        'Batch stitch',
+      );
+      await tester.tap(find.byKey(const Key('selection-settings')));
+      await tester.pumpAndSettle();
+      expect(find.byType(SettingsPage), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('selection-single')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('selection-single')), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('selection-batch')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('batch-item-mode-navigation-item')),
+        findsOneWidget,
+      );
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('selection-batch')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('selection-batch')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('batch-item-mode-navigation-item')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Saved mode task'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      expect(find.textContaining('0 张原片'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('back-to-mode-selection')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('selection-single')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets('failed native registration issues select and lock only chosen photos', (
     tester,
   ) async {
@@ -1356,6 +1510,10 @@ void main() {
       await tester.pump(const Duration(milliseconds: 350));
       await tester.pump();
       expect(find.text('PocketGigaScan'), findsOneWidget);
+      expect(find.text('Single stitch'), findsOneWidget);
+      expect(find.text('Batch stitch'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('selection-single')));
+      await tester.pumpAndSettle();
       expect(
         find.text('Import photos to create a local panorama task'),
         findsOneWidget,
@@ -1379,6 +1537,11 @@ void main() {
     await tester.pumpWidget(const LumiaStitchApp());
     await tester.pump(const Duration(milliseconds: 350));
     await tester.pump();
+    expect(find.text('PocketGigaScan'), findsOneWidget);
+    expect(find.text('Single stitch'), findsOneWidget);
+    expect(find.text('Batch stitch'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('selection-single')));
+    await tester.pumpAndSettle();
     expect(find.byTooltip('Local tasks'), findsOneWidget);
     expect(find.byKey(const Key('stitch-quality-expansion')), findsNothing);
     expect(tester.takeException(), isNull);
