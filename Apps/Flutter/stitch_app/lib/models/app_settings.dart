@@ -15,6 +15,13 @@ enum TextSizeMode { system, custom }
 
 enum TaskDateFormat { yearMonthDay, monthDayYear }
 
+enum ResultGallerySort {
+  nameAscending,
+  nameDescending,
+  newestFirst,
+  oldestFirst,
+}
+
 String formatTaskDateTime(DateTime value, TaskDateFormat format) {
   final local = value.toLocal();
   final year = local.year.toString().padLeft(4, '0');
@@ -45,7 +52,9 @@ class AppSettings {
     this.textSizeMode = TextSizeMode.system,
     this.textScale = 1.0,
     this.outputDirectory,
+    this.batchOutputDirectory,
     this.taskDateFormat = TaskDateFormat.yearMonthDay,
+    this.resultGallerySort = ResultGallerySort.newestFirst,
     this.taskRailWidth = 230,
   });
 
@@ -69,7 +78,9 @@ class AppSettings {
 
   /// Filesystem path on desktop or a platform document URI on Android.
   final String? outputDirectory;
+  final String? batchOutputDirectory;
   final TaskDateFormat taskDateFormat;
+  final ResultGallerySort resultGallerySort;
   final double taskRailWidth;
 
   factory AppSettings.defaults({required bool mobile, bool android = false}) =>
@@ -101,7 +112,10 @@ class AppSettings {
     double? textScale,
     String? outputDirectory,
     bool clearOutputDirectory = false,
+    String? batchOutputDirectory,
+    bool clearBatchOutputDirectory = false,
     TaskDateFormat? taskDateFormat,
+    ResultGallerySort? resultGallerySort,
     double? taskRailWidth,
   }) => AppSettings(
     language: language ?? this.language,
@@ -123,7 +137,11 @@ class AppSettings {
     outputDirectory: clearOutputDirectory
         ? null
         : outputDirectory ?? this.outputDirectory,
+    batchOutputDirectory: clearBatchOutputDirectory
+        ? null
+        : batchOutputDirectory ?? this.batchOutputDirectory,
     taskDateFormat: taskDateFormat ?? this.taskDateFormat,
+    resultGallerySort: resultGallerySort ?? this.resultGallerySort,
     taskRailWidth: _safeTaskRailWidth(taskRailWidth ?? this.taskRailWidth),
   );
 
@@ -145,7 +163,9 @@ class AppSettings {
     'textSizeMode': textSizeMode.name,
     'textScale': effectiveTextScale,
     'outputDirectory': outputDirectory,
+    'batchOutputDirectory': batchOutputDirectory,
     'taskDateFormat': taskDateFormat.name,
+    'resultGallerySort': resultGallerySort.name,
     'taskRailWidth': _safeTaskRailWidth(taskRailWidth),
   };
 
@@ -199,10 +219,16 @@ class AppSettings {
       ),
       textScale: _safeTextScale(json['textScale']),
       outputDirectory: json['outputDirectory'] as String?,
+      batchOutputDirectory: json['batchOutputDirectory'] as String?,
       taskDateFormat: enumValue(
         TaskDateFormat.values,
         json['taskDateFormat'],
         TaskDateFormat.yearMonthDay,
+      ),
+      resultGallerySort: enumValue(
+        ResultGallerySort.values,
+        json['resultGallerySort'],
+        ResultGallerySort.newestFirst,
       ),
       taskRailWidth: _safeTaskRailWidth(json['taskRailWidth']),
     );

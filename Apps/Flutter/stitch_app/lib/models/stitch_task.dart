@@ -64,6 +64,7 @@ class StitchTask {
     this.timeline = const StitchTimeline(),
     this.exportDirectory,
     this.publishedExportPath,
+    this.displayName,
     this.publishError,
     this.registrationRepairOffered = false,
   }) : assert(maxEdgeReprojectionRmsPixels >= 6),
@@ -112,6 +113,7 @@ class StitchTask {
   final StitchTimeline timeline;
   final String? exportDirectory;
   final String? publishedExportPath;
+  final String? displayName;
   final String? publishError;
 
   /// Prevents repeatedly offering the same automatic registration repair.
@@ -183,6 +185,7 @@ class StitchTask {
     GridCell? centralReference,
     bool clearCentralReference = false,
     String? exportPath,
+    bool clearExportPath = false,
     String? previewThumbnailPath,
     PerformanceOptions? performanceOptions,
     ExportFormat? exportFormat,
@@ -205,6 +208,8 @@ class StitchTask {
     bool clearExportDirectory = false,
     String? publishedExportPath,
     bool clearPublishedExportPath = false,
+    String? displayName,
+    bool clearDisplayName = false,
     String? publishError,
     bool clearPublishError = false,
     bool? registrationRepairOffered,
@@ -236,7 +241,7 @@ class StitchTask {
     centralReference: clearCentralReference
         ? null
         : centralReference ?? this.centralReference,
-    exportPath: exportPath ?? this.exportPath,
+    exportPath: clearExportPath ? null : exportPath ?? this.exportPath,
     previewThumbnailPath: previewThumbnailPath ?? this.previewThumbnailPath,
     performanceOptions: performanceOptions ?? this.performanceOptions,
     exportFormat: exportFormat ?? this.exportFormat,
@@ -267,6 +272,7 @@ class StitchTask {
     publishedExportPath: clearPublishedExportPath
         ? null
         : publishedExportPath ?? this.publishedExportPath,
+    displayName: clearDisplayName ? null : displayName ?? this.displayName,
     publishError: clearPublishError ? null : publishError ?? this.publishError,
     registrationRepairOffered:
         registrationRepairOffered ?? this.registrationRepairOffered,
@@ -316,6 +322,7 @@ class StitchTask {
     'timeline': timeline.toJson(),
     'exportDirectory': exportDirectory,
     'publishedExportPath': publishedExportPath,
+    'displayName': displayName,
     'publishError': publishError,
     'registrationRepairOffered': registrationRepairOffered,
   };
@@ -407,6 +414,7 @@ class StitchTask {
       ),
       exportDirectory: json['exportDirectory'] as String?,
       publishedExportPath: json['publishedExportPath'] as String?,
+      displayName: json['displayName'] as String?,
       publishError: json['publishError'] as String?,
       registrationRepairOffered:
           json['registrationRepairOffered'] as bool? ?? false,

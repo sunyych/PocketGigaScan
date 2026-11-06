@@ -32,6 +32,8 @@ import 'services/scene_model_service.dart';
 import 'services/registration_issues.dart';
 import 'services/serial_task_write_queue.dart';
 import 'services/task_repository.dart';
+import 'result_gallery_page.dart';
+import 'services/result_library_service.dart';
 import 'services/task_deletion_selection.dart';
 import 'services/task_thumbnail_service.dart';
 import 'services/jpeg_dimension_estimator.dart';
@@ -234,6 +236,9 @@ class _StitchHomePageState extends State<StitchHomePage>
     );
   }();
   final Map<String, DwarfTransferStatus> _deviceTransfers = {};
+  final ValueNotifier<int> _resultLibraryRevision = ValueNotifier<int>(0);
+  String _completedTaskSignature = '';
+  String _completedBatchSignature = '';
   late final MobileRuntimeService? _runtime = _mobile
       ? widget.mobileRuntimeService ?? MobileRuntimeService()
       : null;
@@ -397,10 +402,48 @@ class _StitchHomePageState extends State<StitchHomePage>
           (_isActivelyBatchOwned(_task) && _hasBatchTaskRecord(task)));
 
   void _onBatchQueueChanged() {
+    final signature = _batchResultsSignature();
+    if (signature != _completedBatchSignature) {
+      _completedBatchSignature = signature;
+      _resultLibraryRevision.value++;
+    }
     if (mounted) setState(() {});
     unawaited(_syncForegroundLock());
     unawaited(_acknowledgeConfirmedQueueTimeouts());
     _scheduleRegistrationRepairPrompt();
+  }
+
+  String _batchResultsSignature() {
+    final completed = <String>[];
+    for (final queue in _batchController?.queues ?? const <BatchQueue>[]) {
+      for (final item in queue.items) {
+        if (item.state == BatchItemState.completed) {
+          completed.add('${queue.id}/${item.taskId ?? ''}/${item.id}');
+        }
+      }
+    }
+    completed.sort();
+    return completed.join('|');
+  }
+
+  String _completedResultsSignature(Iterable<StitchTask> tasks) {
+    final completed =
+        tasks
+            .where((task) => task.phase == StitchPhase.completed)
+            .map(
+              (task) =>
+                  '${task.id}/${task.exportPath ?? ''}/${task.displayName ?? ''}/${jsonEncode(task.exportFingerprint?.toJson())}',
+            )
+            .toList()
+          ..sort();
+    return completed.join('|');
+  }
+
+  void _publishCompletedTaskChanges(List<StitchTask> tasks) {
+    final signature = _completedResultsSignature(tasks);
+    if (signature == _completedTaskSignature) return;
+    _completedTaskSignature = signature;
+    _resultLibraryRevision.value++;
   }
 
   bool get _needsForegroundLock {
@@ -1894,6 +1937,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
     _poll?.cancel();
     _tileTransform.dispose();
+    _resultLibraryRevision.dispose();
     if (widget.batchQueueController == null) {
       _batchController
         ?..removeListener(_onBatchQueueChanged)
@@ -1929,6 +1973,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     StitchTask? restoredInitialSelection;
     try {
       var loaded = await _repository.loadAll();
+      _publishCompletedTaskChanges(loaded);
       await _performanceSaveQueue.enqueue(() async {});
       if (selectionGeneration != _controlGeneration) {
         if (mounted) setState(() => _tasks = loaded);
@@ -3631,6 +3676,7 @@ class _StitchHomePageState extends State<StitchHomePage>
         next[index] = updated;
         _tasks = next;
       }
+      _publishCompletedTaskChanges(_tasks);
     });
     if (newlyFailed && selectionStillMatches) {
       unawaited(_loadRegistrationIssues(updated));
@@ -4181,8 +4227,6 @@ class _StitchHomePageState extends State<StitchHomePage>
             resourceBudget: _resourceBudget,
             settingsController: widget.settingsController,
             deviceDownloader: downloader,
-            taskRepository: _repository,
-            showResultsInitially: true,
             onTransferStatus: _updateDeviceTransfer,
             onDeviceTaskReady: _openImportedDeviceTask,
           ),
@@ -4194,6 +4238,61 @@ class _StitchHomePageState extends State<StitchHomePage>
     } finally {
       _openingBatchQueue = false;
     }
+  }
+
+  Future<void> _openResultGallery() async {
+    await widget.settingsController?.ready;
+    if (!mounted) return;
+    final controller = _batchController;
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => ResultGalleryPage(
+          repository: _repository,
+          service: ResultLibraryService(
+            repository: _repository,
+            api: _api,
+            isTaskBusy: _isResultTaskBusy,
+          ),
+          refreshListenable: _resultLibraryRevision,
+          settingsController: widget.settingsController,
+          mobileStorageService: _storage,
+          mobileOverride: _mobile,
+          androidOverride: _android,
+          isTaskBusy: _isResultTaskBusy,
+          onTaskUpdated: (task) async {
+            await controller?.refreshResultTask(task);
+            if (mounted) await _refreshTasks();
+          },
+          onOpenViewer: _openExportViewer,
+          onAddBatch: () => unawaited(_openBatchQueue()),
+        ),
+      ),
+    );
+    if (mounted) await _refreshTasks();
+  }
+
+  bool _isResultTaskBusy(String taskId) {
+    final task = _task;
+    final exportHandoff =
+        task != null &&
+        task.id == taskId &&
+        task.phase == StitchPhase.interrupted &&
+        task.stage == 'result-library-export' &&
+        task.exportCheckpointPath != null;
+    const activeSinglePhases = {
+      StitchPhase.queued,
+      StitchPhase.running,
+      StitchPhase.pausing,
+      StitchPhase.paused,
+      StitchPhase.exporting,
+    };
+    final selectedTaskBusy =
+        task != null &&
+        task.id == taskId &&
+        (_busy || activeSinglePhases.contains(task.phase));
+    return !exportHandoff &&
+        (selectedTaskBusy ||
+            (_batchController?.isResultTaskBusy(taskId) ?? false));
   }
 
   Widget _modeSelectionPage(BuildContext context) {
@@ -4249,27 +4348,47 @@ class _StitchHomePageState extends State<StitchHomePage>
       body: SafeArea(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(12),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Column(
             children: [
-              Expanded(
-                child: option(
-                  key: const Key('selection-single'),
-                  title: '单张合成',
-                  description: '查看和继续单个全景任务。',
-                  icon: Icons.panorama_outlined,
-                  onTap: () => setState(() => _showModeSelection = false),
-                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: option(
+                      key: const Key('selection-single'),
+                      title: '单张合成',
+                      description: '查看和继续单个全景任务。',
+                      icon: Icons.panorama_outlined,
+                      onTap: () => setState(() => _showModeSelection = false),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: option(
+                      key: const Key('selection-batch'),
+                      title: '批量合成',
+                      description: '导入文件夹并管理批次任务。',
+                      icon: Icons.queue_outlined,
+                      onTap: () =>
+                          unawaited(_openBatchQueue(fromModeSelection: true)),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: option(
-                  key: const Key('selection-batch'),
-                  title: '批量合成',
-                  description: '导入文件夹并管理批次任务。',
-                  icon: Icons.queue_outlined,
-                  onTap: () =>
-                      unawaited(_openBatchQueue(fromModeSelection: true)),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                height: 64,
+                child: FilledButton.icon(
+                  key: const Key('selection-results'),
+                  onPressed: _openResultGallery,
+                  icon: const Icon(Icons.photo_library_outlined),
+                  label: Text(
+                    StitchLocalizations.of(context).text('结果画廊'),
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  ),
                 ),
               ),
             ],

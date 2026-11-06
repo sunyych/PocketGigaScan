@@ -13,11 +13,8 @@ import 'services/mobile_runtime_service.dart';
 import 'services/platform_file_dialogs.dart';
 import 'services/settings_controller.dart';
 import 'services/task_deletion_selection.dart';
-import 'services/task_thumbnail_service.dart';
-import 'services/task_repository.dart';
 import 'services/power_service.dart';
 import 'models/stitch_task.dart';
-import 'models/app_settings.dart';
 import 'dwarf_device_page.dart';
 import 'services/dwarf_download_service.dart';
 import 'widgets/exported_image_viewer.dart';
@@ -39,8 +36,7 @@ class BatchQueuePage extends StatefulWidget {
     this.onTransferStatus,
     this.onDeviceTaskReady,
     this.autoUsbDiscoveryOverride,
-    this.showResultsInitially = false,
-    this.taskRepository,
+    this.outputDirectoryPickerOverride,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -54,8 +50,7 @@ class BatchQueuePage extends StatefulWidget {
   final ValueChanged<DwarfTransferStatus>? onTransferStatus;
   final Future<void> Function(String taskId)? onDeviceTaskReady;
   final bool? autoUsbDiscoveryOverride;
-  final bool showResultsInitially;
-  final TaskRepository? taskRepository;
+  final Future<String?> Function()? outputDirectoryPickerOverride;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -72,15 +67,6 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       );
   bool _busy = false;
   bool _jxlAvailable = false;
-  late bool _showResults = widget.showResultsInitially;
-  final TaskThumbnailService _resultThumbnails = TaskThumbnailService();
-  late final TaskRepository _taskRepository =
-      widget.taskRepository ?? TaskRepository();
-  List<_GalleryResult> _galleryResults = const [];
-  bool _galleryLoading = false;
-  bool _galleryLoadFailed = false;
-  String _galleryQueueSignature = '';
-  int _galleryRefreshGeneration = 0;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
   bool get _mobile =>
@@ -90,11 +76,6 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   void initState() {
     super.initState();
     _controller.addListener(_changed);
-    _galleryQueueSignature = _queueSignature();
-    if (widget.showResultsInitially) {
-      _galleryLoading = true;
-      unawaited(_refreshGalleryResults());
-    }
     _controller.requireLargeJobApproval = _mobile;
     if (_ownsController) _controller.initialize();
     final autoDiscovery = widget.autoUsbDiscoveryOverride ?? !_mobile;
@@ -127,91 +108,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   }
 
   void _changed() {
-    final signature = _queueSignature();
-    if (widget.showResultsInitially && signature != _galleryQueueSignature) {
-      _galleryQueueSignature = signature;
-      unawaited(_refreshGalleryResults());
-    }
     if (mounted) setState(() {});
-  }
-
-  String _queueSignature() {
-    final completed = <String>[];
-    for (final queue in _controller.queues) {
-      for (final item in queue.items) {
-        if (item.state == BatchItemState.completed) {
-          completed.add('${queue.id}/${item.taskId ?? ''}/${item.id}');
-        }
-      }
-    }
-    completed.sort();
-    return completed.join('|');
-  }
-
-  Future<void> _refreshGalleryResults() async {
-    final generation = ++_galleryRefreshGeneration;
-    if (mounted) setState(() => _galleryLoading = true);
-    final results = <String, _GalleryResult>{};
-    var historyLoadFailed = false;
-    try {
-      for (final task in await _taskRepository.loadAll()) {
-        if (task.phase != StitchPhase.completed) continue;
-        results[task.id] = _GalleryResult(
-          task: task,
-          thumbnailService: _resultThumbnails,
-        );
-      }
-    } on Object {
-      historyLoadFailed = true;
-      // Queue-backed results can still be shown if local history cannot load.
-    }
-    for (final queue in _controller.queues) {
-      for (final item in queue.items) {
-        if (item.state != BatchItemState.completed) continue;
-        try {
-          final task = await _controller.taskForItem(item);
-          final taskId = task?.id ?? item.taskId ?? 'item:${item.id}';
-          if (task != null && task.phase == StitchPhase.completed) {
-            results[taskId] = _GalleryResult(
-              task: task,
-              queue: queue,
-              item: item,
-              thumbnailService: _resultThumbnails,
-            );
-          } else {
-            results.putIfAbsent(
-              taskId,
-              () => _GalleryResult(
-                queue: queue,
-                item: item,
-                thumbnailService: _resultThumbnails,
-              ),
-            );
-          }
-        } on Object {
-          results.putIfAbsent(
-            item.taskId ?? 'item:${item.id}',
-            () => _GalleryResult(
-              queue: queue,
-              item: item,
-              thumbnailService: _resultThumbnails,
-            ),
-          );
-        }
-      }
-    }
-    if (!mounted || generation != _galleryRefreshGeneration) return;
-    setState(() {
-      _galleryResults = results.values.toList(growable: false);
-      _galleryLoadFailed = historyLoadFailed;
-      _galleryLoading = false;
-    });
-  }
-
-  void _showQueue() => setState(() => _showResults = false);
-  void _showResultGallery() {
-    unawaited(_refreshGalleryResults());
-    setState(() => _showResults = true);
   }
 
   Future<void> _openTask(String? taskId) async {
@@ -361,6 +258,87 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text('无法加入批处理：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _selectOutputDirectory() async {
+    if (_busy) return;
+    await widget.settingsController?.ready;
+    if (!mounted) return;
+    String? path;
+    try {
+      if (_mobile) {
+        path = (await _storage.pickOutputFolder())?.uri;
+      } else if (widget.outputDirectoryPickerOverride != null) {
+        path = await widget.outputDirectoryPickerOverride!.call();
+      } else {
+        path = await PlatformFileDialogs().getDirectoryPath(
+          dialogTitle: StitchLocalizations.of(context).text('选择输出文件夹'),
+          confirmButtonText: StitchLocalizations.of(context).chooseFolder,
+        );
+      }
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              StitchLocalizations.of(context).text('选择输出文件夹失败：$error'),
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    if (path == null || path.isEmpty || !mounted) return;
+
+    final settings = widget.settingsController;
+    final previousDirectory = settings?.settings.batchOutputDirectory;
+    setState(() => _busy = true);
+    try {
+      if (settings != null) {
+        await settings.updateWith(
+          (latest) => latest.copyWith(batchOutputDirectory: path),
+        );
+        if (settings.error != null) {
+          throw StateError(settings.error!);
+        }
+      }
+      await _controller.setExportDestination(path);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            StitchLocalizations.of(context).text('输出文件夹已应用于尚未开始导出的队列任务'),
+          ),
+        ),
+      );
+    } on Object catch (error) {
+      Object? rollbackError;
+      if (settings != null && settings.settings.batchOutputDirectory == path) {
+        try {
+          await settings.updateWith(
+            (latest) => previousDirectory == null
+                ? latest.copyWith(clearBatchOutputDirectory: true)
+                : latest.copyWith(batchOutputDirectory: previousDirectory),
+          );
+          rollbackError = settings.error;
+        } on Object catch (restoreFailure) {
+          rollbackError = restoreFailure;
+        }
+      }
+      if (mounted) {
+        final strings = StitchLocalizations.of(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${strings.text('无法应用输出文件夹：')}$error'
+              '${rollbackError == null ? '' : '；${strings.text('设置恢复失败：')}$rollbackError'}',
+            ),
+          ),
+        );
       }
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -892,40 +870,8 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   @override
   Widget build(BuildContext context) => Scaffold(
     appBar: AppBar(
-      title: Text(
-        StitchLocalizations.of(context).text(_showResults ? '结果画廊' : '批处理队列'),
-      ),
+      title: const Text('批处理队列'),
       actions: [
-        if (widget.showResultsInitially && _showResults)
-          if (MediaQuery.sizeOf(context).width < 600)
-            IconButton(
-              key: const Key('batch-open-queue'),
-              tooltip: StitchLocalizations.of(context).text('任务队列'),
-              onPressed: _showQueue,
-              icon: const Icon(Icons.queue_outlined),
-            )
-          else
-            TextButton.icon(
-              key: const Key('batch-open-queue'),
-              onPressed: _showQueue,
-              icon: const Icon(Icons.queue_outlined),
-              label: Text(StitchLocalizations.of(context).text('任务队列')),
-            )
-        else if (widget.showResultsInitially)
-          if (MediaQuery.sizeOf(context).width < 600)
-            IconButton(
-              key: const Key('batch-open-results'),
-              tooltip: StitchLocalizations.of(context).text('结果画廊'),
-              onPressed: _showResultGallery,
-              icon: const Icon(Icons.photo_library_outlined),
-            )
-          else
-            TextButton.icon(
-              key: const Key('batch-open-results'),
-              onPressed: _showResultGallery,
-              icon: const Icon(Icons.photo_library_outlined),
-              label: Text(StitchLocalizations.of(context).text('结果画廊')),
-            ),
         if (!_mobile)
           IconButton(
             tooltip: StitchLocalizations.of(context).text('扫描 DWARF USB 设备'),
@@ -935,357 +881,156 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
         if (_mobile)
           IconButton(
             tooltip: StitchLocalizations.of(context).dwarfDeviceImport,
-            onPressed: _openDwarfDevice,
+            onPressed: _busy ? null : _openDwarfDevice,
             icon: const Icon(Icons.camera_alt_outlined),
           ),
         IconButton(
+          key: const Key('batch-output-directory'),
+          tooltip: StitchLocalizations.of(context).text('选择批量输出文件夹'),
+          onPressed: _busy ? null : _selectOutputDirectory,
+          icon: const Icon(Icons.drive_file_move_outlined),
+        ),
+        IconButton(
           tooltip: StitchLocalizations.of(context).text('批处理资源设置'),
-          onPressed: _resourceSettings,
+          onPressed: _busy ? null : _resourceSettings,
           icon: const Icon(Icons.tune),
         ),
         IconButton(
+          key: const Key('batch-select-parent-folder'),
           tooltip: StitchLocalizations.of(context).text('选择母目录'),
           onPressed: _busy ? null : _selectParent,
           icon: const Icon(Icons.create_new_folder_outlined),
         ),
       ],
     ),
-    body: _showResults
-        ? _resultGalleryBody()
-        : _controller.loading && _controller.queues.isEmpty
-        ? const Center(child: CircularProgressIndicator())
-        : ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              if (_controller.error != null) _errorBanner(_controller.error!),
-              if (_busy || _controller.loading) ...[
-                const LinearProgressIndicator(),
-                const ListTile(
-                  dense: true,
-                  leading: Icon(Icons.folder_open),
-                  title: Text('正在导入子目录；已加入队列的任务会继续处理。'),
-                ),
-              ],
-              if (_controller.queues.isEmpty)
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(28),
-                    child: Column(
-                      children: [
-                        const Icon(Icons.queue, size: 44),
-                        const SizedBox(height: 12),
-                        const Text('选择一个母目录；每个直接子目录会成为独立全景任务。'),
-                        if (_mobile)
-                          Text(
-                            StitchLocalizations.of(
-                              context,
-                            ).text('移动端将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
-                          ),
-                        if (!_mobile)
-                          OutlinedButton.icon(
-                            onPressed: _busy || _controller.loading
-                                ? null
-                                : _discoverUsb,
-                            icon: const Icon(Icons.usb),
-                            label: Text(
-                              StitchLocalizations.of(
-                                context,
-                              ).text('扫描 DWARF USB 设备'),
-                            ),
-                          ),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: _busy ? null : _selectParent,
-                          icon: const Icon(Icons.folder_open),
-                          label: const Text('选择母目录'),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              else ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: FilledButton.icon(
-                        key: const Key('start-all-queues'),
-                        onPressed:
-                            _busy ||
-                                _controller.loading ||
-                                (_controller.queues.every(
-                                      (queue) => queue.started,
-                                    ) &&
-                                    !_controller.hasDeferredQueues)
-                            ? null
-                            : _startAllQueues,
-                        icon: const Icon(Icons.play_arrow),
-                        label: const Text('开始队列'),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    OutlinedButton.icon(
-                      onPressed: _busy ? null : _selectParent,
-                      icon: const Icon(Icons.add),
-                      label: const Text('添加批次'),
-                    ),
-                  ],
-                ),
-                ListTile(
-                  key: const Key('clear-failed-queue-items'),
-                  leading: const Icon(Icons.delete_sweep_outlined),
-                  title: const Text('清空失败任务'),
-                  trailing: Text(
-                    '${_controller.queues.expand((queue) => queue.items).where((item) => item.state == BatchItemState.failed).length}',
-                  ),
-                  enabled:
-                      !_busy &&
-                      !_controller.loading &&
-                      _controller.queues.any(
-                        (queue) => queue.items.any(
-                          (item) => item.state == BatchItemState.failed,
-                        ),
-                      ),
-                  onTap: _clearFailedQueueItems,
-                ),
-                for (final queue in _controller.queues) ...[
-                  _queueHeader(queue),
-                  for (final item in queue.items) _itemCard(queue, item),
-                  const SizedBox(height: 12),
-                ],
-              ],
-            ],
-          ),
-  );
-
-  Widget _resultGalleryBody() {
-    final strings = StitchLocalizations.of(context);
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth < 600
-            ? 1
-            : constraints.maxWidth < 1080
-            ? 2
-            : 3;
-        final textScale = MediaQuery.textScalerOf(context).scale(16) / 16;
-        return CustomScrollView(
-          key: const Key('batch-result-gallery'),
-          slivers: [
-            SliverPadding(
+    body: AbsorbPointer(
+      absorbing: _busy,
+      child: _controller.loading && _controller.queues.isEmpty
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
               padding: const EdgeInsets.all(16),
-              sliver: SliverList(
-                delegate: SliverChildListDelegate([
-                  if (_controller.error != null)
-                    _errorBanner(_controller.error!),
-                  if (_busy || _controller.loading || _galleryLoading)
-                    const LinearProgressIndicator(),
-                  if (_galleryResults.isEmpty && _galleryLoading)
-                    const Padding(
-                      padding: EdgeInsets.only(top: 80),
-                      child: Center(child: CircularProgressIndicator()),
-                    )
-                  else if (_galleryResults.isEmpty && _galleryLoadFailed)
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(28),
-                        child: Column(
-                          children: [
-                            const Icon(Icons.error_outline, size: 48),
-                            const SizedBox(height: 12),
-                            Text(strings.text('无法读取已保存的合成记录')),
-                            const SizedBox(height: 12),
-                            OutlinedButton.icon(
-                              onPressed: _refreshGalleryResults,
-                              icon: const Icon(Icons.refresh),
-                              label: Text(strings.text('重试')),
-                            ),
-                          ],
-                        ),
-                      ),
-                    )
-                  else if (_galleryResults.isEmpty)
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(28),
-                        child: Column(
-                          children: [
-                            const Icon(Icons.photo_library_outlined, size: 48),
-                            const SizedBox(height: 12),
-                            Text(strings.text('暂无已完成的合成结果')),
-                            const SizedBox(height: 12),
-                            Wrap(
-                              spacing: 12,
-                              runSpacing: 8,
-                              alignment: WrapAlignment.center,
-                              children: [
-                                OutlinedButton.icon(
-                                  key: const Key('batch-empty-open-queue'),
-                                  onPressed: _showQueue,
-                                  icon: const Icon(Icons.queue_outlined),
-                                  label: Text(strings.text('查看任务队列')),
-                                ),
-                                FilledButton.icon(
-                                  onPressed: _busy ? null : _selectParent,
-                                  icon: const Icon(
-                                    Icons.create_new_folder_outlined,
-                                  ),
-                                  label: Text(strings.text('添加批次')),
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
+              children: [
+                if (_controller.error != null) _errorBanner(_controller.error!),
+                Card(
+                  key: const Key('batch-output-folder-setting'),
+                  child: ListTile(
+                    leading: const Icon(Icons.drive_file_move_outlined),
+                    title: Text(
+                      StitchLocalizations.of(context).text('批量输出文件夹'),
                     ),
-                ]),
-              ),
-            ),
-            if (_galleryResults.isNotEmpty)
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                sliver: SliverGrid(
-                  delegate: SliverChildBuilderDelegate(
-                    (context, index) => _resultCard(_galleryResults[index]),
-                    childCount: _galleryResults.length,
-                  ),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: columns,
-                    crossAxisSpacing: 12,
-                    mainAxisSpacing: 12,
-                    mainAxisExtent: 390 + ((textScale - 1) * 260).clamp(0, 260),
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _resultCard(_GalleryResult result) {
-    final strings = StitchLocalizations.of(context);
-    final item = result.item;
-    final task = result.task;
-    final id = task?.id ?? item?.id ?? 'unknown';
-    final title = item?.name ?? _savedResultTitle(task, strings);
-    return Card(
-      key: Key('batch-result-$id'),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: () => task != null
-            ? _openCompletedTask(task)
-            : item == null
-            ? null
-            : _openCompleted(item),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            SizedBox(
-              height: 176,
-              child: task == null
-                  ? _resultPlaceholder(strings)
-                  : FutureBuilder<File?>(
-                      future: result.loadPreview(),
-                      builder: (context, snapshot) {
-                        final file = snapshot.data;
-                        if (file == null) return _resultPlaceholder(strings);
-                        return Image.file(
-                          file,
-                          cacheWidth: 480,
-                          fit: BoxFit.contain,
-                          errorBuilder: (context, error, stack) =>
-                              _resultPlaceholder(strings),
-                        );
-                      },
-                    ),
-            ),
-            Expanded(
-              child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      title,
+                    subtitle: Text(
+                      widget
+                              .settingsController
+                              ?.settings
+                              .batchOutputDirectory ??
+                          widget.settingsController?.settings.outputDirectory ??
+                          StitchLocalizations.of(context).text('使用默认输出文件夹'),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.titleMedium,
                     ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 4,
-                      children: [
-                        Chip(
-                          avatar: const Icon(
-                            Icons.check_circle_outline,
-                            size: 18,
-                          ),
-                          label: result.exportAvailability == null
-                              ? Text(strings.text('已完成'))
-                              : FutureBuilder<bool>(
-                                  future: result.exportAvailability,
-                                  builder: (context, snapshot) => Text(
-                                    snapshot.data == false
-                                        ? strings.text('导出文件不可用')
-                                        : strings.text('已完成'),
-                                  ),
-                                ),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                        Chip(
-                          avatar: const Icon(Icons.image_outlined, size: 18),
-                          label: Text(
-                            task?.exportFormat.label ??
-                                result.queue?.outputFormat.label ??
-                                strings.text('格式未知'),
-                          ),
-                          visualDensity: VisualDensity.compact,
-                        ),
-                      ],
-                    ),
-                    Text(
-                      strings.text('点击查看合成结果'),
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                    if (task != null)
-                      Text(
-                        formatTaskDateTime(
-                          task.createdAt,
-                          widget.settingsController?.settings.taskDateFormat ??
-                              TaskDateFormat.yearMonthDay,
-                        ),
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                  ],
+                    onTap: _busy ? null : _selectOutputDirectory,
+                    trailing: const Icon(Icons.chevron_right),
+                  ),
                 ),
-              ),
+                if (_busy || _controller.loading) ...[
+                  const LinearProgressIndicator(),
+                  const ListTile(
+                    dense: true,
+                    leading: Icon(Icons.folder_open),
+                    title: Text('正在导入子目录；已加入队列的任务会继续处理。'),
+                  ),
+                ],
+                if (_controller.queues.isEmpty)
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(28),
+                      child: Column(
+                        children: [
+                          const Icon(Icons.queue, size: 44),
+                          const SizedBox(height: 12),
+                          const Text('选择一个母目录；每个直接子目录会成为独立全景任务。'),
+                          if (_mobile)
+                            Text(
+                              StitchLocalizations.of(
+                                context,
+                              ).text('移动端将文件夹复制到应用私有暂存目录，再逐个导入其中的原片。'),
+                            ),
+                          if (!_mobile)
+                            OutlinedButton.icon(
+                              onPressed: _busy || _controller.loading
+                                  ? null
+                                  : _discoverUsb,
+                              icon: const Icon(Icons.usb),
+                              label: Text(
+                                StitchLocalizations.of(
+                                  context,
+                                ).text('扫描 DWARF USB 设备'),
+                              ),
+                            ),
+                          const SizedBox(height: 12),
+                          FilledButton.icon(
+                            onPressed: _busy ? null : _selectParent,
+                            icon: const Icon(Icons.folder_open),
+                            label: const Text('选择母目录'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                else ...[
+                  Row(
+                    children: [
+                      Expanded(
+                        child: FilledButton.icon(
+                          key: const Key('start-all-queues'),
+                          onPressed:
+                              _busy ||
+                                  _controller.loading ||
+                                  (_controller.queues.every(
+                                        (queue) => queue.started,
+                                      ) &&
+                                      !_controller.hasDeferredQueues)
+                              ? null
+                              : _startAllQueues,
+                          icon: const Icon(Icons.play_arrow),
+                          label: const Text('开始队列'),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: _busy ? null : _selectParent,
+                        icon: const Icon(Icons.add),
+                        label: const Text('添加批次'),
+                      ),
+                    ],
+                  ),
+                  ListTile(
+                    key: const Key('clear-failed-queue-items'),
+                    leading: const Icon(Icons.delete_sweep_outlined),
+                    title: const Text('清空失败任务'),
+                    trailing: Text(
+                      '${_controller.queues.expand((queue) => queue.items).where((item) => item.state == BatchItemState.failed).length}',
+                    ),
+                    enabled:
+                        !_busy &&
+                        !_controller.loading &&
+                        _controller.queues.any(
+                          (queue) => queue.items.any(
+                            (item) => item.state == BatchItemState.failed,
+                          ),
+                        ),
+                    onTap: _clearFailedQueueItems,
+                  ),
+                  for (final queue in _controller.queues) ...[
+                    _queueHeader(queue),
+                    for (final item in queue.items) _itemCard(queue, item),
+                    const SizedBox(height: 12),
+                  ],
+                ],
+              ],
             ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _resultPlaceholder(StitchLocalizations strings) => DecoratedBox(
-    decoration: BoxDecoration(
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
-    ),
-    child: Center(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.panorama_outlined, size: 42),
-          const SizedBox(height: 6),
-          Text(strings.text('预览不可用；点击查看详情')),
-        ],
-      ),
     ),
   );
-
-  String _savedResultTitle(StitchTask? task, StitchLocalizations strings) {
-    final sourceName = task == null ? '' : p.basename(task.sourceDirectory);
-    return sourceName.trim().isEmpty ? strings.text('合成结果') : sourceName;
-  }
 
   Widget _queueHeader(BatchQueue queue) {
     final completed = queue.items
@@ -1334,7 +1079,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
               ),
               IconButton(
                 tooltip: StitchLocalizations.of(context).text('资源设置'),
-                onPressed: _resourceSettings,
+                onPressed: _busy ? null : _resourceSettings,
                 icon: const Icon(Icons.settings_outlined),
               ),
             ],
@@ -1568,27 +1313,4 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       child: Text(StitchLocalizations.of(context).text(value)),
     ),
   );
-}
-
-class _GalleryResult {
-  _GalleryResult({
-    this.task,
-    this.queue,
-    this.item,
-    required this._thumbnailService,
-  });
-
-  final StitchTask? task;
-  final BatchQueue? queue;
-  final BatchQueueItem? item;
-  final TaskThumbnailService _thumbnailService;
-  Future<File?>? _preview;
-  Future<bool>? _exportAvailability;
-
-  Future<File?> loadPreview() => _preview ??= task == null
-      ? Future<File?>.value()
-      : _thumbnailService.resultThumbnailFor(task!);
-
-  Future<bool>? get exportAvailability => _exportAvailability ??=
-      task?.exportPath == null ? null : File(task!.exportPath!).exists();
 }

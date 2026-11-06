@@ -349,6 +349,7 @@ void main() {
       expect(tester.getCenter(single).dx, lessThan(tester.getCenter(batch).dx));
       expect(find.text('单张合成'), findsOneWidget);
       expect(find.text('批量合成'), findsOneWidget);
+      expect(find.byKey(const Key('selection-results')), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
   }
@@ -430,6 +431,13 @@ void main() {
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
 
+      await tester.tap(find.byKey(const Key('selection-results')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('result-gallery-grid')), findsNothing);
+      expect(find.text('暂无已完成的合成结果'), findsOneWidget);
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+
       await tester.tap(find.byKey(const Key('selection-single')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
@@ -439,8 +447,6 @@ void main() {
 
       await tester.tap(find.byKey(const Key('selection-batch')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('batch-open-queue')));
-      await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('batch-item-mode-navigation-item')),
         findsOneWidget,
@@ -449,8 +455,6 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('selection-batch')), findsOneWidget);
       await tester.tap(find.byKey(const Key('selection-batch')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('batch-open-queue')));
       await tester.pumpAndSettle();
       expect(
         find.byKey(const Key('batch-item-mode-navigation-item')),

@@ -76,7 +76,12 @@ class BatchQueueController extends ChangeNotifier {
   final Map<String, int> _timelineUiSequences = {};
   Future<void> _taskWriteTail = Future.value();
   Future<void> _queueWriteTail = Future.value();
+  Future<void> _exportDestinationWriteTail = Future.value();
   Future<void> _tickWork = Future.value();
+  String? _defaultExportDestination;
+  int _exportDestinationChangeCount = 0;
+  int _destinationOperationCount = 0;
+  Completer<void>? _destinationOperationsDone;
   Timer? _timer;
   Timer? _usbDiscoveryTimer;
   bool _loading = false;
@@ -433,33 +438,297 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> retryPublish(String queueId, String itemId) async {
-    final found = _find(queueId, itemId);
-    if (found == null || found.item.taskId == null) return;
-    final task = await _loadTask(found.item);
-    if (task == null || task.exportPath == null || task.publishError == null) {
-      return;
+    await _enterDestinationOperation();
+    try {
+      final found = _find(queueId, itemId);
+      if (found == null || found.item.taskId == null) return;
+      final task = await _loadTask(found.item);
+      if (task == null ||
+          task.exportPath == null ||
+          task.publishError == null) {
+        return;
+      }
+      final generation = _generation(itemId);
+      final result = await _publishPrivateExport(
+        task,
+        guardItem: itemId,
+        generation: generation,
+      );
+      if (generation != _generation(itemId)) return;
+      await _replaceState(
+        queueId,
+        itemId,
+        BatchItemState.completed,
+        message:
+            result.publishError ??
+            result.publishedExportPath ??
+            result.exportPath,
+        publishFailed: result.publishError != null,
+      );
+    } finally {
+      _leaveDestinationOperation();
     }
-    final generation = _generation(itemId);
-    final result = await _publishPrivateExport(
-      task,
-      guardItem: itemId,
-      generation: generation,
-    );
-    if (generation != _generation(itemId)) return;
-    await _replaceState(
-      queueId,
-      itemId,
-      BatchItemState.completed,
-      message:
-          result.publishError ??
-          result.publishedExportPath ??
-          result.exportPath,
-      publishFailed: result.publishError != null,
-    );
   }
 
   List<BatchQueue> get queues => List.unmodifiable(_queues);
   bool get loading => _loading || _importing;
+
+  String? _configuredExportDestination(AppSettings? settings) =>
+      _defaultExportDestination ??
+      settings?.batchOutputDirectory ??
+      settings?.outputDirectory;
+
+  Future<void> _waitForExportDestinationUpdates() async {
+    if (_exportDestinationChangeCount == 0) return;
+    await _exportDestinationWriteTail;
+  }
+
+  Future<void> _enterDestinationOperation() async {
+    while (true) {
+      await _waitForExportDestinationUpdates();
+      _destinationOperationCount++;
+      if (_exportDestinationChangeCount == 0) return;
+      _destinationOperationCount--;
+      if (_destinationOperationCount == 0) {
+        _destinationOperationsDone?.complete();
+        _destinationOperationsDone = null;
+      }
+    }
+  }
+
+  void _leaveDestinationOperation() {
+    _destinationOperationCount--;
+    if (_destinationOperationCount == 0) {
+      _destinationOperationsDone?.complete();
+      _destinationOperationsDone = null;
+    }
+  }
+
+  Future<void> setExportDestination(String directory) {
+    if (_disposed) return Future<void>.error(StateError('队列控制器已关闭'));
+    final destination = directory.trim().isEmpty ? null : directory.trim();
+    final previous = _exportDestinationWriteTail;
+    final completion = Completer<void>();
+    _exportDestinationWriteTail = completion.future;
+    _exportDestinationChangeCount++;
+    return _applyExportDestinationChange(
+      destination,
+      previous: previous,
+      completion: completion,
+    );
+  }
+
+  Future<void> _applyExportDestinationChange(
+    String? destination, {
+    required Future<void> previous,
+    required Completer<void> completion,
+  }) async {
+    try {
+      await previous;
+      if (_destinationOperationCount > 0) {
+        _destinationOperationsDone ??= Completer<void>();
+        await _destinationOperationsDone!.future;
+      }
+      await _applyExportDestination(destination);
+    } finally {
+      _exportDestinationChangeCount--;
+      completion.complete();
+      if (!_disposed) unawaited(tick());
+    }
+  }
+
+  Future<void> _applyExportDestination(String? destination) async {
+    if (_loading) throw StateError('队列正在恢复，请稍后再更改输出目录');
+    while (_importing && !_disposed) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    if (_disposed) throw StateError('队列控制器已关闭');
+    final activeTick = _tickWork;
+    await activeTick;
+    await _queueWriteTail;
+    await _taskWriteTail;
+    if (_disposed) throw StateError('队列控制器已关闭');
+
+    final originalQueues = List<BatchQueue>.of(_queues);
+    final updatedQueues = [
+      for (final queue in originalQueues)
+        queue.copyWith(
+          exportDestination: destination,
+          clearExportDestination: destination == null,
+        ),
+    ];
+    final completedTaskIds = {
+      for (final queue in originalQueues)
+        for (final item in queue.items)
+          if (item.state == BatchItemState.completed && item.taskId != null)
+            item.taskId!,
+    };
+    final taskUpdates = <String, StitchTask>{};
+    final originalTasks = <String, StitchTask>{};
+    for (final queue in originalQueues) {
+      for (final item in queue.items) {
+        final taskId = item.taskId;
+        if (taskId == null ||
+            item.state == BatchItemState.completed ||
+            completedTaskIds.contains(taskId) ||
+            taskUpdates.containsKey(taskId)) {
+          continue;
+        }
+        final task =
+            _taskCache[taskId] ?? await _taskRepository.loadById(taskId);
+        if (task == null) continue;
+        originalTasks[taskId] = task;
+        final exportAlreadyStarted =
+            task.phase == StitchPhase.exporting ||
+            task.exportCheckpointPath != null ||
+            task.stage == 'export' ||
+            task.stage == 'publishing' ||
+            (_inFlight.contains(item.id) &&
+                item.state == BatchItemState.exporting);
+        if (exportAlreadyStarted) continue;
+        final taskDestination = destination ?? queue.outputDirectory;
+        if (task.exportDirectory == taskDestination) continue;
+        taskUpdates[taskId] = task.copyWith(
+          exportDirectory: taskDestination,
+          clearExportDirectory: false,
+        );
+      }
+    }
+
+    final queuesToSave = <BatchQueue>[
+      for (var index = 0; index < originalQueues.length; index++)
+        if (originalQueues[index].exportDestination != destination)
+          updatedQueues[index],
+    ];
+    final savedTasks = <String>[];
+    final savedQueues = <String>[];
+    try {
+      for (final task in taskUpdates.values) {
+        await _persistTaskRecord(task);
+        savedTasks.add(task.id);
+      }
+      await _persistQueues(
+        queuesToSave,
+        onSaved: (queue) {
+          savedQueues.add(queue.id);
+        },
+      );
+    } on Object catch (error) {
+      final rollbackErrors = <Object>[];
+      for (final queueId in savedQueues.reversed) {
+        final index = originalQueues.indexWhere((queue) => queue.id == queueId);
+        if (index < 0) continue;
+        try {
+          await _persistQueues([originalQueues[index]]);
+        } on Object catch (rollbackError) {
+          rollbackErrors.add(rollbackError);
+        }
+      }
+      for (final taskId in savedTasks.reversed) {
+        final original = originalTasks[taskId];
+        if (original == null) continue;
+        try {
+          await _persistTaskRecord(original);
+        } on Object catch (rollbackError) {
+          rollbackErrors.add(rollbackError);
+        }
+      }
+      if (rollbackErrors.isNotEmpty) {
+        await _reconcileDestinationRollback(originalQueues, taskUpdates.keys);
+      }
+      final rollbackSummary = rollbackErrors.isEmpty
+          ? ''
+          : '；回滚另有 ${rollbackErrors.length} 项失败：${rollbackErrors.join('；')}';
+      throw StateError('保存批量输出目录失败：$error$rollbackSummary');
+    }
+
+    _queues
+      ..clear()
+      ..addAll(updatedQueues);
+    _taskCache.addAll(taskUpdates);
+    _defaultExportDestination = destination;
+    error = null;
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> _persistTaskRecord(StitchTask task) {
+    final write = _taskWriteTail.then((_) => _taskRepository.save(task));
+    _taskWriteTail = write.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return write;
+  }
+
+  Future<void> _persistQueues(
+    List<BatchQueue> queues, {
+    void Function(BatchQueue queue)? onSaved,
+  }) {
+    final write = _queueWriteTail.then((_) async {
+      for (final queue in queues) {
+        await _queueRepository.save(queue);
+        onSaved?.call(queue);
+      }
+    });
+    _queueWriteTail = write.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return write;
+  }
+
+  Future<void> _reconcileDestinationRollback(
+    List<BatchQueue> originalQueues,
+    Iterable<String> taskIds,
+  ) async {
+    try {
+      _queues
+        ..clear()
+        ..addAll(await _queueRepository.loadAll());
+    } on Object {
+      _queues
+        ..clear()
+        ..addAll(originalQueues);
+    }
+    for (final taskId in taskIds) {
+      try {
+        final current = await _taskRepository.loadById(taskId);
+        if (current == null) {
+          _taskCache.remove(taskId);
+        } else {
+          _taskCache[taskId] = current;
+        }
+      } on Object {
+        // Retain the prior cache value when the repository cannot be read.
+      }
+    }
+    if (!_disposed) notifyListeners();
+  }
+
+  Future<void> refreshResultTask(StitchTask task) async {
+    await _taskWriteTail;
+    if (_disposed || isResultTaskBusy(task.id)) return;
+    final cached = _taskCache[task.id];
+    if (cached != null && _isActivePhase(cached.phase)) return;
+    final current = await _taskRepository.loadById(task.id);
+    if (current != null && _isActivePhase(current.phase)) return;
+    _taskCache[task.id] = current ?? task;
+    if (!_disposed) notifyListeners();
+  }
+
+  bool isResultTaskBusy(String taskId) {
+    for (final queue in _queues) {
+      for (final item in queue.items) {
+        if (item.taskId != taskId) continue;
+        if (_inFlight.contains(item.id) ||
+            item.state != BatchItemState.completed) {
+          return true;
+        }
+      }
+    }
+    final cached = _taskCache[taskId];
+    return cached != null && _isActivePhase(cached.phase);
+  }
 
   Future<void> initialize() async {
     _loading = true;
@@ -947,6 +1216,7 @@ class BatchQueueController extends ChangeNotifier {
     ExportFormat outputFormat = ExportFormat.jpeg,
     AppSettings? settings,
   }) async {
+    await _waitForExportDestinationUpdates();
     if (_importing) return;
     final selectedFormat = settings?.exportFormat ?? outputFormat;
     if (selectedFormat == ExportFormat.jpegXl) {
@@ -969,7 +1239,7 @@ class BatchQueueController extends ChangeNotifier {
         p.dirname(p.normalize(parentPath)),
         '${parentName}_stitched',
       );
-      final configuredDestination = settings?.outputDirectory;
+      final configuredDestination = _configuredExportDestination(settings);
       final items = <BatchQueueItem>[];
       for (final snapshot in snapshots) {
         final id = _taskRepository.createId();
@@ -1031,6 +1301,7 @@ class BatchQueueController extends ChangeNotifier {
     bool deleteSources = false,
     AppSettings? settings,
   }) async {
+    await _waitForExportDestinationUpdates();
     if (_loading || _importing || _disposed) return 0;
     _importing = true;
     if (!_disposed) notifyListeners();
@@ -1060,6 +1331,7 @@ class BatchQueueController extends ChangeNotifier {
             items: const [],
             outputFormat: settings?.exportFormat ?? ExportFormat.jpeg,
             started: false,
+            exportDestination: _configuredExportDestination(settings),
             usbSource: true,
             usbVolumeId: source.volumeId,
             deleteUsbSources: deleteSources,
@@ -1446,58 +1718,73 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> startQueue(String queueId) async {
-    final index = _queues.indexWhere((queue) => queue.id == queueId);
-    if (index < 0 || _loading || _importing) return;
-    var queue = _queues[index];
-    if (queue.started) return;
-    if (queue.usbSource && !await _prepareUsbItems(queueId)) return;
-    final refreshedIndex = _queues.indexWhere(
-      (candidate) => candidate.id == queueId,
-    );
-    if (refreshedIndex < 0) return;
-    queue = _queues[refreshedIndex];
-    final started = queue.copyWith(started: true);
-    _queues[refreshedIndex] = started;
-    await _save(started);
-    if (!_disposed) notifyListeners();
-    await tick();
+    await _enterDestinationOperation();
+    try {
+      final index = _queues.indexWhere((queue) => queue.id == queueId);
+      if (index < 0 || _loading || _importing) return;
+      var queue = _queues[index];
+      if (queue.started) return;
+      if (queue.usbSource && !await _prepareUsbItems(queueId)) return;
+      final refreshedIndex = _queues.indexWhere(
+        (candidate) => candidate.id == queueId,
+      );
+      if (refreshedIndex < 0) return;
+      queue = _queues[refreshedIndex];
+      final started = queue.copyWith(started: true);
+      _queues[refreshedIndex] = started;
+      await _save(started);
+      if (!_disposed) notifyListeners();
+      await tick();
+    } finally {
+      _leaveDestinationOperation();
+    }
   }
 
   Future<void> startAllQueues() async {
-    if (_loading || _importing || _disposed) return;
-    for (final queue in _queues.toList()) {
-      if (queue.usbSource && !queue.started) {
-        await _prepareUsbItems(queue.id);
+    await _enterDestinationOperation();
+    try {
+      if (_loading || _importing || _disposed) return;
+      for (final queue in _queues.toList()) {
+        if (queue.usbSource && !queue.started) {
+          await _prepareUsbItems(queue.id);
+        }
       }
-    }
-    for (var index = 0; index < _queues.length; index++) {
-      final queue = _queues[index];
-      if (queue.started) continue;
-      if (queue.usbSource &&
-          queue.items.any(
-            (item) =>
-                item.taskId == null &&
-                const {
-                  BatchItemState.pending,
-                  BatchItemState.failed,
-                }.contains(item.state),
-          )) {
-        continue;
+      for (var index = 0; index < _queues.length; index++) {
+        final queue = _queues[index];
+        if (queue.started) continue;
+        if (queue.usbSource &&
+            queue.items.any(
+              (item) =>
+                  item.taskId == null &&
+                  const {
+                    BatchItemState.pending,
+                    BatchItemState.failed,
+                  }.contains(item.state),
+            )) {
+          continue;
+        }
+        final started = queue.copyWith(started: true);
+        _queues[index] = started;
+        await _save(started);
       }
-      final started = queue.copyWith(started: true);
-      _queues[index] = started;
-      await _save(started);
+      _deferredQueueStarts.clear();
+      if (!_disposed) notifyListeners();
+      await tick();
+    } finally {
+      _leaveDestinationOperation();
     }
-    _deferredQueueStarts.clear();
-    if (!_disposed) notifyListeners();
-    await tick();
   }
 
   Future<void> resumeDeferredQueue(String queueId) async {
-    _deferredQueueStarts.remove(queueId);
-    if (!_disposed) notifyListeners();
-    if (_queues.any((queue) => queue.id == queueId && queue.started)) {
-      await tick();
+    await _enterDestinationOperation();
+    try {
+      _deferredQueueStarts.remove(queueId);
+      if (!_disposed) notifyListeners();
+      if (_queues.any((queue) => queue.id == queueId && queue.started)) {
+        await tick();
+      }
+    } finally {
+      _leaveDestinationOperation();
     }
   }
 
@@ -1592,6 +1879,7 @@ class BatchQueueController extends ChangeNotifier {
     List<DwarfDownloadBatch> completedBatches, {
     AppSettings? settings,
   }) async {
+    await _waitForExportDestinationUpdates();
     if (_importing || completedBatches.isEmpty) return;
     final validatedPaths = <String>[];
     for (final requested in completedBatches) {
@@ -1725,7 +2013,7 @@ class BatchQueueController extends ChangeNotifier {
         items: items,
         outputFormat: settings?.exportFormat ?? ExportFormat.jpeg,
         started: false,
-        exportDestination: settings?.outputDirectory,
+        exportDestination: _configuredExportDestination(settings),
         performanceOptions: settings?.performance ?? const PerformanceOptions(),
         refineGridNeighbors: settings?.refineGridNeighbors ?? true,
         seamBlendMode: settings?.seamBlendMode ?? SeamBlendMode.deghost,
@@ -1977,7 +2265,7 @@ class BatchQueueController extends ChangeNotifier {
         task != null &&
         task.phase == StitchPhase.completed &&
         latest.queue.started) {
-      await _exportCompleted(latest.queue, latest.item, task);
+      await _tickAfterCurrent();
     } else if (latest != null && latest.queue.started) {
       await tick();
     }
@@ -2011,7 +2299,7 @@ class BatchQueueController extends ChangeNotifier {
     if (latest != null &&
         latest.queue.started &&
         updatedTask.phase == StitchPhase.completed) {
-      await _exportCompleted(latest.queue, latest.item, updatedTask);
+      await _tickAfterCurrent();
     } else if (latest != null && latest.queue.started) {
       await tick();
     }
@@ -2046,6 +2334,15 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> pause(String queueId, String itemId) async {
+    await _enterDestinationOperation();
+    try {
+      await _pauseQueueItem(queueId, itemId);
+    } finally {
+      _leaveDestinationOperation();
+    }
+  }
+
+  Future<void> _pauseQueueItem(String queueId, String itemId) async {
     final found = _find(queueId, itemId);
     if (found == null) return;
     final generation = _bumpGeneration(found.item.id);
@@ -2338,6 +2635,15 @@ class BatchQueueController extends ChangeNotifier {
   }.contains(phase);
 
   Future<void> retry(String queueId, String itemId) async {
+    await _enterDestinationOperation();
+    try {
+      await _retryQueueItem(queueId, itemId);
+    } finally {
+      _leaveDestinationOperation();
+    }
+  }
+
+  Future<void> _retryQueueItem(String queueId, String itemId) async {
     final found = _find(queueId, itemId);
     if (found == null) return;
     if (found.item.usbSourceIdentity != null && found.item.taskId == null) {
@@ -2449,7 +2755,9 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> tick() {
     if (_ticking) return _tickWork;
-    if (_loading || _disposed) return Future<void>.value();
+    if (_loading || _disposed || _exportDestinationChangeCount > 0) {
+      return Future<void>.value();
+    }
     _ticking = true;
     final work = _runTick().whenComplete(() => _ticking = false);
     _tickWork = work;
@@ -2794,6 +3102,13 @@ class BatchQueueController extends ChangeNotifier {
     }
   }
 
+  bool _hasStartedExport(BatchQueueItem item, StitchTask task) =>
+      task.phase == StitchPhase.exporting ||
+      task.exportCheckpointPath != null ||
+      task.stage == 'export' ||
+      task.stage == 'publishing' ||
+      (_inFlight.contains(item.id) && item.state == BatchItemState.exporting);
+
   Future<void> _exportCompleted(
     BatchQueue queue,
     BatchQueueItem item,
@@ -2806,6 +3121,18 @@ class BatchQueueController extends ChangeNotifier {
         initial == null ||
         initial.item.state == BatchItemState.cancelled ||
         initial.item.state == BatchItemState.paused) {
+      return;
+    }
+    if (_exportDestinationChangeCount > 0 &&
+        !_hasStartedExport(initial.item, task)) {
+      await _deferCompletedExport(
+        queue,
+        initial.item,
+        task,
+        BatchItemState.ready,
+        '等待输出目录更新后继续导出',
+        generation,
+      );
       return;
     }
     if (initial.item.pauseRequested ||
@@ -2950,6 +3277,18 @@ class BatchQueueController extends ChangeNotifier {
       );
       return;
     }
+    if (_exportDestinationChangeCount > 0 &&
+        !_hasStartedExport(initial.item, task)) {
+      await _deferCompletedExport(
+        queue,
+        initial.item,
+        task,
+        BatchItemState.ready,
+        '等待输出目录更新后继续导出',
+        generation,
+      );
+      return;
+    }
     _inFlight.add(item.id);
     await _replaceState(
       queue.id,
@@ -2963,13 +3302,17 @@ class BatchQueueController extends ChangeNotifier {
       return;
     }
     try {
-      final selectedPath = queue.exportDestination;
+      final latestQueue = _queues.firstWhere(
+        (candidate) => candidate.id == queue.id,
+        orElse: () => queue,
+      );
+      final selectedPath = latestQueue.exportDestination;
       final output = Directory(
         selectedPath != null &&
                 selectedPath.isNotEmpty &&
                 !selectedPath.startsWith('content://')
             ? selectedPath
-            : queue.outputDirectory,
+            : latestQueue.outputDirectory,
       );
       await output.create(recursive: true);
       if (generation != _generation(item.id)) {
@@ -2987,6 +3330,9 @@ class BatchQueueController extends ChangeNotifier {
       }
       final exportTask = task.copyWith(
         phase: StitchPhase.exporting,
+        exportDirectory: latestQueue.exportDestination?.isNotEmpty == true
+            ? latestQueue.exportDestination
+            : latestQueue.outputDirectory,
         exportCheckpointPath: destination.path,
         stage: 'export',
       );
@@ -3420,7 +3766,12 @@ class BatchQueueController extends ChangeNotifier {
   }
 
   Future<void> _startReady() async {
-    if (_disposed || _importing || !_api.isAvailable) return;
+    if (_disposed ||
+        _importing ||
+        _exportDestinationChangeCount > 0 ||
+        !_api.isAvailable) {
+      return;
+    }
     if (requireLargeJobApproval && !resourceConfigurationReady) return;
     if (requireLargeJobApproval && runtimeService != null) {
       try {
@@ -3485,7 +3836,11 @@ class BatchQueueController extends ChangeNotifier {
             (queue, item),
     ];
     for (final candidate in candidates) {
-      if (_disposed || activeJobs >= maxJobs) break;
+      if (_disposed ||
+          _exportDestinationChangeCount > 0 ||
+          activeJobs >= maxJobs) {
+        break;
+      }
       final queue = candidate.$1;
       final item = candidate.$2;
       final generation = _generation(item.id);
@@ -4235,10 +4590,19 @@ class BatchQueueController extends ChangeNotifier {
       final tickWork = _tickWork;
       final taskWrites = _taskWriteTail;
       final queueWrites = _queueWriteTail;
-      await Future.wait<void>([tickWork, taskWrites, queueWrites]);
+      final destinationWrites = _exportDestinationWriteTail;
+      await Future.wait<void>([
+        tickWork,
+        taskWrites,
+        queueWrites,
+        destinationWrites,
+      ]);
       if (identical(tickWork, _tickWork) &&
           identical(taskWrites, _taskWriteTail) &&
           identical(queueWrites, _queueWriteTail) &&
+          identical(destinationWrites, _exportDestinationWriteTail) &&
+          _exportDestinationChangeCount == 0 &&
+          _destinationOperationCount == 0 &&
           !_ticking &&
           !_loading &&
           !_importing) {

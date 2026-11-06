@@ -245,6 +245,7 @@ class BatchQueue {
     ExportFormat? outputFormat,
     bool? started,
     String? exportDestination,
+    bool clearExportDestination = false,
     PerformanceOptions? performanceOptions,
     bool? refineGridNeighbors,
     SeamBlendMode? seamBlendMode,
@@ -262,7 +263,9 @@ class BatchQueue {
     items: items ?? this.items,
     outputFormat: outputFormat ?? this.outputFormat,
     started: started ?? this.started,
-    exportDestination: exportDestination ?? this.exportDestination,
+    exportDestination: clearExportDestination
+        ? null
+        : exportDestination ?? this.exportDestination,
     performanceOptions: performanceOptions ?? this.performanceOptions,
     refineGridNeighbors: refineGridNeighbors ?? this.refineGridNeighbors,
     seamBlendMode: seamBlendMode ?? this.seamBlendMode,
