@@ -48,6 +48,7 @@ import 'models/stitch_timeline.dart';
 import 'widgets/stitching_log.dart';
 import 'widgets/scene_model_dialog.dart';
 import 'widgets/photo_grid_issues.dart';
+import 'widgets/result_deletion_dialog.dart';
 
 enum _JpegDimensionChoice { keepScaledJpeg, useJpegXl }
 
@@ -251,6 +252,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       widget.batchQueueController ??
       BatchQueueController(
         api: _api,
+        taskRepository: _repository,
         requireLargeJobApproval: _mobile,
         runtimeService: _runtime,
         storageService: _mobile ? _storage : null,
@@ -3285,9 +3287,69 @@ class _StitchHomePageState extends State<StitchHomePage>
           traceRecord: traceRecord,
           mobileStorageService: _android ? _storage : null,
           exportMimeType: _mimeType(task.exportFormat),
+          onDeleteResult: (choice) => _deleteResult(task, choice),
         ),
       ),
     );
+  }
+
+  Future<TaskRemovalResult> _deleteResult(
+    StitchTask task,
+    ResultDeletionChoice choice,
+  ) async {
+    final controller = _batchController;
+    if (controller == null) throw StateError('批量任务控制器不可用');
+    final repository = controller.taskRepository;
+    try {
+      await _performanceSaveQueue.enqueue(() async {});
+      return await ResultLibraryService(
+        repository: repository,
+        api: _api,
+        isTaskBusy: _isResultTaskBusy,
+      ).deleteResult(
+        task,
+        remove: (latest) => controller.removeTask(
+          latest.id,
+          deleteInputFiles: !choice.keepInputs,
+          deleteOutputFiles: !choice.keepOutputs,
+        ),
+      );
+    } finally {
+      var recordRemoved = false;
+      try {
+        recordRemoved = await repository.isRemoved(task.id);
+      } on Object {
+        recordRemoved = false;
+      }
+      final clearSelected = mounted && recordRemoved && _task?.id == task.id;
+      if (clearSelected) {
+        _controlGeneration++;
+        _poll?.cancel();
+        _clearPhotoGridIssueState();
+      }
+      if (mounted) {
+        setState(() {
+          if (recordRemoved) {
+            _tasks = [
+              for (final value in _tasks)
+                if (value.id != task.id) value,
+            ];
+          }
+          if (clearSelected) {
+            _task = null;
+            _manifest = null;
+            _mappingCells = const [];
+          }
+        });
+        if (recordRemoved) {
+          final revision = _resultLibraryRevision.value;
+          _publishCompletedTaskChanges(_tasks);
+          if (_resultLibraryRevision.value == revision) {
+            _resultLibraryRevision.value++;
+          }
+        }
+      }
+    }
   }
 
   String _mimeType(ExportFormat format) => switch (format) {
@@ -4229,6 +4291,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             deviceDownloader: downloader,
             onTransferStatus: _updateDeviceTransfer,
             onDeviceTaskReady: _openImportedDeviceTask,
+            onDeleteResult: _deleteResult,
           ),
         ),
       );
@@ -4263,6 +4326,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             await controller?.refreshResultTask(task);
             if (mounted) await _refreshTasks();
           },
+          onDeleteResult: _deleteResult,
           onOpenViewer: _openExportViewer,
           onAddBatch: () => unawaited(_openBatchQueue()),
         ),

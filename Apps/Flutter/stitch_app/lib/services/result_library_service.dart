@@ -247,6 +247,19 @@ class ResultLibraryService {
     );
   });
 
+  Future<TaskRemovalResult> deleteResult(
+    StitchTask task, {
+    required Future<TaskRemovalResult> Function(StitchTask latest) remove,
+  }) => _withTaskLock(task.id, () async {
+    final latest = await _loadEligible(task);
+    if (latest.phase != StitchPhase.completed ||
+        latest.stage == 'result-library-export' ||
+        latest.exportCheckpointPath != null) {
+      throw const ResultLibraryException('结果仍在导出或等待恢复，无法删除任务。');
+    }
+    return remove(latest);
+  });
+
   Future<StitchTask> _exportFromNative(
     StitchTask task,
     String directory, {

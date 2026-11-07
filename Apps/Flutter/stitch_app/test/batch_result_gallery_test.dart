@@ -18,6 +18,7 @@ import 'package:stitch_app/services/result_library_service.dart';
 import 'package:stitch_app/services/settings_controller.dart';
 import 'package:stitch_app/services/settings_repository.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/widgets/result_deletion_dialog.dart';
 
 class _GalleryApi implements JobApi {
   @override
@@ -186,6 +187,11 @@ ResultGalleryPage _gallery({
   Future<String?> Function()? pickDirectory,
   Future<void> Function(StitchTask task)? onTaskUpdated,
   bool Function(String taskId)? isTaskBusy,
+  Future<TaskRemovalResult> Function(
+    StitchTask task,
+    ResultDeletionChoice choice,
+  )?
+  onDeleteResult,
 }) => ResultGalleryPage(
   repository: repository,
   service: service,
@@ -198,6 +204,7 @@ ResultGalleryPage _gallery({
   isTaskBusy: isTaskBusy ?? (_) => false,
   onTaskUpdated: onTaskUpdated ?? (_) async {},
   onOpenViewer: (_) async {},
+  onDeleteResult: onDeleteResult,
 );
 
 void main() {
@@ -582,5 +589,111 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(opened, 1);
+  });
+
+  testWidgets('gallery deletion respects keep choices and refreshes records', (
+    tester,
+  ) async {
+    final first = _task('delete-a', 'Result A', DateTime.utc(2026, 1, 1));
+    final second = _task('delete-b', 'Result B', DateTime.utc(2026, 1, 2));
+    final third = _task('keep-c', 'Keep C', DateTime.utc(2026, 1, 3));
+    final repository = _MemoryTaskRepository([first, second, third]);
+    final revision = ValueNotifier<int>(0);
+    addTearDown(revision.dispose);
+    final choices = <ResultDeletionChoice>[];
+    await tester.pumpWidget(
+      _app(
+        _gallery(
+          repository: repository,
+          service: _GalleryService(repository),
+          revision: revision,
+          onDeleteResult: (task, choice) async {
+            choices.add(choice);
+            repository.records.remove(task.id);
+            return TaskRemovalResult(
+              failures: task.id == first.id
+                  ? const ['orphan input retained']
+                  : const [],
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-selection-start')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-select-delete-a')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-select-delete-b')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-delete-selected')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Selected: 2 items'), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(
+            find.byKey(const Key('result-delete-keep-inputs')),
+          )
+          .value,
+      isFalse,
+    );
+    expect(
+      tester
+          .widget<CheckboxListTile>(
+            find.byKey(const Key('result-delete-keep-outputs')),
+          )
+          .value,
+      isFalse,
+    );
+    await tester.tap(find.byKey(const Key('result-delete-keep-outputs')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-delete-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(choices, hasLength(2));
+    expect(choices.every((choice) => choice.keepInputs == false), isTrue);
+    expect(choices.every((choice) => choice.keepOutputs == true), isTrue);
+    expect(find.byKey(const Key('result-card-delete-a')), findsNothing);
+    expect(find.byKey(const Key('result-card-delete-b')), findsNothing);
+    expect(find.byKey(const Key('result-card-keep-c')), findsOneWidget);
+    expect(find.textContaining('File cleanup warnings'), findsOneWidget);
+  });
+
+  testWidgets('canceling selection or confirmation never deletes', (
+    tester,
+  ) async {
+    final task = _task('keep-me', 'Keep me', DateTime.utc(2026));
+    final repository = _MemoryTaskRepository([task]);
+    final revision = ValueNotifier<int>(0);
+    addTearDown(revision.dispose);
+    var deleteCalls = 0;
+    await tester.pumpWidget(
+      _app(
+        _gallery(
+          repository: repository,
+          service: _GalleryService(repository),
+          revision: revision,
+          onDeleteResult: (_, _) async {
+            deleteCalls++;
+            return const TaskRemovalResult();
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-selection-start')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-select-keep-me')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-delete-selected')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-delete-cancel')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-selection-cancel')));
+    await tester.pumpAndSettle();
+
+    expect(deleteCalls, 0);
+    expect(find.byKey(const Key('result-card-keep-me')), findsOneWidget);
   });
 }

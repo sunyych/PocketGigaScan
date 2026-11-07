@@ -14,7 +14,9 @@ import 'package:stitch_app/models/imported_photo.dart';
 import 'package:stitch_app/models/stitch_task.dart';
 import 'package:stitch_app/services/mobile_storage_service.dart';
 import 'package:stitch_app/services/task_record_service.dart';
+import 'package:stitch_app/services/task_repository.dart';
 import 'package:stitch_app/widgets/exported_image_viewer.dart';
+import 'package:stitch_app/widgets/result_deletion_dialog.dart';
 import 'support/chinese_test_app.dart';
 import 'support/platform_golden.dart';
 
@@ -885,6 +887,71 @@ void main() {
       );
       await tester.binding.setSurfaceSize(null);
     });
+
+    testWidgets('viewer deletion dispatches choices and returns to gallery', (
+      tester,
+    ) async {
+      ResultDeletionChoice? choice;
+      await tester.pumpWidget(
+        _deletableViewerApp((selected) async {
+          choice = selected;
+          return const TaskRemovalResult();
+        }),
+      );
+      await tester.tap(find.byKey(const Key('open-deletable-viewer')));
+      await _pumpViewer(tester);
+      expect(
+        tester
+            .widget<ExportedImageViewer>(find.byType(ExportedImageViewer))
+            .onDeleteResult,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.byKey(const ValueKey('viewer-delete-result')),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      await tester.tap(find.byKey(const ValueKey('viewer-delete-result')));
+      await _pumpShortTransition(tester);
+      expect(
+        find.byKey(const Key('result-delete-confirmation')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('result-delete-keep-inputs')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('result-delete-confirm')));
+      await _pumpShortTransition(tester);
+
+      expect(choice?.keepInputs, isTrue);
+      expect(choice?.keepOutputs, isFalse);
+      expect(find.byType(ExportedImageViewer), findsNothing);
+      expect(find.byKey(const Key('open-deletable-viewer')), findsOneWidget);
+      expect(find.textContaining('Results deleted: 1'), findsOneWidget);
+    });
+
+    testWidgets('viewer stays open when deletion callback fails', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _deletableViewerApp((_) async => throw StateError('delete failed')),
+      );
+      await tester.tap(find.byKey(const Key('open-deletable-viewer')));
+      await _pumpViewer(tester);
+      await tester.tap(find.byKey(const ValueKey('viewer-delete-result')));
+      await _pumpShortTransition(tester);
+      expect(
+        find.byKey(const Key('result-delete-confirmation')),
+        findsOneWidget,
+      );
+      await tester.tap(find.byKey(const Key('result-delete-confirm')));
+      await _pumpShortTransition(tester);
+
+      expect(find.byType(ExportedImageViewer), findsOneWidget);
+      expect(find.textContaining('Could not delete:'), findsOneWidget);
+    });
   });
 
   testWidgets('current viewer desktop state screenshots', (tester) async {
@@ -1176,6 +1243,48 @@ Future<void> _pumpTileImages(WidgetTester tester) async {
     reason:
         'visible tile files and image decoders should settle within five seconds',
   );
+}
+
+Widget _deletableViewerApp(
+  Future<TaskRemovalResult> Function(ResultDeletionChoice choice) onDelete,
+) => MaterialApp(
+  locale: const Locale('en'),
+  supportedLocales: StitchLocalizations.supportedLocales,
+  localizationsDelegates: const [
+    StitchLocalizations.delegate,
+    GlobalMaterialLocalizations.delegate,
+    GlobalWidgetsLocalizations.delegate,
+    GlobalCupertinoLocalizations.delegate,
+  ],
+  home: Builder(
+    builder: (context) => Scaffold(
+      body: Center(
+        child: TextButton(
+          key: const Key('open-deletable-viewer'),
+          onPressed: () => Navigator.of(context).push<void>(
+            MaterialPageRoute<void>(
+              builder: (_) => ExportedImageViewer(
+                exportFilePath: _currentOutputPath,
+                pyramidDirectory: _currentRootPath,
+                expectedExportFingerprint: null,
+                legacyTaskAssociationPresent: true,
+                legacyTaskBindingVerified: true,
+                onDeleteResult: onDelete,
+              ),
+            ),
+          ),
+          child: const Text('Open viewer'),
+        ),
+      ),
+    ),
+  ),
+);
+
+Future<void> _pumpShortTransition(WidgetTester tester) async {
+  await tester.pump();
+  for (var frame = 0; frame < 6; frame++) {
+    await tester.pump(const Duration(milliseconds: 100));
+  }
 }
 
 Future<T?> _fileIo<T>(WidgetTester tester, Future<T> Function() action) =>

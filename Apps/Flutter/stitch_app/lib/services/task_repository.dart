@@ -176,9 +176,15 @@ class TaskRepository {
   Future<TaskRemovalResult> removeTaskRecordWithCleanup(
     StitchTask task, {
     required bool deleteOwnedFiles,
+    bool? deleteInputFiles,
+    bool? deleteOutputFiles,
   }) async {
-    if (deleteOwnedFiles) {
-      final savedTask = await loadById(task.id);
+    final removeInputs = deleteInputFiles ?? deleteOwnedFiles;
+    final removeOutputs = deleteOutputFiles ?? deleteOwnedFiles;
+    final cleanupRequested = removeInputs || removeOutputs;
+    StitchTask? savedTask;
+    if (cleanupRequested) {
+      savedTask = await loadById(task.id);
       final alreadyRemoved = await isRemoved(task.id);
       if (!alreadyRemoved &&
           (savedTask == null ||
@@ -190,9 +196,18 @@ class TaskRepository {
     // Keep the existing virtual method in the path so repository fakes and
     // platform-specific subclasses continue to observe/guard record removal.
     await removeTaskRecord(task.id);
-    if (!deleteOwnedFiles) return const TaskRemovalResult();
+    if (!cleanupRequested) return const TaskRemovalResult();
     try {
-      return await _serialized(() => _cleanupOwnedTaskFiles(task));
+      // Use the latest persisted association rather than caller-supplied paths.
+      // If retrying cleanup after a tombstone, only the caller snapshot remains.
+      final cleanupTask = savedTask ?? task;
+      return await _serialized(
+        () => _cleanupOwnedTaskFiles(
+          cleanupTask,
+          deleteInputFiles: removeInputs,
+          deleteOutputFiles: removeOutputs,
+        ),
+      );
     } on Object catch (error) {
       return TaskRemovalResult(failures: ['文件清理阶段失败：$error']);
     }
@@ -221,7 +236,11 @@ class TaskRepository {
     }
   }
 
-  Future<TaskRemovalResult> _cleanupOwnedTaskFiles(StitchTask task) async {
+  Future<TaskRemovalResult> _cleanupOwnedTaskFiles(
+    StitchTask task, {
+    required bool deleteInputFiles,
+    required bool deleteOutputFiles,
+  }) async {
     final failures = <String>[];
     final taskDirectory = await directoryFor(task.id);
     final canonicalTaskDirectory = await taskDirectory.resolveSymbolicLinks();
@@ -238,111 +257,215 @@ class TaskRepository {
     final usbCopyDirectory = Directory(
       p.join(canonicalTaskDirectory, 'usb-copy'),
     );
-    final ownedInputs = await _verifiedInputDirectory(task, inputDirectory);
-    if (ownedInputs) {
-      final shared = await _isReferencedByOtherTask(
-        others,
-        inputDirectory.path,
-      );
-      if (shared) {
-        failures.add('input目录被其他任务共用，已保留');
-      } else {
-        await _deleteValidatedDirectory(
-          inputDirectory,
-          taskDirectory: taskDirectory,
-          failures: failures,
-        );
-      }
-    } else if (await inputDirectory.exists()) {
-      failures.add('input目录无法验证所有权或内容已变化，已保留');
-    }
-
-    final taskOutputPath = await _canonicalExistingOrAbsolute(
-      task.outputDirectory,
-    );
-    final taskDirOutput = p.normalize(p.join(taskDirectory.path, 'output'));
-    final taskDirRender = p.normalize(p.join(taskDirectory.path, 'render'));
-    final outputIsOwnedDirectory =
-        p.equals(
-          taskOutputPath,
-          await _canonicalExistingOrAbsolute(taskDirOutput),
-        ) ||
-        p.equals(
-          taskOutputPath,
-          await _canonicalExistingOrAbsolute(taskDirRender),
-        );
-    if (outputIsOwnedDirectory) {
-      final taskOutputDirectory = Directory(task.outputDirectory);
-      final sharedOutput = await _isReferencedByOtherTask(
-        others,
-        taskOutputDirectory.path,
-      );
-      if (sharedOutput) {
-        failures.add('渲染目录被其他任务引用，已保留');
-      } else {
-        await _deleteValidatedDirectory(
-          taskOutputDirectory,
-          taskDirectory: taskDirectory,
-          failures: failures,
-        );
-      }
-    } else {
-      failures.add('渲染目录不在任务专属目录内，已保留');
-    }
-
-    if (await _isReferencedByOtherTask(others, usbCopyDirectory.path)) {
-      failures.add('USB 临时副本被其他任务引用，已保留');
-    } else {
-      await _deleteValidatedDirectory(
-        usbCopyDirectory,
-        taskDirectory: taskDirectory,
-        failures: failures,
-      );
-    }
-    final thumbnail = File(
-      p.join(canonicalTaskDirectory, 'camera-thumbnail.jpg'),
-    );
-    if (await _isFileReferencedByOtherTask(others, thumbnail.path)) {
-      failures.add('任务缩略图被其他任务引用，已保留');
-    } else {
-      await _deleteOwnedTaskFile(
-        thumbnail,
-        taskDirectory: taskDirectory,
-        failures: failures,
-      );
-    }
-    await _deleteOwnedTaskFile(
-      File(p.join(canonicalTaskDirectory, '.input-import.lock')),
-      taskDirectory: taskDirectory,
-      failures: failures,
-    );
-
-    final exportPath = task.exportPath;
-    final expectedFingerprint = task.exportFingerprint;
-    if (exportPath != null && expectedFingerprint != null) {
-      try {
-        await _deleteVerifiedExport(
+    if (deleteInputFiles) {
+      final ownedInputs = await _verifiedInputDirectory(task, inputDirectory);
+      if (ownedInputs) {
+        if (await _isReferencedByOtherTask(others, inputDirectory.path)) {
+          failures.add('input目录被其他任务共用，已保留');
+        } else if (await _directoryContainsProtectedTaskPath(
           task,
-          exportPath,
-          expectedFingerprint,
-          others,
-        );
-      } on Object catch (error) {
-        failures.add('导出文件保留（$error）');
+          inputDirectory,
+          includeOutputDirectory: true,
+          includePhotos: false,
+          includeSourceDirectory: false,
+        )) {
+          failures.add('input目录包含其他类别或待验证的任务文件，已保留');
+        } else {
+          await _deleteValidatedDirectory(
+            inputDirectory,
+            taskDirectory: taskDirectory,
+            failures: failures,
+          );
+        }
+      } else if (await inputDirectory.exists()) {
+        failures.add('input目录无法验证所有权或内容已变化，已保留');
       }
-    } else if (exportPath != null) {
-      failures.add('导出文件缺少可验证指纹，已保留');
+
+      if (await _isReferencedByOtherTask(others, usbCopyDirectory.path)) {
+        failures.add('USB 临时副本被其他任务引用，已保留');
+      } else if (await _directoryContainsProtectedTaskPath(
+        task,
+        usbCopyDirectory,
+        includeOutputDirectory: true,
+        includePhotos: true,
+        includeSourceDirectory: true,
+      )) {
+        failures.add('USB 临时副本包含仍需保留的任务文件，已保留');
+      } else {
+        await _deleteValidatedDirectory(
+          usbCopyDirectory,
+          taskDirectory: taskDirectory,
+          failures: failures,
+        );
+      }
+
+      final thumbnail = File(
+        p.join(canonicalTaskDirectory, 'camera-thumbnail.jpg'),
+      );
+      if (await _isTaskFileReferenced(task, thumbnail.path) ||
+          await _isFileReferencedByOtherTask(others, thumbnail.path)) {
+        failures.add('任务缩略图被其他任务引用，已保留');
+      } else {
+        await _deleteOwnedTaskFile(
+          thumbnail,
+          taskDirectory: taskDirectory,
+          failures: failures,
+        );
+      }
+      final inputLock = File(
+        p.join(canonicalTaskDirectory, '.input-import.lock'),
+      );
+      if (await _isTaskFileReferenced(task, inputLock.path) ||
+          await _isFileReferencedByOtherTask(others, inputLock.path)) {
+        failures.add('input导入锁路径被任务文件引用，已保留');
+      } else {
+        await _deleteOwnedTaskFile(
+          inputLock,
+          taskDirectory: taskDirectory,
+          failures: failures,
+        );
+      }
     }
-    final publishedExportPath = task.publishedExportPath?.trim();
-    if (publishedExportPath != null && publishedExportPath.isNotEmpty) {
-      final sameAsPrivateExport =
-          exportPath != null &&
-          await _sameLocalFileOrUri(publishedExportPath, exportPath);
-      if (!sameAsPrivateExport) {
-        failures.add('已发布的外部副本已保留，请在目标位置删除');
+
+    if (deleteOutputFiles) {
+      final taskOutputPath = await _canonicalExistingOrAbsolute(
+        task.outputDirectory,
+      );
+      final taskDirOutput = p.normalize(p.join(taskDirectory.path, 'output'));
+      final taskDirRender = p.normalize(p.join(taskDirectory.path, 'render'));
+      final outputIsOwnedDirectory =
+          p.equals(
+            taskOutputPath,
+            await _canonicalExistingOrAbsolute(taskDirOutput),
+          ) ||
+          p.equals(
+            taskOutputPath,
+            await _canonicalExistingOrAbsolute(taskDirRender),
+          );
+      if (outputIsOwnedDirectory) {
+        final taskOutputDirectory = Directory(task.outputDirectory);
+        if (await _isReferencedByOtherTask(others, taskOutputDirectory.path)) {
+          failures.add('渲染目录被其他任务引用，已保留');
+        } else if (await _directoryContainsProtectedTaskPath(
+          task,
+          taskOutputDirectory,
+          includeOutputDirectory: false,
+          includePhotos: true,
+          includeSourceDirectory: true,
+        )) {
+          failures.add('渲染目录包含需单独验证或保留的任务文件，已保留');
+        } else {
+          await _deleteValidatedDirectory(
+            taskOutputDirectory,
+            taskDirectory: taskDirectory,
+            failures: failures,
+          );
+        }
+      } else {
+        failures.add('渲染目录不在任务专属目录内，已保留');
+      }
+      final publishedExportPath = task.publishedExportPath?.trim();
+      final sameAsCanonical =
+          publishedExportPath != null &&
+          publishedExportPath.isNotEmpty &&
+          task.exportPath != null &&
+          await _sameLocalFileOrUri(publishedExportPath, task.exportPath!);
+      await _deleteCanonicalExport(task, others, failures);
+      if (publishedExportPath != null && publishedExportPath.isNotEmpty) {
+        if (!sameAsCanonical) {
+          failures.add('已发布的外部副本已保留，请在目标位置删除');
+        }
       }
     }
     return TaskRemovalResult(failures: failures);
+  }
+
+  Future<bool> _directoryContainsProtectedTaskPath(
+    StitchTask task,
+    Directory directory, {
+    required bool includeOutputDirectory,
+    required bool includePhotos,
+    required bool includeSourceDirectory,
+  }) async {
+    if (!await directory.exists()) return false;
+    final paths = <String>[
+      if (includeOutputDirectory) task.outputDirectory,
+      if (task.exportPath != null) task.exportPath!,
+      if (task.exportCheckpointPath != null) task.exportCheckpointPath!,
+      if (task.publishedExportPath != null) task.publishedExportPath!,
+      if (task.exportDirectory != null) task.exportDirectory!,
+      if (task.previewThumbnailPath != null) task.previewThumbnailPath!,
+      if (includeSourceDirectory) task.sourceDirectory,
+      if (includePhotos) ...task.photos.map((photo) => photo.storedPath),
+    ];
+    for (final path in paths) {
+      if (_isNonFileUri(path)) continue;
+      if (await _pathIsWithinDirectory(path, directory)) return true;
+    }
+    return false;
+  }
+
+  Future<bool> _pathIsWithinDirectory(String path, Directory directory) async {
+    final absolutePath = p.normalize(p.absolute(path));
+    final absoluteDirectory = p.normalize(p.absolute(directory.path));
+    if (p.equals(absolutePath, absoluteDirectory) ||
+        p.isWithin(absoluteDirectory, absolutePath)) {
+      return true;
+    }
+    try {
+      final resolvedDirectory = await directory.resolveSymbolicLinks();
+      final entityType = await FileSystemEntity.type(
+        absolutePath,
+        followLinks: false,
+      );
+      if (entityType == FileSystemEntityType.notFound) return false;
+      final resolvedPath = entityType == FileSystemEntityType.directory
+          ? await Directory(absolutePath).resolveSymbolicLinks()
+          : await File(absolutePath).resolveSymbolicLinks();
+      return p.equals(resolvedPath, resolvedDirectory) ||
+          p.isWithin(resolvedDirectory, resolvedPath);
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> _isTaskFileReferenced(StitchTask task, String path) async {
+    final references = <String>[
+      if (task.exportPath != null) task.exportPath!,
+      if (task.exportCheckpointPath != null) task.exportCheckpointPath!,
+      if (task.publishedExportPath != null) task.publishedExportPath!,
+      if (task.previewThumbnailPath != null) task.previewThumbnailPath!,
+      for (final photo in task.photos) photo.storedPath,
+    ];
+    for (final reference in references) {
+      if (_isNonFileUri(reference)) continue;
+      if (await _sameLocalFileOrUri(path, reference)) return true;
+    }
+    return false;
+  }
+
+  Future<void> _deleteCanonicalExport(
+    StitchTask task,
+    List<StitchTask> others,
+    List<String> failures,
+  ) async {
+    final exportPath = task.exportPath;
+    if (exportPath == null) return;
+    final expectedFingerprint = task.exportFingerprint;
+    if (expectedFingerprint == null) {
+      failures.add('导出文件缺少可验证指纹，已保留');
+      return;
+    }
+    try {
+      await _deleteVerifiedExport(
+        task,
+        exportPath,
+        expectedFingerprint,
+        others,
+      );
+    } on Object catch (error) {
+      failures.add('导出文件保留（$error）');
+    }
   }
 
   Future<List<StitchTask>?> _readOtherTasksForCleanup(String excludedId) async {
@@ -412,7 +535,10 @@ class TaskRepository {
         other.sourceDirectory,
         other.outputDirectory,
         if (other.exportPath != null) other.exportPath!,
+        if (other.exportCheckpointPath != null) other.exportCheckpointPath!,
+        if (other.publishedExportPath != null) other.publishedExportPath!,
         if (other.exportDirectory != null) other.exportDirectory!,
+        if (other.previewThumbnailPath != null) other.previewThumbnailPath!,
         for (final photo in other.photos) photo.storedPath,
       ];
       for (final reference in references) {
@@ -536,6 +662,17 @@ class TaskRepository {
     )) {
       throw const FileSystemException('路径指向任务原片');
     }
+    if (task.exportCheckpointPath != null &&
+        await _sameLocalFileOrUri(path, task.exportCheckpointPath!)) {
+      throw const FileSystemException('路径仍是导出检查点，已保留');
+    }
+    if (!_isNonFileUri(task.sourceDirectory) &&
+        await _pathIsWithinDirectory(
+          normalized,
+          Directory(task.sourceDirectory),
+        )) {
+      throw const FileSystemException('路径位于原始输入目录内');
+    }
     final repositoryRoot = await (await root()).resolveSymbolicLinks();
     if (p.isWithin(repositoryRoot, normalized)) {
       throw const FileSystemException('拒绝从任务存储目录删除导出路径');
@@ -573,6 +710,7 @@ class TaskRepository {
       final exactReferences = <String>[
         if (other.exportPath != null) other.exportPath!,
         if (other.exportCheckpointPath != null) other.exportCheckpointPath!,
+        if (other.publishedExportPath != null) other.publishedExportPath!,
         if (other.previewThumbnailPath != null) other.previewThumbnailPath!,
         for (final photo in other.photos) photo.storedPath,
       ];

@@ -16,6 +16,7 @@ import 'services/settings_controller.dart';
 import 'services/task_repository.dart';
 import 'services/task_thumbnail_service.dart';
 import 'models/stitch_quality.dart';
+import 'widgets/result_deletion_dialog.dart';
 
 class ResultGalleryPage extends StatefulWidget {
   const ResultGalleryPage({
@@ -28,6 +29,7 @@ class ResultGalleryPage extends StatefulWidget {
     required this.onTaskUpdated,
     required this.onOpenViewer,
     this.onAddBatch,
+    this.onDeleteResult,
     this.settingsController,
     this.mobileOverride,
     this.androidOverride,
@@ -48,6 +50,11 @@ class ResultGalleryPage extends StatefulWidget {
   final Future<void> Function(StitchTask task) onTaskUpdated;
   final Future<void> Function(StitchTask task) onOpenViewer;
   final VoidCallback? onAddBatch;
+  final Future<TaskRemovalResult> Function(
+    StitchTask task,
+    ResultDeletionChoice choice,
+  )?
+  onDeleteResult;
 
   @override
   State<ResultGalleryPage> createState() => _ResultGalleryPageState();
@@ -66,6 +73,10 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
       ResultGallerySort.newestFirst;
   bool _loading = true;
   bool _savingSort = false;
+  bool _selectionMode = false;
+  bool _deletePromptOpen = false;
+  bool _deleting = false;
+  final Set<String> _selectedTaskIds = {};
   Object? _loadError;
   int _generation = 0;
 
@@ -118,6 +129,8 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
       _taskDisplaySignatures
         ..removeWhere((id, _) => !ids.contains(id))
         ..addAll(signatures);
+      _selectedTaskIds.removeWhere((id) => !ids.contains(id));
+      if (_selectedTaskIds.isEmpty) _selectionMode = false;
       setState(() {
         _tasks = completed;
         _loadError = null;
@@ -395,35 +408,199 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
     );
   }
 
+  void _toggleSelectionMode() {
+    if (_deleting) return;
+    setState(() {
+      _selectionMode = !_selectionMode;
+      _selectedTaskIds.clear();
+    });
+  }
+
+  void _toggleResultSelection(StitchTask task) {
+    if (_deleting || task.phase != StitchPhase.completed || _isBusy(task)) {
+      return;
+    }
+    setState(() {
+      if (!_selectedTaskIds.add(task.id)) _selectedTaskIds.remove(task.id);
+    });
+  }
+
+  Future<void> _deleteSelectedResults() async {
+    final deleteResult = widget.onDeleteResult;
+    final selected = _tasks
+        .where((task) => _selectedTaskIds.contains(task.id))
+        .where((task) => task.phase == StitchPhase.completed)
+        .where((task) => !_isBusy(task))
+        .toList(growable: false);
+    if (deleteResult == null ||
+        selected.isEmpty ||
+        _deleting ||
+        _deletePromptOpen) {
+      return;
+    }
+
+    setState(() => _deletePromptOpen = true);
+    ResultDeletionChoice? choice;
+    try {
+      choice = await showResultDeletionConfirmation(
+        context,
+        count: selected.length,
+      );
+    } finally {
+      if (mounted) setState(() => _deletePromptOpen = false);
+    }
+    if (choice == null || !mounted) return;
+
+    setState(() {
+      _deleting = true;
+      _busyTasks.addAll(selected.map((task) => task.id));
+    });
+    final deletedIds = <String>[];
+    final cleanupFailures = <String>[];
+    final deletionErrors = <String>[];
+    try {
+      for (final task in selected) {
+        try {
+          final removal = await deleteResult(task, choice);
+          deletedIds.add(task.id);
+          for (final failure in removal.failures) {
+            cleanupFailures.add(
+              '${ResultLibraryService.resultName(task)}: $failure',
+            );
+          }
+        } on Object catch (error) {
+          deletionErrors.add(
+            '${ResultLibraryService.resultName(task)}: $error',
+          );
+        }
+      }
+
+      if (!mounted) return;
+      if (deletedIds.isNotEmpty) {
+        setState(() {
+          _selectedTaskIds.removeAll(deletedIds);
+          if (_selectedTaskIds.isEmpty) _selectionMode = false;
+        });
+      }
+      // A failed cleanup may already have committed its tombstone. Always
+      // reload after an attempted operation so the UI reflects repository state.
+      await _loadTasks();
+      if (!mounted) return;
+      _showDeletionSummary(
+        deletedCount: deletedIds.length,
+        cleanupFailures: cleanupFailures,
+        deletionErrors: deletionErrors,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _deleting = false;
+          _busyTasks.removeAll(selected.map((task) => task.id));
+        });
+      }
+    }
+  }
+
+  void _showDeletionSummary({
+    required int deletedCount,
+    required List<String> cleanupFailures,
+    required List<String> deletionErrors,
+  }) {
+    final strings = StitchLocalizations.of(context);
+    final parts = <String>[];
+    if (deletedCount > 0) {
+      parts.add('${strings.text('已删除结果数：')}$deletedCount');
+    }
+    if (cleanupFailures.isNotEmpty) {
+      parts.add('${strings.text('文件清理警告：')}${cleanupFailures.length}');
+    }
+    if (deletionErrors.isNotEmpty) {
+      parts.add('${strings.text('删除失败：')}${deletionErrors.length}');
+    }
+    final details = [
+      ...cleanupFailures,
+      ...deletionErrors,
+    ].take(2).map(_shortDeletionDetail).toList(growable: false);
+    final remaining =
+        cleanupFailures.length + deletionErrors.length - details.length;
+    final message = [
+      parts.join(' · '),
+      if (details.isNotEmpty) details.join('；'),
+      if (remaining > 0) '… +$remaining',
+    ].where((part) => part.isNotEmpty).join('：');
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text(message, maxLines: 3, overflow: TextOverflow.ellipsis),
+      ),
+    );
+  }
+
+  String _shortDeletionDetail(String detail) =>
+      detail.length <= 88 ? detail : '${detail.substring(0, 85)}…';
+
   Widget _resultCard(StitchTask task) {
     final strings = StitchLocalizations.of(context);
     final busy = _isBusy(task);
     final progress = _exportProgress[task.id];
     return Card(
       key: Key('result-card-${task.id}'),
+      color: _selectedTaskIds.contains(task.id)
+          ? Theme.of(context).colorScheme.secondaryContainer
+          : null,
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           SizedBox(
             height: 176,
-            child: InkWell(
-              key: Key('result-thumbnail-${task.id}'),
-              onTap: () => _openViewer(task),
-              child: FutureBuilder<File?>(
-                future: _thumbnailFor(task),
-                builder: (context, snapshot) {
-                  final file = snapshot.data;
-                  if (file == null) return _thumbnailPlaceholder(strings);
-                  return Image.file(
-                    file,
-                    cacheWidth: 480,
-                    fit: BoxFit.contain,
-                    errorBuilder: (context, error, stack) =>
-                        _thumbnailPlaceholder(strings),
-                  );
-                },
-              ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                InkWell(
+                  key: Key('result-thumbnail-${task.id}'),
+                  onTap: _selectionMode
+                      ? () => _toggleResultSelection(task)
+                      : () => _openViewer(task),
+                  child: FutureBuilder<File?>(
+                    future: _thumbnailFor(task),
+                    builder: (context, snapshot) {
+                      final file = snapshot.data;
+                      if (file == null) return _thumbnailPlaceholder(strings);
+                      return Image.file(
+                        file,
+                        cacheWidth: 480,
+                        fit: BoxFit.contain,
+                        errorBuilder: (context, error, stack) =>
+                            _thumbnailPlaceholder(strings),
+                      );
+                    },
+                  ),
+                ),
+                if (_selectionMode)
+                  Positioned(
+                    top: 8,
+                    right: 8,
+                    child: Material(
+                      color: Theme.of(context).colorScheme.surface,
+                      shape: const CircleBorder(),
+                      child: IconButton(
+                        key: Key('result-select-${task.id}'),
+                        tooltip: strings.text(
+                          _selectedTaskIds.contains(task.id) ? '取消选择' : '选择结果',
+                        ),
+                        onPressed: busy || task.phase != StitchPhase.completed
+                            ? null
+                            : () => _toggleResultSelection(task),
+                        icon: Icon(
+                          _selectedTaskIds.contains(task.id)
+                              ? Icons.check_box
+                              : Icons.check_box_outline_blank,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           ),
           Expanded(
@@ -433,7 +610,9 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   InkWell(
-                    onTap: () => _openViewer(task),
+                    onTap: _selectionMode
+                        ? () => _toggleResultSelection(task)
+                        : () => _openViewer(task),
                     child: Text(
                       ResultLibraryService.resultName(task),
                       maxLines: 2,
@@ -497,30 +676,41 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
                     ],
                   ),
                   if (busy) LinearProgressIndicator(value: progress),
-                  Wrap(
-                    spacing: 4,
-                    runSpacing: 2,
-                    children: [
-                      IconButton(
-                        key: Key('result-rename-${task.id}'),
-                        tooltip: strings.text('修改结果名称'),
-                        onPressed: busy ? null : () => _rename(task),
-                        icon: const Icon(Icons.edit_outlined),
-                      ),
-                      IconButton(
-                        key: Key('result-export-${task.id}'),
-                        tooltip: strings.text('导出到文件夹'),
-                        onPressed: busy ? null : () => _export(task),
-                        icon: const Icon(Icons.drive_file_move_outlined),
-                      ),
-                      IconButton(
-                        key: Key('result-view-${task.id}'),
-                        tooltip: strings.text('打开全景查看器'),
-                        onPressed: () => _openViewer(task),
-                        icon: const Icon(Icons.zoom_in),
-                      ),
-                    ],
-                  ),
+                  if (_selectionMode)
+                    CheckboxListTile(
+                      key: Key('result-select-checkbox-${task.id}'),
+                      contentPadding: EdgeInsets.zero,
+                      value: _selectedTaskIds.contains(task.id),
+                      onChanged: busy || task.phase != StitchPhase.completed
+                          ? null
+                          : (_) => _toggleResultSelection(task),
+                      title: Text(strings.text('选择结果')),
+                    )
+                  else
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 2,
+                      children: [
+                        IconButton(
+                          key: Key('result-rename-${task.id}'),
+                          tooltip: strings.text('修改结果名称'),
+                          onPressed: busy ? null : () => _rename(task),
+                          icon: const Icon(Icons.edit_outlined),
+                        ),
+                        IconButton(
+                          key: Key('result-export-${task.id}'),
+                          tooltip: strings.text('导出到文件夹'),
+                          onPressed: busy ? null : () => _export(task),
+                          icon: const Icon(Icons.drive_file_move_outlined),
+                        ),
+                        IconButton(
+                          key: Key('result-view-${task.id}'),
+                          tooltip: strings.text('打开全景查看器'),
+                          onPressed: () => _openViewer(task),
+                          icon: const Icon(Icons.zoom_in),
+                        ),
+                      ],
+                    ),
                 ],
               ),
             ),
@@ -590,28 +780,66 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
         : 3;
     return Scaffold(
       appBar: AppBar(
-        title: Text(strings.text('结果画廊')),
+        title: Text(
+          _selectionMode
+              ? '${strings.text('已选数量')}${_selectedTaskIds.length}${strings.text('项')}'
+              : strings.text('结果画廊'),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
         actions: [
-          PopupMenuButton<ResultGallerySort>(
-            key: const Key('result-gallery-sort'),
-            tooltip: strings.text('排序结果'),
-            initialValue: _sort,
-            onSelected: _savingSort ? null : _changeSort,
-            itemBuilder: (context) => [
-              for (final sort in ResultGallerySort.values)
-                PopupMenuItem(
-                  value: sort,
-                  child: Text(strings.text(_sortLabel(sort))),
-                ),
-            ],
-            icon: const Icon(Icons.sort),
-          ),
-          IconButton(
-            key: const Key('result-gallery-refresh'),
-            tooltip: strings.text('刷新结果'),
-            onPressed: _loading ? null : _loadTasks,
-            icon: const Icon(Icons.refresh),
-          ),
+          if (_selectionMode) ...[
+            IconButton(
+              key: const Key('result-delete-selected'),
+              tooltip: strings.text('删除所选'),
+              onPressed:
+                  _deleting || _deletePromptOpen || _selectedTaskIds.isEmpty
+                  ? null
+                  : _deleteSelectedResults,
+              color: Theme.of(context).colorScheme.error,
+              icon: _deleting
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.delete_outline),
+            ),
+            IconButton(
+              key: const Key('result-selection-cancel'),
+              tooltip: strings.text('取消选择'),
+              onPressed: _deleting ? null : _toggleSelectionMode,
+              icon: const Icon(Icons.close),
+            ),
+          ] else ...[
+            PopupMenuButton<ResultGallerySort>(
+              key: const Key('result-gallery-sort'),
+              tooltip: strings.text('排序结果'),
+              initialValue: _sort,
+              onSelected: _savingSort ? null : _changeSort,
+              itemBuilder: (context) => [
+                for (final sort in ResultGallerySort.values)
+                  PopupMenuItem(
+                    value: sort,
+                    child: Text(strings.text(_sortLabel(sort))),
+                  ),
+              ],
+              icon: const Icon(Icons.sort),
+            ),
+            IconButton(
+              key: const Key('result-gallery-refresh'),
+              tooltip: strings.text('刷新结果'),
+              onPressed: _loading || _deleting ? null : _loadTasks,
+              icon: const Icon(Icons.refresh),
+            ),
+            if (widget.onDeleteResult != null &&
+                sorted.any((task) => task.phase == StitchPhase.completed))
+              IconButton(
+                key: const Key('result-selection-start'),
+                tooltip: strings.text('选择结果'),
+                onPressed: _loading || _deleting ? null : _toggleSelectionMode,
+                icon: const Icon(Icons.checklist),
+              ),
+          ],
         ],
       ),
       body: _loading && _tasks.isEmpty

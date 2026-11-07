@@ -571,4 +571,49 @@ void main() {
     );
     expect(await File(task.exportPath!).exists(), isTrue);
   });
+
+  test(
+    'deleteResult passes the latest completed task to its remover',
+    () async {
+      final temp = await _tempDirectory('delete-result');
+      addTearDown(() => temp.delete(recursive: true));
+      final requested = await _seedFileTask(temp);
+      final latest = requested.copyWith(publishError: 'latest persisted state');
+      final repository = _MemoryRepository()..records[requested.id] = latest;
+      var removeCalled = false;
+
+      final removal = await ResultLibraryService(repository: repository)
+          .deleteResult(
+            requested,
+            remove: (task) async {
+              removeCalled = true;
+              expect(task.publishError, 'latest persisted state');
+              return const TaskRemovalResult(failures: ['reported retain']);
+            },
+          );
+
+      expect(removeCalled, isTrue);
+      expect(removal.failures, ['reported retain']);
+    },
+  );
+
+  test('deleteResult rejects interrupted native export handoff', () async {
+    final temp = await _tempDirectory('delete-handoff');
+    addTearDown(() => temp.delete(recursive: true));
+    final requested = await _seedFileTask(temp);
+    final pending = requested.copyWith(
+      phase: StitchPhase.interrupted,
+      stage: 'result-library-export',
+      exportCheckpointPath: p.join(temp.path, 'pending.png'),
+    );
+    final repository = _MemoryRepository()..records[requested.id] = pending;
+
+    await expectLater(
+      ResultLibraryService(repository: repository).deleteResult(
+        pending,
+        remove: (_) async => throw StateError('must not remove pending work'),
+      ),
+      throwsA(isA<ResultLibraryException>()),
+    );
+  });
 }

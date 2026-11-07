@@ -452,6 +452,214 @@ void main() {
     },
   );
 
+  test('split cleanup deletes only the selected file category', () async {
+    Future<Map<String, Object>> seed(String id) async {
+      final sourceDirectory = Directory(p.join(temporary.path, 'source-$id'))
+        ..createSync();
+      final original = File(p.join(sourceDirectory.path, 'original.jpg'))
+        ..writeAsBytesSync([1, 2, 3, 4]);
+      final taskDirectory = await repository.directoryFor(id);
+      final input = Directory(p.join(taskDirectory.path, 'input'))
+        ..createSync(recursive: true);
+      final copied = File(p.join(input.path, 'original.jpg'))
+        ..writeAsBytesSync(original.readAsBytesSync());
+      final output = Directory(p.join(taskDirectory.path, 'render'))
+        ..createSync(recursive: true);
+      final render = File(p.join(output.path, 'level-0.png'))
+        ..writeAsBytesSync([5, 6, 7]);
+      final usbCopy = Directory(p.join(taskDirectory.path, 'usb-copy'))
+        ..createSync();
+      File(p.join(usbCopy.path, 'temporary.bin')).writeAsBytesSync([8]);
+      final thumbnail = File(p.join(taskDirectory.path, 'camera-thumbnail.jpg'))
+        ..writeAsBytesSync([9]);
+      final importLock = File(p.join(taskDirectory.path, '.input-import.lock'))
+        ..writeAsStringSync('lock');
+      final exportDirectory = Directory(p.join(temporary.path, 'exports-$id'))
+        ..createSync();
+      final export = File(p.join(exportDirectory.path, 'private.png'))
+        ..writeAsBytesSync([10, 11, 12]);
+      final published = File(p.join(exportDirectory.path, 'published.png'))
+        ..writeAsBytesSync([13, 14, 15]);
+      final task = StitchTask(
+        id: id,
+        createdAt: DateTime.utc(2026, 11, 6),
+        sourceDirectory: sourceDirectory.path,
+        outputDirectory: output.path,
+        photos: [
+          ImportedPhoto(
+            originalName: 'original.jpg',
+            storedPath: copied.path,
+            sha256: sha256.convert(copied.readAsBytesSync()).toString(),
+            width: 4,
+            height: 3,
+            originalOrder: 0,
+          ),
+        ],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.completed,
+        exportPath: export.path,
+        exportFingerprint: await repository.fingerprintFile(export.path),
+        exportDirectory: exportDirectory.path,
+        publishedExportPath: published.path,
+      );
+      await repository.save(task);
+      return {
+        'task': task,
+        'original': original,
+        'copied': copied,
+        'render': render,
+        'export': export,
+        'published': published,
+        'thumbnail': thumbnail,
+        'importLock': importLock,
+      };
+    }
+
+    final inputsOnly = await seed('123470-acde01');
+    final inputResult = await repository.removeTaskRecordWithCleanup(
+      inputsOnly['task']! as StitchTask,
+      deleteOwnedFiles: false,
+      deleteInputFiles: true,
+      deleteOutputFiles: false,
+    );
+    expect(inputResult.failures, isEmpty);
+    expect(await (inputsOnly['original']! as File).exists(), isTrue);
+    expect(await (inputsOnly['copied']! as File).exists(), isFalse);
+    expect(await (inputsOnly['render']! as File).exists(), isTrue);
+    expect(await (inputsOnly['export']! as File).exists(), isTrue);
+    expect(await (inputsOnly['published']! as File).exists(), isTrue);
+    expect(await (inputsOnly['thumbnail']! as File).exists(), isFalse);
+    expect(await (inputsOnly['importLock']! as File).exists(), isFalse);
+
+    final outputsOnly = await seed('123471-acde02');
+    final outputResult = await repository.removeTaskRecordWithCleanup(
+      outputsOnly['task']! as StitchTask,
+      deleteOwnedFiles: false,
+      deleteInputFiles: false,
+      deleteOutputFiles: true,
+    );
+    expect(await (outputsOnly['original']! as File).exists(), isTrue);
+    expect(await (outputsOnly['copied']! as File).exists(), isTrue);
+    expect(await (outputsOnly['render']! as File).exists(), isFalse);
+    expect(await (outputsOnly['export']! as File).exists(), isFalse);
+    expect(await (outputsOnly['published']! as File).exists(), isTrue);
+    expect(await (outputsOnly['thumbnail']! as File).exists(), isTrue);
+    expect(await (outputsOnly['importLock']! as File).exists(), isTrue);
+    expect(outputResult.failures.join(' '), contains('已发布的外部副本已保留'));
+  });
+
+  test(
+    'input deletion retains a directory containing its output path',
+    () async {
+      const id = '123472-acde03';
+      final taskDirectory = await repository.directoryFor(id);
+      final input = Directory(p.join(taskDirectory.path, 'input'))
+        ..createSync(recursive: true);
+      final copied = File(p.join(input.path, 'copy.jpg'))
+        ..writeAsBytesSync([1, 2, 3]);
+      final nestedOutput = Directory(p.join(input.path, 'render'))
+        ..createSync();
+      final original = Directory(p.join(temporary.path, 'originals'))
+        ..createSync();
+      final task = StitchTask(
+        id: id,
+        createdAt: DateTime.utc(2026, 11, 6),
+        sourceDirectory: original.path,
+        outputDirectory: nestedOutput.path,
+        photos: [
+          ImportedPhoto(
+            originalName: 'copy.jpg',
+            storedPath: copied.path,
+            sha256: sha256.convert(copied.readAsBytesSync()).toString(),
+            width: 3,
+            height: 2,
+            originalOrder: 0,
+          ),
+        ],
+        grid: const GridOptions(),
+        horizontalFovDegrees: 45,
+        memoryBudgetMiB: 128,
+        workers: 1,
+        phase: StitchPhase.completed,
+      );
+      await repository.save(task);
+
+      final result = await repository.removeTaskRecordWithCleanup(
+        task,
+        deleteOwnedFiles: false,
+        deleteInputFiles: true,
+        deleteOutputFiles: false,
+      );
+
+      expect(await input.exists(), isTrue);
+      expect(await copied.exists(), isTrue);
+      expect(result.failures.join(' '), contains('其他类别或待验证'));
+    },
+  );
+
+  test(
+    'input ancillary paths cannot delete an aliased recorded export',
+    () async {
+      var index = 0;
+      for (final leaf in ['camera-thumbnail.jpg', '.input-import.lock']) {
+        final id = '12347${3 + index}-abcd0${4 + index++}';
+        final taskDirectory = await repository.directoryFor(id);
+        final input = Directory(p.join(taskDirectory.path, 'input'))
+          ..createSync(recursive: true);
+        final copied = File(p.join(input.path, 'original.jpg'))
+          ..writeAsBytesSync([1, 2, 3]);
+        final source = Directory(p.join(temporary.path, 'source-$id'))
+          ..createSync();
+        final candidate = File(p.join(taskDirectory.path, leaf))
+          ..writeAsBytesSync([4, 5, 6]);
+        final task = StitchTask(
+          id: id,
+          createdAt: DateTime.utc(2026, 11, 6),
+          sourceDirectory: source.path,
+          outputDirectory: p.join(taskDirectory.path, 'render'),
+          photos: [
+            ImportedPhoto(
+              originalName: 'original.jpg',
+              storedPath: copied.path,
+              sha256: sha256.convert(copied.readAsBytesSync()).toString(),
+              width: 3,
+              height: 2,
+              originalOrder: 0,
+            ),
+          ],
+          grid: const GridOptions(),
+          horizontalFovDegrees: 45,
+          memoryBudgetMiB: 128,
+          workers: 1,
+          phase: StitchPhase.completed,
+          exportPath: candidate.path,
+          exportFingerprint: await repository.fingerprintFile(candidate.path),
+          publishedExportPath: candidate.path,
+        );
+        await repository.save(task);
+
+        final result = await repository.removeTaskRecordWithCleanup(
+          task,
+          deleteOwnedFiles: false,
+          deleteInputFiles: true,
+          deleteOutputFiles: false,
+        );
+
+        expect(await candidate.exists(), isTrue);
+        expect(
+          result.failures.any(
+            (failure) =>
+                failure.contains('任务缩略图') || failure.contains('input导入锁路径'),
+          ),
+          isTrue,
+        );
+      }
+    },
+  );
+
   test('new-run clone preserves local texture warp preference', () async {
     final source = Directory('${temporary.path}/source')..createSync();
     final sourceImage = File('${source.path}/image.jpg')

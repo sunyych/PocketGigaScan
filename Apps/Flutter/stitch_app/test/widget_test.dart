@@ -247,6 +247,35 @@ class _MemoryTaskRepository extends TaskRepository {
   }
 }
 
+class _DeletableWidgetTaskRepository extends _MemoryTaskRepository {
+  final Set<String> tombstones = {};
+  bool? lastDeleteInputFiles;
+  bool? lastDeleteOutputFiles;
+
+  @override
+  Future<bool> isRemoved(String id) async => tombstones.contains(id);
+
+  @override
+  Future<void> removeTaskRecord(String id) async {
+    tombstones.add(id);
+    records.remove(id);
+  }
+
+  @override
+  Future<TaskRemovalResult> removeTaskRecordWithCleanup(
+    StitchTask task, {
+    required bool deleteOwnedFiles,
+    bool? deleteInputFiles,
+    bool? deleteOutputFiles,
+  }) async {
+    lastDeleteInputFiles = deleteInputFiles;
+    lastDeleteOutputFiles = deleteOutputFiles;
+    tombstones.add(task.id);
+    records.remove(task.id);
+    return const TaskRemovalResult();
+  }
+}
+
 class _WidgetSettingsRepository extends SettingsRepository {
   AppSettings saved = const AppSettings();
 
@@ -353,6 +382,74 @@ void main() {
       expect(tester.takeException(), isNull);
     });
   }
+
+  testWidgets('result gallery confirms deletion with default file choices', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const temporaryPath = r'C:\gallery-result-delete-fixture';
+    final task = StitchTask(
+      id: 'gallery-delete-task',
+      createdAt: DateTime.utc(2026),
+      sourceDirectory: '$temporaryPath/input',
+      outputDirectory: '$temporaryPath/render',
+      photos: const [],
+      grid: const GridOptions(),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 512,
+      workers: 2,
+      phase: StitchPhase.completed,
+      stage: 'done',
+      exportPath: '$temporaryPath/exports/panorama.png',
+    );
+    final repository = _DeletableWidgetTaskRepository()
+      ..records[task.id] = task;
+    final api = _WidgetJobApi();
+    final controller = EmptyBatchQueueController(
+      api: api,
+      taskRepository: repository,
+    );
+    addTearDown(controller.dispose);
+    await tester.pumpWidget(
+      ChineseTestApp(
+        home: StitchHomePage(
+          showModeSelection: true,
+          jobApi: api,
+          repository: repository,
+          batchQueueController: controller,
+          foregroundWorkLock: _TestForegroundLock(),
+          mobileOverride: false,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('selection-results')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(Key('result-card-${task.id}')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('result-selection-start')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(Key('result-select-${task.id}')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('result-delete-selected')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('result-delete-confirmation')), findsOneWidget);
+    expect(repository.lastDeleteInputFiles, isNull);
+    expect(repository.lastDeleteOutputFiles, isNull);
+
+    await tester.tap(find.byKey(const Key('result-delete-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repository.tombstones, contains(task.id));
+    expect(await repository.loadById(task.id), isNull);
+    expect(repository.lastDeleteInputFiles, isTrue);
+    expect(repository.lastDeleteOutputFiles, isTrue);
+    expect(find.byKey(Key('result-card-${task.id}')), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'mode navigation opens and returns from the existing batch task',

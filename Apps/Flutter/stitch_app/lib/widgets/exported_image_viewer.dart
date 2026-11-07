@@ -14,8 +14,10 @@ import '../models/export_fingerprint.dart';
 import '../services/mobile_storage_service.dart';
 import '../services/output_source_locator.dart';
 import '../services/task_record_service.dart';
+import '../services/task_repository.dart';
 import '../l10n/localized_text.dart';
 import '../l10n/stitch_localizations.dart';
+import 'result_deletion_dialog.dart';
 
 /// Shows the render pyramid associated with a completed exported image.
 ///
@@ -34,6 +36,7 @@ class ExportedImageViewer extends StatefulWidget {
     this.mobileStorageService,
     this.exportMimeType,
     this.traceRecord,
+    this.onDeleteResult,
   });
 
   final String exportFilePath;
@@ -44,6 +47,8 @@ class ExportedImageViewer extends StatefulWidget {
   final MobileStorageService? mobileStorageService;
   final String? exportMimeType;
   final TaskRecordSnapshot? traceRecord;
+  final Future<TaskRemovalResult> Function(ResultDeletionChoice choice)?
+  onDeleteResult;
 
   Future<void> _saveExport(BuildContext context) async {
     final service = mobileStorageService;
@@ -106,6 +111,8 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
   double _scale = 1;
   int? _level;
   StreamSubscription<FileSystemEvent>? _fileWatch;
+  bool _deletePromptOpen = false;
+  bool _deleteInFlight = false;
 
   @override
   void initState() {
@@ -729,6 +736,67 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
     }
   }
 
+  Future<void> _deleteResult() async {
+    final deleteResult = widget.onDeleteResult;
+    if (deleteResult == null || _deletePromptOpen || _deleteInFlight) return;
+    final viewerRoute = ModalRoute.of(context);
+    setState(() => _deletePromptOpen = true);
+    ResultDeletionChoice? choice;
+    try {
+      choice = await showResultDeletionConfirmation(context, count: 1);
+    } finally {
+      if (mounted) setState(() => _deletePromptOpen = false);
+    }
+    if (choice == null || !mounted) return;
+
+    setState(() => _deleteInFlight = true);
+    try {
+      final removal = await deleteResult(choice);
+      if (!mounted) return;
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 8),
+          content: Text(_deletionSummary(removal)),
+        ),
+      );
+      final navigator = viewerRoute?.navigator;
+      if (viewerRoute?.isCurrent == true && navigator != null) {
+        navigator.removeRoute(viewerRoute!);
+      }
+    } on Object catch (error) {
+      if (mounted) _showDeletionError(error);
+    } finally {
+      if (mounted) setState(() => _deleteInFlight = false);
+    }
+  }
+
+  String _deletionSummary(TaskRemovalResult removal) {
+    final strings = StitchLocalizations.of(context);
+    if (removal.cleanupComplete) {
+      return '${strings.text('已删除结果数：')}1';
+    }
+    final details = removal.failures
+        .take(2)
+        .map(
+          (failure) =>
+              failure.length <= 76 ? failure : '${failure.substring(0, 73)}…',
+        )
+        .join('；');
+    final extra = removal.failures.length > 2
+        ? '… +${removal.failures.length - 2}'
+        : '';
+    return '${strings.text('结果记录已删除；部分文件清理未完成。')} '
+        '${strings.text('文件清理警告：')}${removal.failures.length} $details $extra';
+  }
+
+  void _showDeletionError(Object error) {
+    final strings = StitchLocalizations.of(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('${strings.text('删除失败：')}$error', maxLines: 3)),
+    );
+  }
+
   bool _isWithin(String root, String candidate) {
     final normalizedRoot = p.normalize(p.absolute(root));
     final normalizedCandidate = p.normalize(p.absolute(candidate));
@@ -992,106 +1060,138 @@ class _ExportedImageViewerState extends State<ExportedImageViewer>
   @override
   Widget build(BuildContext context) {
     final title = p.basename(widget.exportFilePath);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(title, translate: false, overflow: TextOverflow.ellipsis),
-        actions: [
-          if (widget.mobileStorageService != null &&
-              widget.exportMimeType != null) ...[
-            IconButton(
-              tooltip: StitchLocalizations.of(context).text('保存整图'),
-              onPressed: () => widget._saveExport(context),
-              icon: const Icon(Icons.download),
+    return PopScope(
+      canPop: !_deleteInFlight,
+      child: AbsorbPointer(
+        absorbing: _deleteInFlight,
+        child: Scaffold(
+          appBar: AppBar(
+            title: Text(
+              title,
+              translate: false,
+              overflow: TextOverflow.ellipsis,
             ),
-            IconButton(
-              tooltip: StitchLocalizations.of(context).text('分享整图'),
-              onPressed: () => widget._shareExport(context),
-              icon: const Icon(Icons.ios_share),
-            ),
-          ],
-          IconButton(
-            tooltip: StitchLocalizations.of(context).text('适合窗口'),
-            onPressed: _pyramid == null ? null : _fitToWindow,
-            icon: const Icon(Icons.fit_screen),
-          ),
-          TextButton(
-            onPressed: _pyramid == null
-                ? null
-                : () => _setScale(
-                    1 / MediaQuery.devicePixelRatioOf(context),
-                    center: true,
-                  ),
-            child: const Text('100%'),
-          ),
-          IconButton(
-            tooltip: StitchLocalizations.of(
-              context,
-            ).text(_showSourceInformation ? '收起输出信息' : '查看输出信息'),
-            onPressed: () => setState(() {
-              _showSourceInformation = !_showSourceInformation;
-            }),
-            icon: Icon(
-              _showSourceInformation ? Icons.info : Icons.info_outline,
-            ),
-          ),
-          if (widget.traceRecord != null)
-            IconButton(
-              key: const ValueKey('output-source-inspect-toggle'),
-              tooltip: StitchLocalizations.of(
-                context,
-              ).text(_inspectMode ? '关闭来源检查' : '检查像素来源'),
-              onPressed: _pyramid == null
-                  ? null
-                  : () => setState(() {
-                      _inspectMode = !_inspectMode;
-                      _pixelTrace = null;
-                    }),
-              icon: Icon(
-                _inspectMode ? Icons.location_searching : Icons.travel_explore,
+            actions: [
+              if (widget.onDeleteResult != null)
+                IconButton(
+                  key: const ValueKey('viewer-delete-result'),
+                  tooltip: StitchLocalizations.of(context).text('删除结果'),
+                  onPressed: _deleteInFlight || _deletePromptOpen
+                      ? null
+                      : _deleteResult,
+                  color: Theme.of(context).colorScheme.error,
+                  icon: _deleteInFlight
+                      ? const SizedBox.square(
+                          dimension: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.delete_outline),
+                ),
+              if (widget.mobileStorageService != null &&
+                  widget.exportMimeType != null) ...[
+                IconButton(
+                  tooltip: StitchLocalizations.of(context).text('保存整图'),
+                  onPressed: () => widget._saveExport(context),
+                  icon: const Icon(Icons.download),
+                ),
+                IconButton(
+                  tooltip: StitchLocalizations.of(context).text('分享整图'),
+                  onPressed: () => widget._shareExport(context),
+                  icon: const Icon(Icons.ios_share),
+                ),
+              ],
+              IconButton(
+                tooltip: StitchLocalizations.of(context).text('适合窗口'),
+                onPressed: _pyramid == null ? null : _fitToWindow,
+                icon: const Icon(Icons.fit_screen),
               ),
-            ),
-        ],
-      ),
-      body: Column(
-        children: [
-          if (_showSourceInformation) _sourceInformation(),
-          if (_inspectMode) _traceInformation(),
-          Expanded(child: _viewerBody()),
-          if (_pyramid != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: LayoutBuilder(
-                builder: (context, constraints) {
-                  final scale = Text(
-                    '缩放 ${(_scale * MediaQuery.devicePixelRatioOf(context) * 100).round()}%',
-                  );
-                  final dimensions = Text(
-                    '${_pyramid!.width} × ${_pyramid!.height} px',
-                  );
-                  final level = _level == null ? null : Text('预览层级 $_level');
-                  if (constraints.maxWidth < 600) {
-                    return SizedBox(
-                      width: constraints.maxWidth,
-                      child: Wrap(
-                        spacing: 12,
-                        runSpacing: 4,
-                        children: [scale, dimensions, ?level],
+              TextButton(
+                onPressed: _pyramid == null
+                    ? null
+                    : () => _setScale(
+                        1 / MediaQuery.devicePixelRatioOf(context),
+                        center: true,
                       ),
-                    );
-                  }
-                  return Row(
-                    children: [
-                      scale,
-                      const SizedBox(width: 12),
-                      dimensions,
-                      const Spacer(),
-                      ?level,
-                    ],
-                  );
-                },
+                child: const Text('100%'),
               ),
-            ),
-        ],
+              IconButton(
+                tooltip: StitchLocalizations.of(
+                  context,
+                ).text(_showSourceInformation ? '收起输出信息' : '查看输出信息'),
+                onPressed: () => setState(() {
+                  _showSourceInformation = !_showSourceInformation;
+                }),
+                icon: Icon(
+                  _showSourceInformation ? Icons.info : Icons.info_outline,
+                ),
+              ),
+              if (widget.traceRecord != null)
+                IconButton(
+                  key: const ValueKey('output-source-inspect-toggle'),
+                  tooltip: StitchLocalizations.of(
+                    context,
+                  ).text(_inspectMode ? '关闭来源检查' : '检查像素来源'),
+                  onPressed: _pyramid == null
+                      ? null
+                      : () => setState(() {
+                          _inspectMode = !_inspectMode;
+                          _pixelTrace = null;
+                        }),
+                  icon: Icon(
+                    _inspectMode
+                        ? Icons.location_searching
+                        : Icons.travel_explore,
+                  ),
+                ),
+            ],
+          ),
+          body: Column(
+            children: [
+              if (_showSourceInformation) _sourceInformation(),
+              if (_inspectMode) _traceInformation(),
+              Expanded(child: _viewerBody()),
+              if (_pyramid != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final scale = Text(
+                        '缩放 ${(_scale * MediaQuery.devicePixelRatioOf(context) * 100).round()}%',
+                      );
+                      final dimensions = Text(
+                        '${_pyramid!.width} × ${_pyramid!.height} px',
+                      );
+                      final level = _level == null
+                          ? null
+                          : Text('预览层级 $_level');
+                      if (constraints.maxWidth < 600) {
+                        return SizedBox(
+                          width: constraints.maxWidth,
+                          child: Wrap(
+                            spacing: 12,
+                            runSpacing: 4,
+                            children: [scale, dimensions, ?level],
+                          ),
+                        );
+                      }
+                      return Row(
+                        children: [
+                          scale,
+                          const SizedBox(width: 12),
+                          dimensions,
+                          const Spacer(),
+                          ?level,
+                        ],
+                      );
+                    },
+                  ),
+                ),
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -472,6 +472,7 @@ class BatchQueueController extends ChangeNotifier {
 
   List<BatchQueue> get queues => List.unmodifiable(_queues);
   bool get loading => _loading || _importing;
+  TaskRepository get taskRepository => _taskRepository;
 
   String? _configuredExportDestination(AppSettings? settings) =>
       _defaultExportDestination ??
@@ -2504,6 +2505,8 @@ class BatchQueueController extends ChangeNotifier {
   Future<TaskRemovalResult> removeTask(
     String taskId, {
     bool deleteOwnedFiles = false,
+    bool? deleteInputFiles,
+    bool? deleteOutputFiles,
   }) async {
     if (_loading || _importing) {
       throw StateError('队列正在恢复或导入，请稍后再删除任务');
@@ -2513,14 +2516,22 @@ class BatchQueueController extends ChangeNotifier {
         for (final item in queue.items)
           if (item.taskId == taskId) (queue, item),
     ];
+    final previouslyInFlight = <String>{};
     for (final ref in refs) {
       _bumpGeneration(ref.$2.id);
       _deletingTaskIds.add(ref.$2.id);
+      if (_inFlight.contains(ref.$2.id)) {
+        previouslyInFlight.add(ref.$2.id);
+      }
       _inFlight.add(ref.$2.id);
     }
-    // Drain already-enqueued task writes before asking the repository to tombstone.
-    await _taskWriteTail;
+    var destinationOperationEntered = false;
+    var removalCommitted = false;
     try {
+      await _enterDestinationOperation();
+      destinationOperationEntered = true;
+      // Drain already-enqueued task writes before asking the repository to tombstone.
+      await _taskWriteTail;
       var task = await _taskRepository.loadById(taskId);
       task ??= _taskCache[taskId];
       if (task == null) throw StateError('找不到本地任务记录');
@@ -2541,12 +2552,31 @@ class BatchQueueController extends ChangeNotifier {
       } else if (_isActivePhase(task.phase)) {
         throw StateError('任务缺少原生作业编号；无法确认已停止');
       }
+      final splitCleanupRequested =
+          deleteInputFiles != null || deleteOutputFiles != null;
+      final latest = splitCleanupRequested
+          ? await _taskRepository.loadById(taskId)
+          : null;
+      if (latest != null &&
+          (TaskRecordService.identityForTask(latest) !=
+                  TaskRecordService.identityForTask(task) ||
+              latest.nativeJobId != task.nativeJobId)) {
+        throw StateError('任务在删除确认期间已变化；请刷新后重试');
+      }
+      if (splitCleanupRequested &&
+          latest == null &&
+          !await _taskRepository.isRemoved(taskId)) {
+        throw StateError('任务记录无法重新验证；请刷新后重试');
+      }
+      task = latest ?? task;
       // Commit the task tombstone before dropping durable queue ownership. If
       // storage denies the metadata write, leave the queue reference available
       // for an explicit retry and keep the task visible in the local cache.
       final removal = await _taskRepository.removeTaskRecordWithCleanup(
         task,
         deleteOwnedFiles: deleteOwnedFiles,
+        deleteInputFiles: deleteInputFiles,
+        deleteOutputFiles: deleteOutputFiles,
       );
       for (final ref in refs) {
         while (true) {
@@ -2575,12 +2605,20 @@ class BatchQueueController extends ChangeNotifier {
       for (final ref in refs) {
         _inFlight.remove(ref.$2.id);
       }
+      removalCommitted = true;
       notifyListeners();
       return removal;
     } finally {
       for (final ref in refs) {
         _deletingTaskIds.remove(ref.$2.id);
+        final remainsQueued = _find(ref.$1.id, ref.$2.id) != null;
+        if (removalCommitted ||
+            !remainsQueued ||
+            !previouslyInFlight.contains(ref.$2.id)) {
+          _inFlight.remove(ref.$2.id);
+        }
       }
+      if (destinationOperationEntered) _leaveDestinationOperation();
     }
   }
 

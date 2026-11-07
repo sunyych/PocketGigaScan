@@ -17,7 +17,10 @@ import 'services/power_service.dart';
 import 'models/stitch_task.dart';
 import 'dwarf_device_page.dart';
 import 'services/dwarf_download_service.dart';
+import 'services/result_library_service.dart';
+import 'services/task_repository.dart';
 import 'widgets/exported_image_viewer.dart';
+import 'widgets/result_deletion_dialog.dart';
 import 'l10n/localized_text.dart';
 import 'l10n/stitch_localizations.dart';
 
@@ -37,6 +40,7 @@ class BatchQueuePage extends StatefulWidget {
     this.onDeviceTaskReady,
     this.autoUsbDiscoveryOverride,
     this.outputDirectoryPickerOverride,
+    this.onDeleteResult,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -51,6 +55,11 @@ class BatchQueuePage extends StatefulWidget {
   final Future<void> Function(String taskId)? onDeviceTaskReady;
   final bool? autoUsbDiscoveryOverride;
   final Future<String?> Function()? outputDirectoryPickerOverride;
+  final Future<TaskRemovalResult> Function(
+    StitchTask task,
+    ResultDeletionChoice choice,
+  )?
+  onDeleteResult;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -823,6 +832,9 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
           legacyTaskBindingVerified: nativeVerified,
           traceRecord: traceRecord,
           mobileStorageService: _mobile ? _storage : null,
+          onDeleteResult: (choice) =>
+              widget.onDeleteResult?.call(task, choice) ??
+              _deleteCompletedResult(task, choice),
           exportMimeType: switch (task.exportFormat) {
             ExportFormat.png => 'image/png',
             ExportFormat.tiff => 'image/tiff',
@@ -830,6 +842,24 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
             ExportFormat.jpegXl => 'image/jxl',
           },
         ),
+      ),
+    );
+  }
+
+  Future<TaskRemovalResult> _deleteCompletedResult(
+    StitchTask task,
+    ResultDeletionChoice choice,
+  ) {
+    return ResultLibraryService(
+      repository: _controller.taskRepository,
+      api: widget.api,
+      isTaskBusy: _controller.isResultTaskBusy,
+    ).deleteResult(
+      task,
+      remove: (latest) => _controller.removeTask(
+        latest.id,
+        deleteInputFiles: !choice.keepInputs,
+        deleteOutputFiles: !choice.keepOutputs,
       ),
     );
   }

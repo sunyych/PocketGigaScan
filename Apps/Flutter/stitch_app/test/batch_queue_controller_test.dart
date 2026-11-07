@@ -43,6 +43,9 @@ class _MemoryTasks extends TaskRepository {
   final Map<String, StitchTask> values = {};
   final Set<String> removed = {};
   int duplicateCount = 0;
+  bool? lastDeleteOwnedFiles;
+  bool? lastDeleteInputFiles;
+  bool? lastDeleteOutputFiles;
 
   @override
   Future<Directory> root() async {
@@ -70,6 +73,24 @@ class _MemoryTasks extends TaskRepository {
     await super.removeTaskRecord(id);
     removed.add(id);
     values.remove(id);
+  }
+
+  @override
+  Future<TaskRemovalResult> removeTaskRecordWithCleanup(
+    StitchTask task, {
+    required bool deleteOwnedFiles,
+    bool? deleteInputFiles,
+    bool? deleteOutputFiles,
+  }) async {
+    lastDeleteOwnedFiles = deleteOwnedFiles;
+    lastDeleteInputFiles = deleteInputFiles;
+    lastDeleteOutputFiles = deleteOutputFiles;
+    return super.removeTaskRecordWithCleanup(
+      task,
+      deleteOwnedFiles: deleteOwnedFiles,
+      deleteInputFiles: deleteInputFiles,
+      deleteOutputFiles: deleteOutputFiles,
+    );
   }
 
   @override
@@ -884,6 +905,43 @@ void main() {
       expect(api.jobs, hasLength(1));
     },
   );
+
+  test('removeTask forwards split cleanup choices to its repository', () async {
+    const taskId = '901-abcd01';
+    final taskDirectory = Directory(
+      '${tasks.taskRoot.path}${Platform.pathSeparator}$taskId',
+    );
+    final render = Directory(
+      '${taskDirectory.path}${Platform.pathSeparator}render',
+    )..createSync(recursive: true);
+    final task = StitchTask(
+      id: taskId,
+      createdAt: currentTime,
+      sourceDirectory: parent.path,
+      outputDirectory: render.path,
+      photos: const [],
+      grid: const GridOptions(),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 128,
+      workers: 1,
+      phase: StitchPhase.completed,
+    );
+    await tasks.save(task);
+
+    expect(identical(controller.taskRepository, tasks), isTrue);
+    await controller.removeTask(
+      taskId,
+      deleteOwnedFiles: false,
+      deleteInputFiles: true,
+      deleteOutputFiles: false,
+    );
+
+    expect(tasks.lastDeleteOwnedFiles, isFalse);
+    expect(tasks.lastDeleteInputFiles, isTrue);
+    expect(tasks.lastDeleteOutputFiles, isFalse);
+    expect(tasks.removed, contains(taskId));
+    expect(await render.exists(), isTrue);
+  });
 
   test('failed native stop leaves task and queue item intact', () async {
     await _makeFolder(parent, 'keep-me', 4);
