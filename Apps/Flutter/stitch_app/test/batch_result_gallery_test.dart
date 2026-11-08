@@ -18,6 +18,7 @@ import 'package:stitch_app/services/result_library_service.dart';
 import 'package:stitch_app/services/settings_controller.dart';
 import 'package:stitch_app/services/settings_repository.dart';
 import 'package:stitch_app/services/task_repository.dart';
+import 'package:stitch_app/services/task_result_provenance.dart';
 import 'package:stitch_app/widgets/result_deletion_dialog.dart';
 
 class _GalleryApi implements JobApi {
@@ -130,11 +131,16 @@ class _OutputQueueController extends BatchQueueController {
   String? destination;
   Object? destinationError;
   int setDestinationCalls = 0;
+  List<BatchQueue> queueList = const [];
+  final Map<String, StitchTask> tasksById = {};
 
   @override
-  List<BatchQueue> get queues => const [];
+  List<BatchQueue> get queues => queueList;
   @override
   bool get loading => false;
+  @override
+  Future<StitchTask?> taskForItem(BatchQueueItem item) async =>
+      item.taskId == null ? null : tasksById[item.taskId];
   @override
   Future<void> setExportDestination(String directory) async {
     setDestinationCalls++;
@@ -150,11 +156,12 @@ StitchTask _task(
   StitchPhase phase = StitchPhase.completed,
   String stage = 'ready',
   String? exportCheckpointPath,
+  String? outputDirectory,
 }) => StitchTask(
   id: id,
   createdAt: createdAt,
   sourceDirectory: '/source/$name',
-  outputDirectory: '/tasks/$id/output',
+  outputDirectory: outputDirectory ?? '/tasks/$id/output',
   photos: const [],
   grid: const GridOptions(),
   horizontalFovDegrees: 90,
@@ -192,6 +199,7 @@ ResultGalleryPage _gallery({
     ResultDeletionChoice choice,
   )?
   onDeleteResult,
+  Future<TaskResultProvenance> Function(StitchTask task)? provenanceLoader,
 }) => ResultGalleryPage(
   repository: repository,
   service: service,
@@ -205,6 +213,7 @@ ResultGalleryPage _gallery({
   onTaskUpdated: onTaskUpdated ?? (_) async {},
   onOpenViewer: (_) async {},
   onDeleteResult: onDeleteResult,
+  provenanceLoader: provenanceLoader,
 );
 
 void main() {
@@ -235,6 +244,92 @@ void main() {
     expect(find.byKey(const Key('result-card-batch-done')), findsOneWidget);
     expect(find.byKey(const Key('result-card-running')), findsNothing);
   });
+
+  testWidgets(
+    'gallery labels normal, forced-grid, and legacy unknown provenance',
+    (tester) async {
+      final normal = TaskResultProvenance.fromReport({
+        'geometryModel': 'visual-sift-ransac-inlier-rays-wahba-global-rotation',
+        'placementMode': 'grid-assisted',
+        'qualityStatus': 'passed-measured-checks',
+        'completeCorrespondenceEvidence': true,
+        'visualTileCount': 4,
+        'gridEstimatedTileCount': 0,
+        'forcedGridTileCount': 0,
+        'totalTileCount': 4,
+      });
+      final forced = TaskResultProvenance.fromReport({
+        'geometryModel': 'nominal-fov-grid',
+        'nominalGridOnlyNeedsVisualReview': true,
+        'qualityStatus': 'needs-visual-review',
+        'visualTileCount': 0,
+        'gridEstimatedTileCount': 4,
+        'forcedGridTileCount': 4,
+        'totalTileCount': 4,
+      }, isAutomaticGridRetry: true);
+
+      final repository = _MemoryTaskRepository([
+        _task('normal-provenance', 'Normal result', DateTime.utc(2026, 1, 1)),
+        _task(
+          'forced-provenance',
+          'Retry result',
+          DateTime.utc(2026, 1, 2),
+        ).copyWith(automaticGridRetry: true),
+        _task('unknown-provenance', 'Legacy result', DateTime.utc(2026, 1, 3)),
+      ]);
+      final revision = ValueNotifier<int>(0);
+      addTearDown(revision.dispose);
+      await tester.pumpWidget(
+        _app(
+          _gallery(
+            repository: repository,
+            service: _GalleryService(repository),
+            revision: revision,
+            provenanceLoader: (task) async => switch (task.id) {
+              'normal-provenance' => normal,
+              'forced-provenance' => forced,
+              _ => TaskResultProvenance.unknown,
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      for (final id in [
+        'normal-provenance',
+        'forced-provenance',
+        'unknown-provenance',
+      ]) {
+        await tester.ensureVisible(find.byKey(Key('result-card-$id')));
+        await tester.pumpAndSettle();
+      }
+
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('result-card-normal-provenance')),
+          matching: find.text('Regular stitch · visual measurements'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('result-card-forced-provenance')),
+          matching: find.text('Forced grid stitch · review recommended'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('result-auto-grid-retry-forced-provenance')),
+        findsOneWidget,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('result-card-unknown-provenance')),
+          matching: find.text('Result source unknown'),
+        ),
+        findsOneWidget,
+      );
+    },
+  );
 
   testWidgets('empty gallery explains where single and batch results appear', (
     tester,
@@ -695,5 +790,62 @@ void main() {
 
     expect(deleteCalls, 0);
     expect(find.byKey(const Key('result-card-keep-me')), findsOneWidget);
+  });
+
+  testWidgets('terminal batch shows outcome counts and results link', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1000, 1200);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final retryItem = BatchQueueItem(
+      id: 'retry-item',
+      name: 'Retry result',
+      sourceDirectory: '/source/retry',
+      state: BatchItemState.completed,
+    );
+    final failedItem = BatchQueueItem(
+      id: 'failed-item',
+      name: 'Failed result',
+      sourceDirectory: '/source/failed',
+      state: BatchItemState.failed,
+    );
+    final controller = _OutputQueueController(_GalleryApi())
+      ..queueList = [
+        BatchQueue(
+          id: 'terminal-queue',
+          createdAt: DateTime.utc(2026),
+          parentDirectory: '/source',
+          outputDirectory: '/output',
+          items: [retryItem, failedItem],
+          started: true,
+        ),
+      ];
+    addTearDown(controller.dispose);
+    var openedResults = 0;
+    await tester.pumpWidget(
+      _app(
+        BatchQueuePage(
+          api: _GalleryApi(),
+          controller: controller,
+          mobileOverride: false,
+          autoUsbDiscoveryOverride: false,
+          onOpenResults: () => openedResults++,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('batch-queue-outcome-terminal-queue')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Stitches completed: 1'), findsOneWidget);
+    expect(find.textContaining('Failed: 1'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('batch-view-results-terminal-queue')),
+    );
+    expect(openedResults, 1);
   });
 }

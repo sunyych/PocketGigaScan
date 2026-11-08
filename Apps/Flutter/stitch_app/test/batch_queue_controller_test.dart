@@ -218,6 +218,7 @@ class _FakeApi implements JobApi {
   final int memory;
   final int slots;
   final Map<String, _Job> jobs = {};
+  final List<Map<String, Object?>> requests = [];
   int starts = 0;
   int exports = 0;
   int maxActive = 0;
@@ -274,6 +275,7 @@ class _FakeApi implements JobApi {
     required int workers,
   }) async {
     starts++;
+    requests.add(request);
     final tiles = request['tiles']! as List<Object?>;
     if (workers > tiles.length) throw StateError('workers exceed tile count');
     if (active >= slots ||
@@ -608,6 +610,147 @@ void main() {
       );
     },
   );
+
+  test(
+    'registration failure gets one isolated durable nominal-grid retry',
+    () async {
+      await _makeFolder(parent, 'retry-me', 4);
+      await controller.addParent(parent.path);
+      final queue = controller.queues.single;
+      final item = queue.items.single;
+      await controller.setSettings(
+        queueId: queue.id,
+        itemId: item.id,
+        rows: 2,
+        columns: 2,
+        horizontalFovDegrees: 45,
+      );
+      await controller.startQueue(queue.id);
+      final originalJob = api.jobs.values.single;
+      final originalTaskId = item.taskId!;
+      originalJob
+        ..state = 'failed'
+        ..stageOverride = 'registration-failed'
+        ..error = {
+          'code': 'OVERLAP_ESTIMATION_FAILED',
+          'message': 'fixture overlap failure',
+        };
+
+      await controller.tick();
+
+      final retriedItem = controller.queues.single.items.single;
+      expect(retriedItem.taskId, isNot(originalTaskId));
+      expect(retriedItem.state, BatchItemState.running);
+      expect(tasks.values[originalTaskId]!.automaticGridRetryAttempted, isTrue);
+      expect(
+        StitchTask.fromJson(
+          tasks.values[originalTaskId]!.toJson(),
+        ).automaticGridRetryAttempted,
+        isTrue,
+      );
+      final retryTask = tasks.values[retriedItem.taskId]!;
+      expect(retryTask.automaticGridRetry, isTrue);
+      expect(retryTask.automaticGridRetryAttempted, isTrue);
+      expect(
+        StitchTask.fromJson(retryTask.toJson()).automaticGridRetry,
+        isTrue,
+      );
+      expect(
+        retryTask.outputDirectory,
+        isNot(tasks.values[originalTaskId]!.outputDirectory),
+      );
+      expect(
+        retryTask.exportDirectory,
+        queue.exportDestination ?? queue.outputDirectory,
+      );
+      expect(api.starts, 2);
+      final retryRequest = api.requests.last;
+      expect(retryRequest['allowNominalGridFallback'], isTrue);
+      expect(retryRequest['autoGridOverlap'], isFalse);
+      expect(retryRequest['refineGridNeighbors'], isFalse);
+      expect(retryRequest['localTextureWarp'], isFalse);
+      expect(retryRequest['gridHorizontalOverlap'], 0.3);
+      expect(retryRequest['gridVerticalOverlap'], 0.3);
+      final retryTiles = retryRequest['tiles']! as List<Map<String, Object?>>;
+      expect(retryTiles, hasLength(4));
+      for (final tile in retryTiles) {
+        expect(tile['forceGrid'], isTrue);
+        expect(tile.containsKey('placementConstraint'), isFalse);
+      }
+
+      final retryJob = api.jobs.values.last;
+      retryJob
+        ..state = 'failed'
+        ..stageOverride = 'registration-failed'
+        ..error = {
+          'code': 'REGISTRATION_FAILED',
+          'message': 'second registration failure',
+        };
+      await controller.tick();
+      expect(tasks.duplicateCount, 1);
+      expect(controller.queues.single.items.single.taskId, retryTask.id);
+      expect(
+        controller.queues.single.items.single.state,
+        BatchItemState.failed,
+      );
+
+      // Simulate a crash after saving the original attempt guard but before
+      // changing the queue pointer. Recovery must not create another retry.
+      await queues.save(
+        controller.queues.single.copyWith(
+          items: [
+            retriedItem.copyWith(
+              taskId: originalTaskId,
+              state: BatchItemState.running,
+              pauseRequested: false,
+            ),
+          ],
+        ),
+      );
+      controller.dispose();
+      await controller.drain();
+      controller = BatchQueueController(
+        api: api,
+        queueRepository: queues,
+        taskRepository: tasks,
+        clock: () => currentTime,
+      );
+      await controller.initialize();
+      expect(tasks.duplicateCount, 1);
+      expect(controller.queues.single.items.single.taskId, originalTaskId);
+      expect(
+        controller.queues.single.items.single.state,
+        BatchItemState.failed,
+      );
+    },
+  );
+
+  test('non-registration failures do not create a retry task', () async {
+    await _makeFolder(parent, 'dont-retry', 4);
+    await controller.addParent(parent.path);
+    final queue = controller.queues.single;
+    final item = queue.items.single;
+    await controller.setSettings(
+      queueId: queue.id,
+      itemId: item.id,
+      rows: 2,
+      columns: 2,
+      horizontalFovDegrees: 45,
+    );
+    await controller.startQueue(queue.id);
+    final job = api.jobs.values.single;
+    job
+      ..state = 'failed'
+      ..stageOverride = 'render-failed'
+      ..error = {'code': 'IO_ERROR', 'message': 'fixture io failure'};
+
+    await controller.tick();
+
+    expect(tasks.duplicateCount, 0);
+    expect(controller.queues.single.items.single.taskId, item.taskId);
+    expect(controller.queues.single.items.single.state, BatchItemState.failed);
+    expect(tasks.values[item.taskId]!.automaticGridRetryAttempted, isFalse);
+  });
 
   test(
     'refresh merges after polling and preserves a live item state',

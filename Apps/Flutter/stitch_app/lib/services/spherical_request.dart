@@ -41,14 +41,28 @@ Map<String, Object?> buildSphericalRequest(
     throw StateError('Scene model is required for the selected options');
   }
   final options = task.performanceOptions;
+  final automaticGridRetry = task.automaticGridRetry;
+  final tiles = mapping.tiles(
+    task.photos,
+    forced: grid.forceGridCells,
+    forceGridCellOrigins: grid.forceGridCellOrigins,
+    lockedPhotoOrigins: grid.lockedPhotoOrigins,
+    pendingForceGridCells: grid.pendingForceGridCells,
+  );
+  final requestTiles = automaticGridRetry
+      ? tiles
+            .map(
+              (tile) => <String, Object?>{
+                'row': tile['row'],
+                'column': tile['column'],
+                'path': tile['path'],
+                'forceGrid': true,
+              },
+            )
+            .toList(growable: false)
+      : tiles;
   return {
-    'tiles': mapping.tiles(
-      task.photos,
-      forced: grid.forceGridCells,
-      forceGridCellOrigins: grid.forceGridCellOrigins,
-      lockedPhotoOrigins: grid.lockedPhotoOrigins,
-      pendingForceGridCells: grid.pendingForceGridCells,
-    ),
+    'tiles': requestTiles,
     'rows': mapping.rows,
     'columns': mapping.columns,
     'fx': fx,
@@ -70,11 +84,13 @@ Map<String, Object?> buildSphericalRequest(
     'matcherType': options.matcherType,
     'registrationMegapixels': options.registrationMegapixels,
     'allowPrecisionRecovery': options.fastRegistration,
-    'allowNominalGridFallback': task.forceGridFallback,
-    'autoGridOverlap': task.autoGridOverlap,
-    'refineGridNeighbors': task.refineGridNeighbors,
+    'allowNominalGridFallback': task.forceGridFallback || automaticGridRetry,
+    'autoGridOverlap': automaticGridRetry ? false : task.autoGridOverlap,
+    'refineGridNeighbors': automaticGridRetry
+        ? false
+        : task.refineGridNeighbors,
     'seamBlendMode': task.seamBlendMode.name,
-    'localTextureWarp': task.localTextureWarp,
+    'localTextureWarp': automaticGridRetry ? false : task.localTextureWarp,
     'maxEdgeReprojectionRmsPixels': task.maxEdgeReprojectionRmsPixels,
     'protectPeople': supportsSceneModel && task.protectPeople,
     'smoothWater': supportsSceneModel && task.smoothWater,
@@ -83,7 +99,7 @@ Map<String, Object?> buildSphericalRequest(
       'sceneModelSha256': sceneModel.sha256,
       'sceneCacheDir': sceneModel.cacheDirectory,
     },
-    if (!task.autoGridOverlap) ...{
+    if (!task.autoGridOverlap || automaticGridRetry) ...{
       'gridHorizontalOverlap': task.gridHorizontalOverlap,
       'gridVerticalOverlap': task.gridVerticalOverlap,
     },

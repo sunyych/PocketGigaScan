@@ -67,6 +67,8 @@ class StitchTask {
     this.displayName,
     this.publishError,
     this.registrationRepairOffered = false,
+    this.automaticGridRetry = false,
+    this.automaticGridRetryAttempted = false,
   }) : assert(maxEdgeReprojectionRmsPixels >= 6),
        assert(maxEdgeReprojectionRmsPixels <= 24),
        assert(maxEdgeReprojectionRmsPixels * 2 % 1 == 0);
@@ -118,6 +120,12 @@ class StitchTask {
 
   /// Prevents repeatedly offering the same automatic registration repair.
   final bool registrationRepairOffered;
+
+  /// Marks the isolated task whose request forces nominal-grid placement.
+  final bool automaticGridRetry;
+
+  /// Durable one-shot guard on the original failed task; copied onto its retry.
+  final bool automaticGridRetryAttempted;
 
   bool get needsLargeJobConfirmation =>
       grid.rows > 6 || grid.columns > 6 || photos.length > 36;
@@ -213,6 +221,8 @@ class StitchTask {
     String? publishError,
     bool clearPublishError = false,
     bool? registrationRepairOffered,
+    bool? automaticGridRetry,
+    bool? automaticGridRetryAttempted,
   }) => StitchTask(
     id: id,
     createdAt: createdAt,
@@ -276,6 +286,9 @@ class StitchTask {
     publishError: clearPublishError ? null : publishError ?? this.publishError,
     registrationRepairOffered:
         registrationRepairOffered ?? this.registrationRepairOffered,
+    automaticGridRetry: automaticGridRetry ?? this.automaticGridRetry,
+    automaticGridRetryAttempted:
+        automaticGridRetryAttempted ?? this.automaticGridRetryAttempted,
   );
 
   Map<String, Object?> toJson() => {
@@ -325,6 +338,8 @@ class StitchTask {
     'displayName': displayName,
     'publishError': publishError,
     'registrationRepairOffered': registrationRepairOffered,
+    'automaticGridRetry': automaticGridRetry,
+    'automaticGridRetryAttempted': automaticGridRetryAttempted,
   };
 
   factory StitchTask.fromJson(Map<String, Object?> json) {
@@ -418,6 +433,9 @@ class StitchTask {
       publishError: json['publishError'] as String?,
       registrationRepairOffered:
           json['registrationRepairOffered'] as bool? ?? false,
+      automaticGridRetry: json['automaticGridRetry'] as bool? ?? false,
+      automaticGridRetryAttempted:
+          json['automaticGridRetryAttempted'] as bool? ?? false,
     );
   }
 

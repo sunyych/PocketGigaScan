@@ -119,6 +119,30 @@ class BatchQueueController extends ChangeNotifier {
       );
   bool get hasDeferredQueues => _deferredQueueStarts.isNotEmpty;
 
+  /// Whether this controller currently owns foreground work eligible to run.
+  bool get hasForegroundWork {
+    for (final queue in queues) {
+      if (!queue.started) continue;
+      for (final item in queue.items) {
+        if (_deletingTaskIds.contains(item.id)) continue;
+        if (item.state == BatchItemState.running ||
+            item.state == BatchItemState.exporting) {
+          return true;
+        }
+        if (item.state == BatchItemState.ready &&
+            !_loading &&
+            !_importing &&
+            _api.isAvailable &&
+            item.taskId != null &&
+            !item.pauseRequested &&
+            !_deferredQueueStarts.contains(queue.id)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   String _nextTimelineUiId(String taskId, StitchTimeline timeline) {
     var sequence = _timelineUiSequences[taskId] ?? 0;
     final prefix = 'ui:$taskId:';
@@ -1001,14 +1025,28 @@ class BatchQueueController extends ChangeNotifier {
               continue;
             }
             if (state == 'failed' || state == 'cancelled') {
-              items.add(
-                item.copyWith(
-                  state: state == 'failed'
-                      ? BatchItemState.failed
-                      : BatchItemState.cancelled,
-                  message: _nativeErrorText(status['error'], state),
-                ),
+              final failedItem = item.copyWith(
+                state: state == 'failed'
+                    ? BatchItemState.failed
+                    : BatchItemState.cancelled,
+                message: _nativeErrorText(status['error'], state),
               );
+              if (state == 'failed') {
+                final retryItem = await _createAutomaticGridRetry(
+                  queue,
+                  failedItem,
+                  timelineTask.copyWith(
+                    phase: StitchPhase.failed,
+                    stage: status['stage'] as String? ?? timelineTask.stage,
+                    error: _nativeErrorText(status['error'], '合成失败'),
+                  ),
+                  status,
+                  expectedGeneration: _generation(item.id),
+                );
+                items.add(retryItem ?? failedItem);
+              } else {
+                items.add(failedItem);
+              }
               continue;
             }
             if (item.pauseRequested) {
@@ -3022,6 +3060,19 @@ class BatchQueueController extends ChangeNotifier {
               );
               _runtimeGuardUnavailableJobs.remove(task.nativeJobId);
             }
+            if (state == 'failed') {
+              final retryItem = await _createAutomaticGridRetry(
+                queue,
+                _find(queue.id, item.id)?.item ?? item,
+                updatedTask,
+                status,
+                expectedGeneration: generation,
+              );
+              if (retryItem != null) {
+                _inFlight.remove(item.id);
+                continue;
+              }
+            }
             _inFlight.remove(item.id);
             final latest = _find(queue.id, item.id);
             if (latest == null || generation != _generation(item.id)) continue;
@@ -3115,6 +3166,215 @@ class BatchQueueController extends ChangeNotifier {
       }
     }
   }
+
+  Future<BatchQueueItem?> _createAutomaticGridRetry(
+    BatchQueue queue,
+    BatchQueueItem item,
+    StitchTask failedTask,
+    Map<String, Object?> status, {
+    required int expectedGeneration,
+  }) async {
+    final error = status['error'];
+    final errorCode = error is Map<String, Object?>
+        ? error['code'] as String?
+        : null;
+    if (!queue.started ||
+        item.pauseRequested ||
+        item.taskId == null ||
+        _deletingTaskIds.contains(item.id) ||
+        expectedGeneration != _generation(item.id) ||
+        status['state'] != 'failed' ||
+        status['operation'] != 'render' ||
+        status['stage'] != 'registration-failed' ||
+        !const {
+          'REGISTRATION_FAILED',
+          'OVERLAP_ESTIMATION_FAILED',
+        }.contains(errorCode) ||
+        failedTask.automaticGridRetry ||
+        failedTask.automaticGridRetryAttempted) {
+      return null;
+    }
+    final latest = _find(queue.id, item.id);
+    if (latest == null ||
+        latest.item.taskId != item.taskId ||
+        latest.item.pauseRequested ||
+        _deletingTaskIds.contains(latest.item.id) ||
+        expectedGeneration != _generation(item.id)) {
+      return null;
+    }
+
+    // Persist the one-shot guard before creating a new output tree. If a later
+    // step fails or the process exits, startup recovery cannot spawn retries.
+    final guardedOriginal = failedTask.copyWith(
+      phase: StitchPhase.failed,
+      stage: 'registration-failed',
+      automaticGridRetryAttempted: true,
+      error: _nativeErrorText(status['error'], '合成失败'),
+    );
+    try {
+      await _saveTask(
+        guardedOriginal,
+        guardItem: item.id,
+        generation: expectedGeneration,
+      );
+    } on Object catch (exception) {
+      _reportAutomaticRetryProblem(exception);
+      return null;
+    }
+    if (_disposed || expectedGeneration != _generation(item.id)) return null;
+    final afterGuard = _find(queue.id, item.id);
+    if (afterGuard == null ||
+        afterGuard.item.taskId != item.taskId ||
+        afterGuard.item.pauseRequested ||
+        !queue.started ||
+        _deletingTaskIds.contains(item.id)) {
+      return null;
+    }
+
+    StitchTask duplicate;
+    try {
+      duplicate = await _taskRepository.duplicateForNewRun(
+        guardedOriginal,
+        autoExportOnCompletion: false,
+      );
+      final horizontal = _safeNominalOverlap(
+        guardedOriginal.gridHorizontalOverlap,
+      );
+      final vertical = _safeNominalOverlap(guardedOriginal.gridVerticalOverlap);
+      duplicate = duplicate.copyWith(
+        phase: StitchPhase.imported,
+        stage: 'automatic-grid-retry',
+        forceGridFallback: true,
+        autoGridOverlap: false,
+        gridHorizontalOverlap: horizontal,
+        gridVerticalOverlap: vertical,
+        refineGridNeighbors: false,
+        localTextureWarp: false,
+        automaticGridRetry: true,
+        automaticGridRetryAttempted: true,
+        exportDirectory:
+            guardedOriginal.exportDirectory ??
+            queue.exportDestination ??
+            queue.outputDirectory,
+        displayName: guardedOriginal.displayName,
+        clearNativeJobId: true,
+        clearError: true,
+        clearPauseReason: true,
+        clearExportPath: true,
+        clearExportFingerprint: true,
+        clearExportCheckpointPath: true,
+        clearPublishedExportPath: true,
+        clearPublishError: true,
+        clearLargeJobApprovalScope: true,
+      );
+      await _saveTask(
+        duplicate,
+        guardItem: item.id,
+        generation: expectedGeneration,
+      );
+    } on Object catch (exception) {
+      _reportAutomaticRetryProblem(exception);
+      // The original is safely marked as consumed; keep the failed queue item.
+      return null;
+    }
+    if (_disposed || expectedGeneration != _generation(item.id)) return null;
+    final beforeCommit = _find(queue.id, item.id);
+    if (beforeCommit == null ||
+        beforeCommit.item.taskId != item.taskId ||
+        beforeCommit.item.pauseRequested ||
+        !queue.started ||
+        _deletingTaskIds.contains(item.id)) {
+      return null;
+    }
+
+    for (var attempt = 0; attempt < 8; attempt++) {
+      if (_disposed ||
+          expectedGeneration != _generation(item.id) ||
+          _deletingTaskIds.contains(item.id)) {
+        await _persistLiveQueueAfterRetryRace(queue.id);
+        return null;
+      }
+      final queueIndex = _queues.indexWhere((value) => value.id == queue.id);
+      if (queueIndex < 0) return null;
+      final snapshot = _queues[queueIndex];
+      final liveItems = snapshot.items.where((value) => value.id == item.id);
+      final liveItem = liveItems.isEmpty ? null : liveItems.first;
+      if (liveItem == null ||
+          liveItem.taskId != item.taskId ||
+          liveItem.pauseRequested ||
+          !snapshot.started) {
+        await _persistLiveQueueAfterRetryRace(queue.id);
+        return null;
+      }
+      final retryItem = liveItem.copyWith(
+        taskId: duplicate.id,
+        state: BatchItemState.ready,
+        progress: 0,
+        etaSeconds: null,
+        clearEtaSeconds: true,
+        elapsedSeconds: 0,
+        clearLastTickAt: true,
+        pauseRequested: false,
+        message: '原任务注册失败；正在以名义网格重试',
+        progressSamples: const [],
+        progressOperation: 'render',
+      );
+      final candidate = snapshot.copyWith(
+        items: snapshot.items
+            .map((value) => value.id == item.id ? retryItem : value)
+            .toList(growable: false),
+      );
+      try {
+        await _save(candidate);
+      } on Object catch (exception) {
+        _reportAutomaticRetryProblem(exception);
+        return null;
+      }
+      final latestIndex = _queues.indexWhere((value) => value.id == queue.id);
+      if (latestIndex < 0) return null;
+      final latestQueue = _queues[latestIndex];
+      final latestItems = latestQueue.items.where(
+        (value) => value.id == item.id,
+      );
+      final latestItem = latestItems.isEmpty ? null : latestItems.first;
+      if (_disposed ||
+          expectedGeneration != _generation(item.id) ||
+          _deletingTaskIds.contains(item.id) ||
+          latestItem == null ||
+          latestItem.taskId != item.taskId ||
+          latestItem.pauseRequested ||
+          !latestQueue.started) {
+        await _persistLiveQueueAfterRetryRace(queue.id);
+        return null;
+      }
+      if (!identical(latestQueue, snapshot)) continue;
+      _queues[latestIndex] = candidate;
+      _inFlight.remove(item.id);
+      if (!_disposed) notifyListeners();
+      return retryItem;
+    }
+    _reportAutomaticRetryProblem(StateError('队列在多次保存后仍持续变化，重试任务保持未启动'));
+    await _persistLiveQueueAfterRetryRace(queue.id);
+    return null;
+  }
+
+  Future<void> _persistLiveQueueAfterRetryRace(String queueId) async {
+    final index = _queues.indexWhere((value) => value.id == queueId);
+    if (index < 0) return;
+    try {
+      await _save(_queues[index]);
+    } on Object catch (exception) {
+      _reportAutomaticRetryProblem(exception);
+    }
+  }
+
+  void _reportAutomaticRetryProblem(Object exception) {
+    error = '自动名义网格重试未能开始：$exception';
+    if (!_disposed) notifyListeners();
+  }
+
+  double _safeNominalOverlap(double value) =>
+      value.isFinite && value > 0.1 && value < 1 ? value : 0.3;
 
   Future<(int, int)?> _renderedDimensions(StitchTask task) async {
     try {
@@ -3805,6 +4065,7 @@ class BatchQueueController extends ChangeNotifier {
 
   Future<void> _startReady() async {
     if (_disposed ||
+        _loading ||
         _importing ||
         _exportDestinationChangeCount > 0 ||
         !_api.isAvailable) {

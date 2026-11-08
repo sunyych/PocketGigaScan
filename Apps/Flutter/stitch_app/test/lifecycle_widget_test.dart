@@ -331,6 +331,7 @@ void main() {
           createdAt: DateTime.utc(2026),
           parentDirectory: 'input',
           outputDirectory: 'output',
+          started: false,
           items: const [
             BatchQueueItem(
               id: 'queue-item-1',
@@ -381,6 +382,7 @@ void main() {
         'Queued single task did not transition to running',
       );
       queues[0] = queues.single.copyWith(
+        started: true,
         items: [
           queues.single.items.single.copyWith(state: BatchItemState.running),
         ],
@@ -412,6 +414,80 @@ void main() {
       controller.dispose();
     },
   );
+
+  testWidgets('foreground lock covers only runnable started queue work', (
+    tester,
+  ) async {
+    final task = fixture(StitchPhase.completed, id: 'started-ready-lock-task');
+    final lock = RecordingForegroundWorkLock();
+    final queues = <BatchQueue>[
+      BatchQueue(
+        id: 'started-ready-lock-queue',
+        createdAt: DateTime.utc(2026),
+        parentDirectory: 'input',
+        outputDirectory: 'output',
+        started: false,
+        items: [
+          BatchQueueItem(
+            id: 'started-ready-lock-item',
+            taskId: task.id,
+            name: 'Ready panorama',
+            sourceDirectory: 'input/panorama',
+            state: BatchItemState.ready,
+          ),
+        ],
+      ),
+    ];
+    final controller = await pumpPage(
+      tester,
+      task,
+      FakeApi(),
+      PowerState.battery,
+      mobile: true,
+      foregroundWorkLock: lock,
+      initialQueues: queues,
+    );
+    controller!.notifyListeners();
+    await _pumpUntil(
+      tester,
+      () => lock.events.isNotEmpty,
+      'Initial idle lock state did not settle',
+    );
+    expect(lock.enabled, isFalse);
+
+    queues[0] = queues.single.copyWith(started: true);
+    controller.notifyListeners();
+    await _pumpUntil(
+      tester,
+      () => lock.enabled,
+      'Started ready queue work did not enable the foreground lock',
+    );
+    queues[0] = queues.single.copyWith(
+      items: [
+        queues.single.items.single.copyWith(state: BatchItemState.running),
+      ],
+    );
+    controller.notifyListeners();
+    await tester.pump();
+    expect(lock.enabled, isTrue);
+    expect(lock.events, ['disable', 'enable']);
+
+    queues[0] = queues.single.copyWith(
+      items: [
+        queues.single.items.single.copyWith(state: BatchItemState.completed),
+      ],
+    );
+    controller.notifyListeners();
+    await _pumpUntil(
+      tester,
+      () => !lock.enabled,
+      'Completed queue work did not release the foreground lock',
+    );
+    expect(lock.events, ['disable', 'enable', 'disable']);
+
+    await tester.pumpWidget(const SizedBox());
+    controller.dispose();
+  });
 
   testWidgets('main progress uses active queue item progress', (tester) async {
     final task = fixture(StitchPhase.completed, id: 'queue-progress-task');

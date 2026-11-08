@@ -265,6 +265,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       widget.foregroundWorkLock ?? PlatformForegroundWorkLock();
   Future<void> _foregroundLockTail = Future<void>.value();
   bool? _foregroundLockRequested;
+  int _galleryOperationsInFlight = 0;
   StitchTask? _task;
   List<StitchTask> _tasks = [];
   Timer? _poll;
@@ -455,19 +456,25 @@ class _StitchHomePageState extends State<StitchHomePage>
       StitchPhase.pausing,
       StitchPhase.exporting,
     };
-    const batchActive = {BatchItemState.running, BatchItemState.exporting};
     return (_task != null &&
             singleActive.contains(_task!.phase) &&
             (_task!.phase != StitchPhase.queued ||
                 _task!.nativeJobId != null)) ||
+        _exportInFlight ||
+        _galleryOperationsInFlight > 0 ||
         _deviceTransfers.values.any(
           (status) => status.state == DwarfDownloadState.downloading,
         ) ||
-        (_batchController?.queues.any(
-              (queue) =>
-                  queue.items.any((item) => batchActive.contains(item.state)),
-            ) ??
-            false);
+        (_batchController?.hasForegroundWork ?? false);
+  }
+
+  void _onGalleryForegroundOperationChanged(bool active) {
+    if (active) {
+      _galleryOperationsInFlight++;
+    } else if (_galleryOperationsInFlight > 0) {
+      _galleryOperationsInFlight--;
+    }
+    unawaited(_syncForegroundLock());
   }
 
   Future<void> _syncForegroundLock() {
@@ -2867,6 +2874,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     }
     if (_isActivelyBatchOwned(task)) return;
     _exportInFlight = true;
+    unawaited(_syncForegroundLock());
     if (mounted) {
       setState(() {
         _busy = true;
@@ -2891,6 +2899,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       if (mounted) setState(() => _message = '整图导出失败：$error');
     } finally {
       _exportInFlight = false;
+      unawaited(_syncForegroundLock());
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -4292,6 +4301,7 @@ class _StitchHomePageState extends State<StitchHomePage>
             onTransferStatus: _updateDeviceTransfer,
             onDeviceTaskReady: _openImportedDeviceTask,
             onDeleteResult: _deleteResult,
+            onOpenResults: _openResultGallery,
           ),
         ),
       );
@@ -4307,6 +4317,13 @@ class _StitchHomePageState extends State<StitchHomePage>
     await widget.settingsController?.ready;
     if (!mounted) return;
     final controller = _batchController;
+    var galleryOperationActive = false;
+    void onGalleryOperationChanged(bool active) {
+      if (galleryOperationActive == active) return;
+      galleryOperationActive = active;
+      _onGalleryForegroundOperationChanged(active);
+    }
+
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (_) => ResultGalleryPage(
@@ -4328,7 +4345,10 @@ class _StitchHomePageState extends State<StitchHomePage>
           },
           onDeleteResult: _deleteResult,
           onOpenViewer: _openExportViewer,
-          onAddBatch: () => unawaited(_openBatchQueue()),
+          onAddBatch: _openingBatchQueue
+              ? null
+              : () => unawaited(_openBatchQueue()),
+          onForegroundOperationChanged: onGalleryOperationChanged,
         ),
       ),
     );

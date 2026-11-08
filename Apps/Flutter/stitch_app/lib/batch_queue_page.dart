@@ -19,6 +19,7 @@ import 'dwarf_device_page.dart';
 import 'services/dwarf_download_service.dart';
 import 'services/result_library_service.dart';
 import 'services/task_repository.dart';
+import 'services/task_result_provenance.dart';
 import 'widgets/exported_image_viewer.dart';
 import 'widgets/result_deletion_dialog.dart';
 import 'l10n/localized_text.dart';
@@ -41,6 +42,7 @@ class BatchQueuePage extends StatefulWidget {
     this.autoUsbDiscoveryOverride,
     this.outputDirectoryPickerOverride,
     this.onDeleteResult,
+    this.onOpenResults,
   });
   final JobApi api;
   final BatchQueueController? controller;
@@ -60,6 +62,7 @@ class BatchQueuePage extends StatefulWidget {
     ResultDeletionChoice choice,
   )?
   onDeleteResult;
+  final VoidCallback? onOpenResults;
 
   @override
   State<BatchQueuePage> createState() => _BatchQueuePageState();
@@ -75,6 +78,8 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
             widget.mobileStorageService ?? const MobileStorageService(),
       );
   bool _busy = false;
+  final Map<String, ({String signature, Future<TaskResultProvenance?> future})>
+  _itemProvenanceFutures = {};
   bool _jxlAvailable = false;
   late final MobileStorageService _storage =
       widget.mobileStorageService ?? const MobileStorageService();
@@ -117,6 +122,11 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
   }
 
   void _changed() {
+    final activeIds = _controller.queues
+        .expand((queue) => queue.items)
+        .map((item) => item.id)
+        .toSet();
+    _itemProvenanceFutures.removeWhere((id, _) => !activeIds.contains(id));
     if (mounted) setState(() {});
   }
 
@@ -129,6 +139,135 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
       return;
     }
     await widget.onDeviceTaskReady?.call(taskId);
+  }
+
+  Future<TaskResultProvenance?> _provenanceForItem(BatchQueueItem item) {
+    final taskId = item.taskId;
+    if (taskId == null) return Future.value(null);
+    final signature = '${item.state.name}|$taskId';
+    final existing = _itemProvenanceFutures[item.id];
+    if (existing != null && existing.signature == signature) {
+      return existing.future;
+    }
+    final future = _controller
+        .taskForItem(item)
+        .then<TaskResultProvenance?>((task) async {
+          if (task == null) return TaskResultProvenance.unknown;
+          return TaskResultProvenance.loadForTask(task);
+        })
+        .catchError((Object _) => TaskResultProvenance.unknown);
+    _itemProvenanceFutures[item.id] = (signature: signature, future: future);
+    return future;
+  }
+
+  bool _queueIsTerminal(BatchQueue queue) =>
+      queue.started &&
+      queue.items.isNotEmpty &&
+      queue.items.every(
+        (item) =>
+            item.state == BatchItemState.completed ||
+            item.state == BatchItemState.failed ||
+            item.state == BatchItemState.cancelled ||
+            item.state == BatchItemState.skipped,
+      );
+
+  Widget _queueOutcome(BatchQueue queue) {
+    final completed = queue.items
+        .where((item) => item.state == BatchItemState.completed)
+        .length;
+    final failed = queue.items
+        .where((item) => item.state == BatchItemState.failed)
+        .length;
+    final strings = StitchLocalizations.of(context);
+    return Card(
+      key: Key('batch-queue-outcome-${queue.id}'),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  strings.text('队列结果摘要'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                ),
+                Text(
+                  '${strings.text('已完成拼接：')}$completed · '
+                  '${strings.text('失败：')}$failed',
+                ),
+              ],
+            ),
+            if (widget.onOpenResults != null)
+              FilledButton.icon(
+                key: Key('batch-view-results-${queue.id}'),
+                onPressed: widget.onOpenResults,
+                icon: const Icon(Icons.photo_library_outlined),
+                label: Text(strings.text('查看拼接结果')),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _itemProvenance(BatchQueueItem item) {
+    final strings = StitchLocalizations.of(context);
+    return FutureBuilder<TaskResultProvenance?>(
+      future: _provenanceForItem(item),
+      builder: (context, snapshot) {
+        final provenance = snapshot.data;
+        if (provenance == null) return const SizedBox.shrink();
+        final isRetryTask = provenance.isAutomaticGridRetry;
+        final retryPending =
+            isRetryTask &&
+            (item.state == BatchItemState.pending ||
+                item.state == BatchItemState.ready);
+        final retryRunning =
+            isRetryTask &&
+            (item.state == BatchItemState.running ||
+                item.state == BatchItemState.exporting);
+        return Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: [
+            if (item.state == BatchItemState.completed)
+              Chip(
+                key: Key('batch-provenance-${item.id}'),
+                visualDensity: VisualDensity.compact,
+                label: Text(strings.text(provenance.kind.labelKey)),
+              ),
+            if (isRetryTask && item.state == BatchItemState.completed)
+              Chip(
+                key: Key('batch-grid-retry-${item.id}'),
+                visualDensity: VisualDensity.compact,
+                avatar: const Icon(Icons.autorenew, size: 18),
+                label: Text(strings.text('自动网格重试已执行')),
+              ),
+            if (isRetryTask && item.state == BatchItemState.failed)
+              Chip(
+                key: Key('batch-grid-retry-${item.id}'),
+                visualDensity: VisualDensity.compact,
+                avatar: const Icon(Icons.warning_amber_outlined, size: 18),
+                label: Text(strings.text('自动网格重试未完成')),
+              ),
+            if (retryPending || retryRunning)
+              Chip(
+                key: Key('batch-grid-retry-${item.id}'),
+                visualDensity: VisualDensity.compact,
+                avatar: const Icon(Icons.autorenew, size: 18),
+                label: Text(
+                  strings.text(retryPending ? '自动网格重试待触发' : '自动网格重试进行中'),
+                ),
+              ),
+          ],
+        );
+      },
+    );
   }
 
   Future<void> _openDwarfDevice() async {
@@ -902,6 +1041,22 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
     appBar: AppBar(
       title: const Text('批处理队列'),
       actions: [
+        if (widget.onOpenResults != null)
+          if (MediaQuery.sizeOf(context).width >= 780 &&
+              MediaQuery.textScalerOf(context).scale(16) / 16 < 1.35)
+            TextButton.icon(
+              key: const Key('batch-open-results'),
+              onPressed: widget.onOpenResults,
+              icon: const Icon(Icons.photo_library_outlined),
+              label: Text(StitchLocalizations.of(context).text('查看拼接结果')),
+            )
+          else
+            IconButton(
+              key: const Key('batch-open-results'),
+              tooltip: StitchLocalizations.of(context).text('查看拼接结果'),
+              onPressed: widget.onOpenResults,
+              icon: const Icon(Icons.photo_library_outlined),
+            ),
         if (!_mobile)
           IconButton(
             tooltip: StitchLocalizations.of(context).text('扫描 DWARF USB 设备'),
@@ -1052,6 +1207,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                     onTap: _clearFailedQueueItems,
                   ),
                   for (final queue in _controller.queues) ...[
+                    if (_queueIsTerminal(queue)) _queueOutcome(queue),
                     _queueHeader(queue),
                     for (final item in queue.items) _itemCard(queue, item),
                     const SizedBox(height: 12),
@@ -1183,6 +1339,7 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
+                      if (item.taskId != null) _itemProvenance(item),
                     ],
                   ),
                 ),

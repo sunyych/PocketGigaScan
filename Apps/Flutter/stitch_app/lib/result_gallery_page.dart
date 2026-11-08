@@ -14,6 +14,7 @@ import 'services/platform_file_dialogs.dart';
 import 'services/result_library_service.dart';
 import 'services/settings_controller.dart';
 import 'services/task_repository.dart';
+import 'services/task_result_provenance.dart';
 import 'services/task_thumbnail_service.dart';
 import 'models/stitch_quality.dart';
 import 'widgets/result_deletion_dialog.dart';
@@ -30,6 +31,8 @@ class ResultGalleryPage extends StatefulWidget {
     required this.onOpenViewer,
     this.onAddBatch,
     this.onDeleteResult,
+    this.onForegroundOperationChanged,
+    this.provenanceLoader,
     this.settingsController,
     this.mobileOverride,
     this.androidOverride,
@@ -55,6 +58,9 @@ class ResultGalleryPage extends StatefulWidget {
     ResultDeletionChoice choice,
   )?
   onDeleteResult;
+  final ValueChanged<bool>? onForegroundOperationChanged;
+  final Future<TaskResultProvenance> Function(StitchTask task)?
+  provenanceLoader;
 
   @override
   State<ResultGalleryPage> createState() => _ResultGalleryPageState();
@@ -65,6 +71,7 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
   final Set<String> _busyTasks = {};
   final Map<String, Future<File?>> _thumbnailFutures = {};
   final Map<String, Future<bool>> _exportExistsFutures = {};
+  final Map<String, Future<TaskResultProvenance>> _provenanceFutures = {};
   final Map<String, String> _taskDisplaySignatures = {};
   final Map<String, double> _exportProgress = {};
   List<StitchTask> _tasks = const [];
@@ -124,6 +131,9 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
             !ids.contains(id) || _taskDisplaySignatures[id] != signatures[id],
       );
       _exportExistsFutures.removeWhere(
+        (signature, _) => !activeDisplaySignatures.contains(signature),
+      );
+      _provenanceFutures.removeWhere(
         (signature, _) => !activeDisplaySignatures.contains(signature),
       );
       _taskDisplaySignatures
@@ -224,6 +234,16 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
           return false;
         }
       });
+
+  Future<TaskResultProvenance> _provenanceFor(StitchTask task) {
+    final signature = _taskSignature(task);
+    return _provenanceFutures.putIfAbsent(
+      signature,
+      () =>
+          widget.provenanceLoader?.call(task) ??
+          TaskResultProvenance.loadForTask(task),
+    );
+  }
 
   bool _isBusy(StitchTask task) =>
       _busyTasks.contains(task.id) ||
@@ -371,15 +391,15 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
       _busyTasks.add(task.id);
       _exportProgress.remove(task.id);
     });
+    widget.onForegroundOperationChanged?.call(true);
     return true;
   }
 
   void _endTaskOperation(StitchTask task) {
-    if (!mounted) return;
-    setState(() {
-      _busyTasks.remove(task.id);
-      _exportProgress.remove(task.id);
-    });
+    _busyTasks.remove(task.id);
+    _exportProgress.remove(task.id);
+    widget.onForegroundOperationChanged?.call(_busyTasks.isNotEmpty);
+    if (mounted) setState(() {});
   }
 
   Future<void> _openViewer(StitchTask task) async {
@@ -455,6 +475,7 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
       _deleting = true;
       _busyTasks.addAll(selected.map((task) => task.id));
     });
+    widget.onForegroundOperationChanged?.call(true);
     final deletedIds = <String>[];
     final cleanupFailures = <String>[];
     final deletionErrors = <String>[];
@@ -493,11 +514,10 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
       );
     } finally {
       if (mounted) {
-        setState(() {
-          _deleting = false;
-          _busyTasks.removeAll(selected.map((task) => task.id));
-        });
+        setState(() => _deleting = false);
       }
+      _busyTasks.removeAll(selected.map((task) => task.id));
+      widget.onForegroundOperationChanged?.call(_busyTasks.isNotEmpty);
     }
   }
 
@@ -538,6 +558,31 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
 
   String _shortDeletionDetail(String detail) =>
       detail.length <= 88 ? detail : '${detail.substring(0, 85)}…';
+
+  String _provenanceDetails(
+    StitchLocalizations strings,
+    TaskResultProvenance provenance,
+  ) {
+    final counts = <String>[];
+    if (provenance.visualTileCount != null) {
+      final total = provenance.totalTileCount;
+      counts.add(
+        '${strings.text('视觉单元数：')}${provenance.visualTileCount}${total == null ? '' : '/$total'}',
+      );
+    }
+    if (provenance.gridEstimatedTileCount != null) {
+      counts.add(
+        '${strings.text('网格估算单元数：')}${provenance.gridEstimatedTileCount}',
+      );
+    }
+    if (provenance.forcedGridTileCount != null) {
+      counts.add(
+        '${strings.text('强制网格单元数：')}${provenance.forcedGridTileCount}',
+      );
+    }
+    final explanation = strings.text(provenance.kind.explanationKey);
+    return [explanation, ...counts].join('\n');
+  }
 
   Widget _resultCard(StitchTask task) {
     final strings = StitchLocalizations.of(context);
@@ -655,6 +700,50 @@ class _ResultGalleryPageState extends State<ResultGalleryPage> {
                                 : '导出待恢复',
                           ),
                         ),
+                      ),
+                      FutureBuilder<TaskResultProvenance>(
+                        future: _provenanceFor(task),
+                        builder: (context, snapshot) {
+                          final provenance = snapshot.data;
+                          if (provenance == null) {
+                            return const SizedBox.shrink();
+                          }
+                          final retryLabel = provenance.isAutomaticGridRetry
+                              ? task.phase == StitchPhase.completed
+                                    ? '自动网格重试已执行'
+                                    : '自动网格重试已触发'
+                              : null;
+                          return Wrap(
+                            spacing: 4,
+                            runSpacing: 4,
+                            children: [
+                              Tooltip(
+                                message: _provenanceDetails(
+                                  strings,
+                                  provenance,
+                                ),
+                                child: Chip(
+                                  key: Key('result-provenance-${task.id}'),
+                                  visualDensity: VisualDensity.compact,
+                                  avatar: const Icon(
+                                    Icons.rule_folder_outlined,
+                                    size: 18,
+                                  ),
+                                  label: Text(
+                                    strings.text(provenance.kind.labelKey),
+                                  ),
+                                ),
+                              ),
+                              if (retryLabel != null)
+                                Chip(
+                                  key: Key('result-auto-grid-retry-${task.id}'),
+                                  visualDensity: VisualDensity.compact,
+                                  avatar: const Icon(Icons.autorenew, size: 18),
+                                  label: Text(strings.text(retryLabel)),
+                                ),
+                            ],
+                          );
+                        },
                       ),
                       FutureBuilder<bool>(
                         future: _exportExists(task),

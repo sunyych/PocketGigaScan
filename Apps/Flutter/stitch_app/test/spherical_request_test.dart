@@ -153,6 +153,58 @@ void main() {
     expect(request['gridVerticalOverlap'], 0.25);
   });
 
+  test('automatic retry forces every mapped tile without placement priors', () {
+    const photos = [
+      ImportedPhoto(
+        originalName: 'a.jpg',
+        storedPath: '0000.jpg',
+        sha256: 'a',
+        width: 100,
+        height: 80,
+        originalOrder: 0,
+      ),
+      ImportedPhoto(
+        originalName: 'b.jpg',
+        storedPath: '0001.jpg',
+        sha256: 'b',
+        width: 100,
+        height: 80,
+        originalOrder: 1,
+      ),
+    ];
+    final task = StitchTask(
+      id: 'grid-retry',
+      createdAt: DateTime.utc(2026),
+      sourceDirectory: 'input',
+      outputDirectory: 'output',
+      photos: photos,
+      grid: const GridOptions(mode: GridMode.sequence, rows: 1, columns: 2),
+      horizontalFovDegrees: 45,
+      memoryBudgetMiB: 128,
+      workers: 2,
+      phase: StitchPhase.imported,
+      automaticGridRetry: true,
+      autoGridOverlap: true,
+      refineGridNeighbors: true,
+      localTextureWarp: true,
+    );
+
+    final request = buildSphericalRequest(task);
+
+    expect(request['allowNominalGridFallback'], isTrue);
+    expect(request['autoGridOverlap'], isFalse);
+    expect(request['refineGridNeighbors'], isFalse);
+    expect(request['localTextureWarp'], isFalse);
+    expect(request['gridHorizontalOverlap'], 0.3);
+    expect(request['gridVerticalOverlap'], 0.3);
+    final tiles = request['tiles']! as List<Map<String, Object?>>;
+    expect(tiles, hasLength(2));
+    for (final tile in tiles) {
+      expect(tile['forceGrid'], isTrue);
+      expect(tile.containsKey('placementConstraint'), isFalse);
+    }
+  });
+
   test(
     'unresolved legacy coordinate does not lock a different mapped photo',
     () {
