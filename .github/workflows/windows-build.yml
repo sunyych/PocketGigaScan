@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: dwarf-windows-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: dwarf-windows-${{ github.workflow }}-${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'trusted-latest' || github.ref }}
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 jobs:
   build:
@@ -199,6 +199,16 @@ jobs:
       actions: read
       contents: write
     steps:
+      - name: Check out the exact package source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.12 for OTA manifest generation
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
       - name: Download verified signed release
         shell: pwsh
         env:
@@ -227,14 +237,45 @@ jobs:
             (Join-Path $env:PACKAGE_DIR 'build-manifest.json')
           )
           foreach ($asset in $assets) { if (-not (Test-Path -LiteralPath $asset)) { throw "Release asset missing: $asset" } }
-          & gh release view latest *> $null
-          if ($LASTEXITCODE -ne 0) {
+          $currentDirectory = Join-Path $env:RUNNER_TEMP 'PocketGigaScan-OTA-current'
+          New-Item -ItemType Directory -Force -Path $currentDirectory | Out-Null
+          $currentManifest = Join-Path $currentDirectory 'pocketgigascan-ota-windows-x64.json'
+          $releaseInfo = @(& gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/latest" 2>&1)
+          $releaseStatus = $LASTEXITCODE
+          $releaseExists = $releaseStatus -eq 0
+          if (-not $releaseExists) {
+            $releaseError = $releaseInfo -join "`n"
+            if ($releaseError -notmatch '(?i)(HTTP\s+404|404\s+Not Found)') { throw "Could not determine whether the latest release exists: $releaseError" }
+          }
+          $currentAssetNames = @()
+          if ($releaseExists) { $currentAssetNames = @((($releaseInfo -join "`n") | ConvertFrom-Json).assets | ForEach-Object name) }
+          if ($releaseExists -and $currentAssetNames -contains 'pocketgigascan-ota-windows-x64.json') {
+            & gh release download latest --pattern 'pocketgigascan-ota-windows-x64.json' --dir $currentDirectory
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $currentManifest)) { throw 'Could not download the existing OTA manifest for monotonic version validation.' }
+          }
+          $manifestArgs = @(
+            'scripts/generate_ota_manifest.py',
+            '--platform', 'windows-x64',
+            '--package', (Join-Path $env:PACKAGE_DIR 'PocketGigaScan-Windows-x64.zip'),
+            '--build-manifest', (Join-Path $env:PACKAGE_DIR 'build-manifest.json'),
+            '--pubspec', 'Apps/Flutter/stitch_app/pubspec.yaml',
+            '--expected-commit', $env:GITHUB_SHA,
+            '--output', (Join-Path $env:PACKAGE_DIR 'pocketgigascan-ota-windows-x64.json')
+          )
+          if (Test-Path -LiteralPath $currentManifest) { $manifestArgs += @('--current-manifest', $currentManifest) }
+          & python @manifestArgs
+          if ($LASTEXITCODE -ne 0) { throw 'Could not generate a verified, monotonic Windows OTA manifest.' }
+          $manifestAsset = Join-Path $env:PACKAGE_DIR 'pocketgigascan-ota-windows-x64.json'
+          if (-not $releaseExists) {
             & gh release create latest @assets --target $env:GITHUB_SHA --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest signed Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create the latest Windows prerelease.' }
           } else {
+            & gh release upload latest @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not upload the verified latest Windows package assets.' }
             & gh api "repos/$env:GITHUB_REPOSITORY/git/refs/tags/latest" --method PATCH --field "sha=$env:GITHUB_SHA" --field force=true
             if ($LASTEXITCODE -ne 0) { throw 'Could not move the latest prerelease tag to this commit.' }
             & gh release edit latest --prerelease --title 'PocketGigaScan Windows (latest)' --notes "Latest signed Windows x64 build from commit $env:GITHUB_SHA. Download the ZIP and verify it with the adjacent SHA-256 file."
             if ($LASTEXITCODE -ne 0) { throw 'Could not update latest prerelease metadata.' }
-            & gh release upload latest @assets --clobber
           }
-          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the latest Windows release assets.' }
+          & gh release upload latest $manifestAsset --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish the Windows OTA manifest last.' }

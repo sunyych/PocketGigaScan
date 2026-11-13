@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'dart:io';
 import 'services/scene_model_service.dart';
 import 'widgets/scene_model_dialog.dart';
 import 'models/app_settings.dart';
@@ -8,6 +9,7 @@ import 'services/mobile_storage_service.dart';
 import 'services/platform_file_dialogs.dart';
 import 'services/memory_budget_policy.dart';
 import 'l10n/stitch_localizations.dart';
+import 'services/ota_update_service.dart';
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({
@@ -20,6 +22,7 @@ class SettingsPage extends StatefulWidget {
     this.sceneModelService,
     this.supportsSceneOptions = false,
     this.activeTasks = false,
+    this.updateService,
   });
   final SettingsController controller;
   final bool android;
@@ -29,13 +32,130 @@ class SettingsPage extends StatefulWidget {
   final Future<SceneModelService>? sceneModelService;
   final bool supportsSceneOptions;
   final bool activeTasks;
+  final OtaUpdateService? updateService;
   @override
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
 class _SettingsPageState extends State<SettingsPage> {
+  late final OtaUpdateService _otaService =
+      widget.updateService ?? OtaUpdateService();
   int? _draggingMemoryMiB;
   double? _draggingTextScale;
+  bool _checkingUpdate = false;
+  String? _updateMessage;
+  String? _installedVersion;
+  OtaRelease? _availableRelease;
+
+  @override
+  void dispose() {
+    if (widget.updateService == null) _otaService.close();
+    super.dispose();
+  }
+
+  Future<void> _checkForUpdate() async {
+    final service = _otaService;
+    setState(() {
+      _checkingUpdate = true;
+      _updateMessage = null;
+    });
+    try {
+      final current = await service.installedVersion();
+      if (mounted) setState(() => _installedVersion = current);
+      final release = await service.check(installedVersion: current);
+      if (!mounted) return;
+      final chinese = StitchLocalizations.of(context).isChinese;
+      setState(() {
+        _availableRelease = release;
+        _updateMessage = chinese
+            ? '发现新版本 ${release.manifest.version}'
+            : 'Update ${release.manifest.version} is available';
+      });
+    } on FormatException catch (error) {
+      if (!mounted) return;
+      final chinese = StitchLocalizations.of(context).isChinese;
+      setState(() {
+        _availableRelease = null;
+        _updateMessage = switch (error.message) {
+          'No newer update is available' =>
+            chinese ? '已是最新版本' : 'You are up to date',
+          'No update is published for this platform' =>
+            chinese
+                ? '该平台暂时没有可用更新'
+                : 'No update is published for this platform',
+          _ =>
+            chinese
+                ? '检查更新失败，请稍后重试。'
+                : 'Update check failed. Please try again.',
+        };
+      });
+    } catch (_) {
+      if (!mounted) return;
+      final chinese = StitchLocalizations.of(context).isChinese;
+      setState(() {
+        _availableRelease = null;
+        _updateMessage = chinese
+            ? '无法连接到更新服务器，请稍后重试。'
+            : 'Could not reach the update server. Please try again.';
+      });
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
+  }
+
+  Future<void> _downloadUpdate() async {
+    final release = _availableRelease;
+    if (release == null) return;
+    setState(() {
+      _checkingUpdate = true;
+      _updateMessage = StitchLocalizations.of(context).isChinese
+          ? '正在下载并校验更新…'
+          : 'Downloading and verifying update…';
+    });
+    try {
+      final file = await _otaService.download(release);
+      if (!mounted) return;
+      if (widget.android && widget.mobileStorageService != null) {
+        final saved = await widget.mobileStorageService!.saveUpdatePackage(
+          file.path,
+        );
+        if (!mounted) return;
+        final chinese = StitchLocalizations.of(context).isChinese;
+        setState(
+          () => _updateMessage = saved
+              ? (chinese
+                    ? '已校验的 APK 已保存到所选位置。请使用“文件”应用打开；仅在 Android 确认签名与官方应用一致后继续安装。'
+                    : 'Verified APK copied to your chosen location. Open it with Files, and continue only if Android confirms the official app signature.')
+              : (chinese
+                    ? '已准备好校验后的 APK。再次点击下载可选择公开保存位置。'
+                    : 'Verified APK is ready. Choose Download again to save it to a public location.'),
+        );
+        return;
+      }
+      if (Platform.isWindows) {
+        final systemRoot = Platform.environment['SystemRoot'] ?? r'C:\Windows';
+        await Process.run('$systemRoot\\explorer.exe', ['/select,', file.path]);
+      } else if (Platform.isMacOS) {
+        await Process.run('/usr/bin/open', ['-R', file.path]);
+      }
+      if (!mounted) return;
+      final chinese = StitchLocalizations.of(context).isChinese;
+      setState(
+        () => _updateMessage = chinese
+            ? '已校验的更新保存在 ${file.path}。请关闭应用并按照发布说明手动安装。'
+            : 'Verified update saved to ${file.path}. Close the app and follow the release installation instructions.',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      setState(
+        () => _updateMessage = StitchLocalizations.of(context).isChinese
+            ? '下载失败，请检查网络后重试。'
+            : 'Download failed. Check your connection and try again.',
+      );
+    } finally {
+      if (mounted) setState(() => _checkingUpdate = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -578,6 +698,74 @@ class _SettingsPageState extends State<SettingsPage> {
                   }
                 },
               ),
+              const Divider(),
+              if (_otaService.platform == null)
+                ListTile(
+                  title: Text(l.isChinese ? '应用更新' : 'App updates'),
+                  subtitle: Text(
+                    l.isChinese
+                        ? 'iOS 更新通过 TestFlight 或 App Store 提供。'
+                        : 'iOS updates are distributed through TestFlight or the App Store.',
+                  ),
+                )
+              else ...[
+                ListTile(
+                  title: Text(l.isChinese ? '应用更新' : 'App updates'),
+                  subtitle: Text(
+                    l.isChinese
+                        ? '仅检查官方 GitHub 发布；下载后需手动安装。'
+                        : 'Checks official GitHub releases. Downloads require manual installation.',
+                  ),
+                ),
+                SwitchListTile(
+                  title: Text(
+                    l.isChinese
+                        ? '启动时自动检查（每天最多一次）'
+                        : 'Check automatically at launch (at most daily)',
+                  ),
+                  value: s.updateCheckMode == UpdateCheckMode.automatic,
+                  onChanged: (enabled) => widget.controller.updateWith(
+                    (latest) => latest.copyWith(
+                      updateCheckMode: enabled
+                          ? UpdateCheckMode.automatic
+                          : UpdateCheckMode.manual,
+                    ),
+                  ),
+                ),
+                ListTile(
+                  title: Text(l.isChinese ? '手动检查更新' : 'Check for updates'),
+                  subtitle: _updateMessage != null
+                      ? Text(_updateMessage!)
+                      : (_installedVersion == null
+                            ? null
+                            : Text(
+                                l.isChinese
+                                    ? '当前版本 $_installedVersion'
+                                    : 'Installed version $_installedVersion',
+                              )),
+                  trailing: _checkingUpdate
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : TextButton(
+                          onPressed: _checkForUpdate,
+                          child: Text(l.isChinese ? '检查' : 'Check'),
+                        ),
+                  onTap: _checkingUpdate ? null : _checkForUpdate,
+                ),
+                if (_availableRelease != null)
+                  ListTile(
+                    title: Text(
+                      l.isChinese ? '下载并验证更新' : 'Download and verify update',
+                    ),
+                    trailing: TextButton(
+                      onPressed: _checkingUpdate ? null : _downloadUpdate,
+                      child: Text(l.isChinese ? '下载' : 'Download'),
+                    ),
+                  ),
+              ],
               if (widget.controller.error case final error?)
                 ListTile(
                   title: Text(

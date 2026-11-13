@@ -58,6 +58,7 @@ __pycache__/
 /.github/workflows/*
 !/.github/workflows/windows-build.yml
 !/.github/workflows/android-build.yml
+!/.github/workflows/flutter-coverage.yml
 /Dependencies/*
 !/Dependencies/flutter-stitch-core.json
 /docs/*
@@ -65,6 +66,7 @@ __pycache__/
 !/docs/RESTRUCTURE.md
 !/docs/PARITY.md
 !/docs/WINDOWS-SIGNING.md
+!/docs/OTA-UPDATES.md
 !/docs/gigascan/
 /docs/superpowers/
 /docs/gigascan/*
@@ -104,6 +106,7 @@ __pycache__/
 !/scripts/verify-spherical-seam-alignment.py
 !/scripts/benchmark-dwarf-render.py
 !/scripts/verify-deghost-continuity.py
+!/scripts/generate_ota_manifest.py
 !/scripts/export-scene-model.py
 !/scripts/scene-model-export.lock.json
 !/scripts/scene-model-export.requirements.txt
@@ -114,6 +117,7 @@ __pycache__/
 /scripts/tests/*
 !/scripts/tests/test_verify_spherical_seam_alignment.py
 !/scripts/tests/test_benchmark_dwarf_render.py
+!/scripts/tests/test_ota_manifest.py
 /Apps/Flutter/stitch_app/ios/Native/
 /Apps/Flutter/stitch_app/ios/Flutter/NativeCore.generated.xcconfig
 /Apps/Flutter/stitch_app/tool/native/apple/

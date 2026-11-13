@@ -1,0 +1,67 @@
+name: PocketGigaScan Flutter functional coverage
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dwarf-flutter-coverage-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter-coverage:
+    name: Flutter tests and measured Dart line coverage
+    # Default golden baselines use Windows text and image rasterization.
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 30
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up pinned Flutter SDK
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: '3.44.2'
+          channel: stable
+          cache: true
+
+      - name: Set up Python for the coverage report
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Resolve locked Flutter dependencies
+        working-directory: Apps/Flutter/stitch_app
+        run: flutter pub get --enforce-lockfile
+
+      - name: Check LCOV report tooling
+        working-directory: Apps/Flutter/stitch_app
+        run: python -m unittest tool/test_report_flutter_coverage.py
+
+      - name: Analyze Flutter package
+        working-directory: Apps/Flutter/stitch_app
+        run: flutter analyze --no-pub
+
+      - name: Run Flutter tests with LCOV coverage
+        working-directory: Apps/Flutter/stitch_app
+        run: flutter test --coverage --concurrency=1
+
+      - name: Report measured Dart line coverage
+        working-directory: Apps/Flutter/stitch_app
+        run: python tool/report_flutter_coverage.py coverage/lcov.info --summary-file coverage/summary.txt
+
+      - name: Upload measured LCOV data
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: PocketGigaScan-Flutter-LCOV-${{ github.sha }}
+          path: |
+            Apps/Flutter/stitch_app/coverage/lcov.info
+            Apps/Flutter/stitch_app/coverage/summary.txt
+          if-no-files-found: error
+          retention-days: 7

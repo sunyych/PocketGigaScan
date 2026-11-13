@@ -38,7 +38,29 @@ class MobilePlatformPolicyTest {
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/tiff"))
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/jpeg"))
         assertTrue(MobilePlatformPolicy.isSupportedExportMimeType("image/jxl"))
+        assertFalse(MobilePlatformPolicy.isSupportedExportMimeType("application/vnd.android.package-archive"))
         assertFalse(MobilePlatformPolicy.isSupportedExportMimeType(null))
+    }
+
+    @Test
+    fun otaSaveAcceptsOnlyAppOwnedPackageInUpdateDirectory() {
+        val root = Files.createTempDirectory("ota-package-policy").toFile()
+        try {
+            val valid = root.resolve("updates/download-test/PocketGigaScan-Android-arm64.apk").apply {
+                parentFile.mkdirs()
+                writeText("verified")
+            }
+            val wrongName = root.resolve("updates/download-test/other.apk").apply { writeText("file") }
+            val wrongFolder = root.resolve("exports/PocketGigaScan-Android-arm64.apk").apply {
+                parentFile.mkdirs()
+                writeText("file")
+            }
+            assertTrue(MobilePlatformPolicy.isVerifiedOtaApk(valid, root))
+            assertFalse(MobilePlatformPolicy.isVerifiedOtaApk(wrongName, root))
+            assertFalse(MobilePlatformPolicy.isVerifiedOtaApk(wrongFolder, root))
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test

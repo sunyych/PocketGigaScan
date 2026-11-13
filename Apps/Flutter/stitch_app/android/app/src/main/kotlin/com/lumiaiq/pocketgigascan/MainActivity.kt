@@ -193,6 +193,7 @@ class MainActivity : FlutterActivity() {
                 )
                 "releaseBatchParent" -> releaseBatchParent(call.argument("path"), result)
                 "saveExport" -> launchSave(call.argument("path"), call.argument("mimeType"), call.argument("suggestedName"), result)
+                "saveUpdatePackage" -> launchSaveUpdatePackage(call.argument("path"), result)
                 "shareExport" -> shareExport(call.argument("path"), call.argument("mimeType"), result)
                 else -> result.notImplemented()
             }
@@ -297,6 +298,28 @@ class MainActivity : FlutterActivity() {
             pendingSave = null
             pendingStorageResult = null
             result.error("SAVE_DIALOG_UNAVAILABLE", error.message ?: "Save dialog could not be opened", null)
+        }
+    }
+
+    private fun launchSaveUpdatePackage(path: String?, result: MethodChannel.Result) {
+        val source = path?.let(::File)
+        if (source == null || !MobilePlatformPolicy.isVerifiedOtaApk(source, filesDir)) {
+            result.error("INVALID_UPDATE_PACKAGE", "Only a verified app-owned update APK can be saved", null)
+            return
+        }
+        if (!reserveResult(result)) return
+        pendingSave = PendingSave(source, result)
+        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/vnd.android.package-archive"
+            putExtra(Intent.EXTRA_TITLE, "PocketGigaScan-Android-arm64.apk")
+        }
+        try {
+            startActivityForResult(intent, REQUEST_SAVE_EXPORT)
+        } catch (error: Exception) {
+            pendingSave = null
+            pendingStorageResult = null
+            result.error("SAVE_DIALOG_UNAVAILABLE", error.message ?: "Could not open Android file picker", null)
         }
     }
 

@@ -83,7 +83,8 @@ void main() {
   testWidgets('scene controls are localized and hidden for mobile settings', (
     tester,
   ) async {
-    tester.view.physicalSize = const Size(1280, 900);
+    // Keep the golden focused on the scene and export controls.
+    tester.view.physicalSize = const Size(1280, 610);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);

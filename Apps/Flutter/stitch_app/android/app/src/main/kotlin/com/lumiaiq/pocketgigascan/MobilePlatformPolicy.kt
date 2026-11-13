@@ -37,6 +37,16 @@ internal object MobilePlatformPolicy {
         return file.canonicalFile.path.startsWith(base)
     }
 
+    fun isVerifiedOtaApk(file: File, appFilesDirectory: File): Boolean {
+        if (!file.isFile || file.name != "PocketGigaScan-Android-arm64.apk") return false
+        val canonical = file.canonicalFile
+        val updatesDirectory = canonical.parentFile?.parentFile ?: return false
+        val expectedUpdatesDirectory = File(appFilesDirectory, "updates").canonicalFile
+        return canonical.path.startsWith(appFilesDirectory.canonicalFile.path + File.separator) &&
+            updatesDirectory == expectedUpdatesDirectory &&
+            canonical.parentFile?.name?.startsWith("download-") == true
+    }
+
     fun safeDocumentName(name: String): String =
         name.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
 

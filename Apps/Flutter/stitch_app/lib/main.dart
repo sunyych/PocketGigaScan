@@ -43,6 +43,7 @@ import 'l10n/stitch_localizations.dart';
 import 'l10n/localized_text.dart';
 import 'models/app_settings.dart';
 import 'services/settings_controller.dart';
+import 'services/ota_update_service.dart';
 import 'settings_page.dart';
 import 'models/stitch_timeline.dart';
 import 'widgets/stitching_log.dart';
@@ -76,6 +77,8 @@ class LumiaStitchApp extends StatefulWidget {
 }
 
 class _LumiaStitchAppState extends State<LumiaStitchApp> {
+  final GlobalKey<ScaffoldMessengerState> _messengerKey =
+      GlobalKey<ScaffoldMessengerState>();
   late final SettingsController _settings =
       widget.settingsController ??
       SettingsController(
@@ -90,6 +93,58 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
           android: Platform.isAndroid,
         ),
       );
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _checkUpdatesAtLaunch(),
+    );
+  }
+
+  Future<void> _checkUpdatesAtLaunch() async {
+    if (widget.home != null) return;
+    try {
+      await _settings.ready;
+      if (!mounted) return;
+      final current = _settings.settings;
+      if (current.updateCheckMode != UpdateCheckMode.automatic) {
+        return;
+      }
+      final now = DateTime.now().toUtc();
+      final previous = current.lastUpdateCheckAt;
+      if (previous != null &&
+          now.difference(previous) < const Duration(hours: 24)) {
+        return;
+      }
+      await _settings.update(current.copyWith(lastUpdateCheckAt: now));
+      if (!mounted) return;
+      final service = OtaUpdateService();
+      try {
+        final release = await service.check(
+          installedVersion: await service.installedVersion(),
+        );
+        if (!mounted) return;
+        final chinese = _settings.settings.language == AppLanguage.zh;
+        _messengerKey.currentState?.showSnackBar(
+          SnackBar(
+            content: Text(
+              chinese
+                  ? 'PocketGigaScan ${release.manifest.version} 已发布，可前往设置查看。'
+                  : 'PocketGigaScan ${release.manifest.version} is available. Open Settings to review it.',
+            ),
+            duration: const Duration(seconds: 8),
+          ),
+        );
+      } finally {
+        service.close();
+      }
+    } on FormatException {
+      // A missing or already-installed release is a normal silent outcome here.
+    } catch (_) {
+      // Automatic checks must not interrupt stitching or startup.
+    }
+  }
+
   @override
   void dispose() {
     if (widget.settingsController == null) _settings.dispose();
@@ -124,6 +179,7 @@ class _LumiaStitchAppState extends State<LumiaStitchApp> {
         useMaterial3: true,
       );
       return MaterialApp(
+        scaffoldMessengerKey: _messengerKey,
         title: 'PocketGigaScan',
         debugShowCheckedModeBanner: false,
         locale: locale,

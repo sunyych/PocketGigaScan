@@ -8,6 +8,8 @@ PocketGigaScan is an independent panorama stitcher for DWARF photo grids, built 
 
 Extract the entire ZIP and run `PocketGigaScan.exe`. The EXE requires the included Flutter DLL, native core and data directory; do not copy it alone. Every push creates a build artifact; successful default-branch builds refresh the stable `latest` download after signing is configured and verified. Current downloads remain unsigned while SignPath Foundation acceptance and repository configuration are pending.
 
+Starting with app version `1.5.7+36`, open **Settings → App updates** to check the official GitHub `latest` release. You can enable an automatic check at launch. When a compatible update is available, the app can download and verify its package; installation is a separate step. See [update publishing and platform availability](docs/OTA-UPDATES.md).
+
 The macOS test client targets Apple silicon (M1 or later), macOS 14 or newer.
 Its [Mac build workflow](https://github.com/sunyych/PocketGigaScan/actions/workflows/macos-build.yml)
 produces an ad-hoc-signed test ZIP with the native engine, offline scene model,
@@ -77,6 +79,10 @@ Settings includes an automatic/manual shared memory budget using current OS
 total/available memory. Larger desktop budgets increase source-cache capacity;
 they are allocated on demand. Existing reservations drain safely when lowering
 the budget. Android retains conservative mobile headroom and concurrency limits.
+
+## Tests
+
+See the [functional test matrix and coverage commands](Apps/Flutter/stitch_app/TEST_COVERAGE.md) for automated app checks and the device and native acceptance tests that complement them.
 
 ## User manuals
 

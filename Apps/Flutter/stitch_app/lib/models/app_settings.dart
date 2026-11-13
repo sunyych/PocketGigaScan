@@ -22,6 +22,8 @@ enum ResultGallerySort {
   oldestFirst,
 }
 
+enum UpdateCheckMode { manual, automatic }
+
 String formatTaskDateTime(DateTime value, TaskDateFormat format) {
   final local = value.toLocal();
   final year = local.year.toString().padLeft(4, '0');
@@ -56,6 +58,8 @@ class AppSettings {
     this.taskDateFormat = TaskDateFormat.yearMonthDay,
     this.resultGallerySort = ResultGallerySort.newestFirst,
     this.taskRailWidth = 230,
+    this.updateCheckMode = UpdateCheckMode.manual,
+    this.lastUpdateCheckAt,
   });
 
   final AppLanguage language;
@@ -82,6 +86,8 @@ class AppSettings {
   final TaskDateFormat taskDateFormat;
   final ResultGallerySort resultGallerySort;
   final double taskRailWidth;
+  final UpdateCheckMode updateCheckMode;
+  final DateTime? lastUpdateCheckAt;
 
   factory AppSettings.defaults({required bool mobile, bool android = false}) =>
       AppSettings(
@@ -117,6 +123,9 @@ class AppSettings {
     TaskDateFormat? taskDateFormat,
     ResultGallerySort? resultGallerySort,
     double? taskRailWidth,
+    UpdateCheckMode? updateCheckMode,
+    DateTime? lastUpdateCheckAt,
+    bool clearLastUpdateCheckAt = false,
   }) => AppSettings(
     language: language ?? this.language,
     themeMode: themeMode ?? this.themeMode,
@@ -143,6 +152,10 @@ class AppSettings {
     taskDateFormat: taskDateFormat ?? this.taskDateFormat,
     resultGallerySort: resultGallerySort ?? this.resultGallerySort,
     taskRailWidth: _safeTaskRailWidth(taskRailWidth ?? this.taskRailWidth),
+    updateCheckMode: updateCheckMode ?? this.updateCheckMode,
+    lastUpdateCheckAt: clearLastUpdateCheckAt
+        ? null
+        : lastUpdateCheckAt ?? this.lastUpdateCheckAt,
   );
 
   Map<String, Object?> toJson() => {
@@ -167,6 +180,8 @@ class AppSettings {
     'taskDateFormat': taskDateFormat.name,
     'resultGallerySort': resultGallerySort.name,
     'taskRailWidth': _safeTaskRailWidth(taskRailWidth),
+    'updateCheckMode': updateCheckMode.name,
+    'lastUpdateCheckAt': lastUpdateCheckAt?.toUtc().toIso8601String(),
   };
 
   factory AppSettings.fromJson(Map<String, Object?> json) {
@@ -231,6 +246,14 @@ class AppSettings {
         ResultGallerySort.newestFirst,
       ),
       taskRailWidth: _safeTaskRailWidth(json['taskRailWidth']),
+      updateCheckMode: enumValue(
+        UpdateCheckMode.values,
+        json['updateCheckMode'],
+        UpdateCheckMode.manual,
+      ),
+      lastUpdateCheckAt: json['lastUpdateCheckAt'] is String
+          ? DateTime.tryParse(json['lastUpdateCheckAt']! as String)?.toUtc()
+          : null,
     );
   }
 

@@ -100,7 +100,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
           flutter analyze
-          flutter test
+          # Lifecycle tests are timing-sensitive under parallel load.
+          flutter test --concurrency=1
 
       - name: Build release APK for ARM64
         working-directory: Apps/Flutter/stitch_app

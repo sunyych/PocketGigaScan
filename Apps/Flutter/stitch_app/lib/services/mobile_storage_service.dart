@@ -72,6 +72,13 @@ class MobileStorageService {
       }) ??
       false;
 
+  /// Saves the verified GitHub APK through Android's document picker.
+  Future<bool> saveUpdatePackage(String sourcePath) async =>
+      await _channel.invokeMethod<bool>('saveUpdatePackage', {
+        'path': sourcePath,
+      }) ??
+      false;
+
   /// Shares an app-owned export using its format MIME type.
   Future<bool> shareExport(
     String sourcePath, {
