@@ -422,11 +422,47 @@ class TaskRepository {
       final resolvedPath = entityType == FileSystemEntityType.directory
           ? await Directory(absolutePath).resolveSymbolicLinks()
           : await File(absolutePath).resolveSymbolicLinks();
-      return p.equals(resolvedPath, resolvedDirectory) ||
-          p.isWithin(resolvedDirectory, resolvedPath);
+      return _resolvedPathIsWithinDirectory(resolvedPath, resolvedDirectory);
     } on Object {
       return false;
     }
+  }
+
+  Future<bool> _resolvedPathIsWithinDirectory(
+    String resolvedPath,
+    String resolvedDirectory,
+  ) async {
+    // Windows can return an 8.3 alias for one resolved path and a long name
+    // for another. Walk real parent directories and compare filesystem
+    // identity so those aliases still match without trusting lexical prefixes.
+    final type = await FileSystemEntity.type(resolvedPath, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return false;
+    var current = type == FileSystemEntityType.directory
+        ? resolvedPath
+        : p.dirname(resolvedPath);
+    while (true) {
+      if (p.equals(current, resolvedDirectory) ||
+          await FileSystemEntity.identical(current, resolvedDirectory)) {
+        return true;
+      }
+      final parent = p.dirname(current);
+      if (parent == current) return false;
+      current = parent;
+    }
+  }
+
+  Future<bool> _containsLink(String path) async {
+    final absolute = p.normalize(p.absolute(path));
+    final parts = p.split(absolute);
+    var current = p.rootPrefix(absolute);
+    for (final part in parts.skip(1)) {
+      current = p.join(current, part);
+      if (await FileSystemEntity.type(current, followLinks: false) ==
+          FileSystemEntityType.link) {
+        return true;
+      }
+    }
+    return false;
   }
 
   Future<bool> _isTaskFileReferenced(StitchTask task, String path) async {
@@ -503,20 +539,30 @@ class TaskRepository {
     final canonicalTask = await Directory(
       p.dirname(inputDirectory.path),
     ).resolveSymbolicLinks();
-    if (p.dirname(canonicalInput) != canonicalTask ||
+    if (!await FileSystemEntity.identical(
+          p.dirname(canonicalInput),
+          canonicalTask,
+        ) ||
         p.basename(canonicalInput) != 'input') {
       return false;
     }
     for (final photo in task.photos) {
       final path = p.normalize(p.absolute(photo.storedPath));
-      if (!p.isWithin(inputDirectory.path, path)) return false;
+      if (!await FileSystemEntity.identical(
+        p.dirname(path),
+        inputDirectory.path,
+      )) {
+        return false;
+      }
       final file = File(path);
       if (await FileSystemEntity.type(path, followLinks: false) !=
           FileSystemEntityType.file) {
         return false;
       }
       try {
-        if (await file.resolveSymbolicLinks() != path) return false;
+        if (await _containsLink(path)) {
+          return false;
+        }
         final digest = await sha256.bind(file.openRead()).first;
         if (digest.toString() != photo.sha256) return false;
       } on Object {
@@ -597,7 +643,10 @@ class TaskRepository {
       }
       final canonicalTask = await taskDirectory.resolveSymbolicLinks();
       final canonicalDirectory = await directory.resolveSymbolicLinks();
-      if (p.dirname(canonicalDirectory) != canonicalTask ||
+      if (!await FileSystemEntity.identical(
+            p.dirname(canonicalDirectory),
+            canonicalTask,
+          ) ||
           !const {
             'input',
             'output',
@@ -637,7 +686,10 @@ class TaskRepository {
     try {
       final canonicalTask = await taskDirectory.resolveSymbolicLinks();
       final canonicalFile = await file.resolveSymbolicLinks();
-      if (p.dirname(canonicalFile) != canonicalTask ||
+      if (!await FileSystemEntity.identical(
+            p.dirname(canonicalFile),
+            canonicalTask,
+          ) ||
           await FileSystemEntity.type(file.path, followLinks: false) !=
               FileSystemEntityType.file) {
         throw const FileSystemException('任务临时文件路径不安全');
@@ -674,7 +726,7 @@ class TaskRepository {
       throw const FileSystemException('路径位于原始输入目录内');
     }
     final repositoryRoot = await (await root()).resolveSymbolicLinks();
-    if (p.isWithin(repositoryRoot, normalized)) {
+    if (await _pathIsWithinDirectory(normalized, Directory(repositoryRoot))) {
       throw const FileSystemException('拒绝从任务存储目录删除导出路径');
     }
     if (await _isFileReferencedByOtherTask(others, normalized)) {
@@ -689,7 +741,7 @@ class TaskRepository {
       }
       throw const FileSystemException('路径不是普通文件');
     }
-    if (await file.resolveSymbolicLinks() != normalized) {
+    if (await _containsLink(normalized)) {
       throw const FileSystemException('拒绝删除符号链接');
     }
     final current = await fingerprintFile(normalized);

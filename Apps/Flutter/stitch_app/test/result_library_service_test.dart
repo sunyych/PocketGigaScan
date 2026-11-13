@@ -260,7 +260,10 @@ void main() {
         repository: repository,
       ).renameResult(task, 'renamed');
 
-      expect(updated.exportPath, p.join(temp.path, 'renamed.png'));
+      expect(
+        await File(updated.exportPath!).resolveSymbolicLinks(),
+        await File(p.join(temp.path, 'renamed.png')).resolveSymbolicLinks(),
+      );
       expect(await File(updated.exportPath!).readAsBytes(), [7, 8, 9, 10]);
       expect(await original.exists(), isFalse);
       final loaded = (await repository.loadById(taskId))!;

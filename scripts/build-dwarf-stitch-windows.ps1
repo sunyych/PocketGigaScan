@@ -791,7 +791,7 @@ Invoke-Checked $FlutterPath @('precache', '--windows') $repo
 Invoke-Checked $FlutterPath @('clean') $app
 Invoke-Checked $FlutterPath @('pub', 'get', '--enforce-lockfile') $app
 Invoke-Checked $FlutterPath @('analyze') $app
-Invoke-Checked $FlutterPath @('test', '--reporter', 'expanded') $app
+Invoke-Checked $FlutterPath @('test', '--reporter', 'expanded', '--concurrency=1') $app
 Clear-OwnedFlutterWindowsBuildOutputs `
     (Join-Path $app 'build/flutter_assets') `
     $releaseDir `

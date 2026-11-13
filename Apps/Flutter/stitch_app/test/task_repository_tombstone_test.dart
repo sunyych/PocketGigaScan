@@ -321,6 +321,70 @@ void main() {
     expect(await File(p.join(taskDirectory.path, '.removed')).exists(), isTrue);
   });
 
+  test(
+    'cleanup refuses exports reached through file or parent links',
+    () async {
+      final outside = Directory(p.join(temporary.path, 'linked-exports'))
+        ..createSync();
+      final target = File(p.join(outside.path, 'panorama.png'))
+        ..writeAsBytesSync([1, 2, 3]);
+      final directLink = Link(p.join(temporary.path, 'direct-export.png'));
+      final linkedDirectory = Link(p.join(temporary.path, 'export-alias'));
+      try {
+        await directLink.create(target.path);
+        await linkedDirectory.create(outside.path);
+      } on FileSystemException catch (error) {
+        final code = error.osError?.errorCode;
+        final permissionDenied =
+            code == 1 ||
+            code == 5 ||
+            code == 1314 ||
+            error.message.toLowerCase().contains('privilege') ||
+            error.message.toLowerCase().contains('permission');
+        if (Platform.isWindows && permissionDenied) {
+          markTestSkipped('Windows denied symlink fixture creation ($error)');
+        }
+        rethrow;
+      }
+
+      Future<StitchTask> linkedTask(String id, String exportPath) async {
+        final taskDirectory = await repository.directoryFor(id);
+        final output = Directory(p.join(taskDirectory.path, 'render'))
+          ..createSync(recursive: true);
+        final task = StitchTask(
+          id: id,
+          createdAt: DateTime.utc(2026, 10, 29),
+          sourceDirectory: 'external',
+          outputDirectory: output.path,
+          photos: const [],
+          grid: const GridOptions(),
+          horizontalFovDegrees: 45,
+          memoryBudgetMiB: 128,
+          workers: 1,
+          phase: StitchPhase.failed,
+          exportPath: exportPath,
+          exportFingerprint: await repository.fingerprintFile(exportPath),
+        );
+        await repository.save(task);
+        return task;
+      }
+
+      for (final (id, exportPath, reason) in [
+        ('123473-acde04', directLink.path, '普通文件'),
+        ('123474-acde05', p.join(linkedDirectory.path, 'panorama.png'), '符号链接'),
+      ]) {
+        final task = await linkedTask(id, exportPath);
+        final result = await repository.removeTaskRecordWithCleanup(
+          task,
+          deleteOwnedFiles: true,
+        );
+        expect(result.cleanupComplete, isFalse);
+        expect(await target.exists(), isTrue);
+        expect(result.failures.join(' '), contains(reason));
+      }
+    },
+  );
+
   test('cleanup refuses changed exports and URI paths', () async {
     const id = '123464-abcd09';
     final taskDirectory = await repository.directoryFor(id);
