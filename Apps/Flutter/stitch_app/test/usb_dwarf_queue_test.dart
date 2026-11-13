@@ -142,9 +142,19 @@ void main() {
                     .first)
                 .toString();
         expect(previewHash, h.previewHash);
+        final taskDirectory = await h.taskRepository.directoryFor(task.id);
+        final taskInputDirectory = Directory(
+          p.join(taskDirectory.path, 'input'),
+        );
         for (final photo in task.photos) {
           expect(await File(photo.storedPath).exists(), isTrue);
-          expect(p.isWithin(h.tasksRoot.path, photo.storedPath), isTrue);
+          expect(
+            await FileSystemEntity.identical(
+              p.dirname(photo.storedPath),
+              taskInputDirectory.path,
+            ),
+            isTrue,
+          );
           expect(
             (await sha256.bind(File(photo.storedPath).openRead()).first)
                 .toString(),
@@ -246,7 +256,14 @@ void main() {
           _queueForSource(h.controller, sourceAOnH.path).parentDirectory,
           mountH.path,
         );
-        expect(p.isWithin(h.tasksRoot.path, localInputA), isTrue);
+        final taskDirectoryA = await h.taskRepository.directoryFor(taskIdA);
+        expect(
+          await FileSystemEntity.identical(
+            localInputA,
+            p.join(taskDirectoryA.path, 'input'),
+          ),
+          isTrue,
+        );
         expect(Directory(localInputA).existsSync(), isTrue);
 
         await h.restartController();
@@ -426,7 +443,14 @@ void main() {
         );
         final localInput = File(task.photos.single.storedPath);
         expect(await localInput.exists(), isTrue);
-        expect(p.isWithin(h.tasksRoot.path, localInput.path), isTrue);
+        final taskDirectory = await h.taskRepository.directoryFor(itemId);
+        expect(
+          await FileSystemEntity.identical(
+            p.dirname(localInput.path),
+            p.join(taskDirectory.path, 'input'),
+          ),
+          isTrue,
+        );
         expect(
           (await sha256.bind(localInput.openRead()).first).toString(),
           selectedOriginalHash,
