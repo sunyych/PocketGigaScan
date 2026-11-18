@@ -20,6 +20,10 @@ android-builder-contract:
 windows-build:
     pwsh -NoProfile -File scripts/build-dwarf-stitch-windows.ps1
 
+# Preview generated Windows build retention cleanup; add -Execute to remove.
+clean-disk-space:
+    pwsh -NoProfile -File scripts/clean-disk-space.ps1
+
 # Build and stage the Android ARM64 native core and its generated license assets.
 android-core:
     pwsh -NoProfile -File scripts/build-stitch-android-core.ps1

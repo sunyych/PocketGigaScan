@@ -41,6 +41,19 @@ AppData.
 The builder verifies dependency versions/checksums. Its `-PlanOnly` option
 prints the pinned versions and output paths without building.
 
+`just clean-disk-space` previews local Windows build retention. To execute it,
+run `pwsh -NoProfile -File scripts/clean-disk-space.ps1 -Execute`. It considers
+only recognized `dwarf-stitch-windows*` directories directly under `.build`,
+keeps the two complete packages with the newest `package/build-manifest.json`
+timestamps, and removes older complete packages plus recognized interrupted
+builds. Unknown directories are skipped. Execution stops if a build/product
+process is running, a candidate contains tracked files or reparse points, or a
+Git safety query fails. The Windows builder runs the same cleanup only after a
+successful package, protects its current output, and skips custom outputs that
+are not direct children of `.build`; `-PlanOnly` and failed builds never reach
+the hook. `pwsh -NoProfile -File scripts/test-clean-disk-space.Tests.ps1`
+runs the isolated retention fixture.
+
 Local test executables must run from a normal user directory. A development
 workspace may carry an inherited Windows Low Mandatory Level label; an EXE
 created or extracted there then starts at low integrity even when Explorer is

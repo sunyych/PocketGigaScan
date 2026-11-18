@@ -98,6 +98,8 @@ __pycache__/
 /scripts/*
 !/scripts/run-ios-native-smoke.sh
 !/scripts/build-dwarf-stitch-windows.ps1
+!/scripts/clean-disk-space.ps1
+!/scripts/test-clean-disk-space.Tests.ps1
 !/scripts/complete-dwarf-stitch-windows-signing.ps1
 !/scripts/test-complete-dwarf-stitch-windows-signing.Tests.ps1
 !/scripts/test-build-dwarf-stitch-windows.Tests.ps1

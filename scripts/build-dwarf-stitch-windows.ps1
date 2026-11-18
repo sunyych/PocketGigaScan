@@ -137,6 +137,16 @@ function Assert-WindowsReleaseAssets([string]$ReleaseDirectory) {
     }
 }
 
+function Invoke-BuildRetention {
+    $retentionRoot = [IO.Path]::GetFullPath((Join-Path $repo '.build')).TrimEnd([char[]]@('\','/'))
+    $outputParent = [IO.Path]::GetFullPath((Split-Path -Parent $OutputDirectory)).TrimEnd([char[]]@('\','/'))
+    if (-not [string]::Equals($outputParent, $retentionRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-Host "Build retention skipped for output outside direct .build child: $OutputDirectory"
+        return
+    }
+    & (Join-Path $PSScriptRoot 'clean-disk-space.ps1') -Execute -ProtectPath $OutputDirectory
+}
+
 function Assert-WindowsProductVersionMetadata([string[]]$Paths, [string]$ExpectedVersion) {
     foreach ($path in $Paths) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -929,12 +939,15 @@ if ($PrepareSigning) {
         Write-Host "Unsigned local package directory: $packageDir"
         Write-Host "Executable: $(Join-Path $packageDir 'PocketGigaScan.exe')"
         Write-Host "Build manifest: $(Join-Path $packageDir 'build-manifest.json')"
+        Invoke-BuildRetention
         exit 0
     }
     if (Test-Path -LiteralPath $signingInputPath) { Remove-Item -LiteralPath $signingInputPath -Force }
     Compress-Archive -Path (Join-Path $packageDir '*') -DestinationPath $signingInputPath -CompressionLevel Optimal
     Assert-ZipMatchesPackage $signingInputPath $packageDir
+    Invoke-BuildRetention
     Write-Host "Signing input ZIP (not a release): $signingInputPath"
     Write-Host 'Upload this ZIP to the approved SignPath signing workflow; finalize its returned signed ZIP before distribution.'
     exit 0
 }
+Invoke-BuildRetention
