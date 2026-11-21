@@ -72,6 +72,7 @@ class BatchQueueController extends ChangeNotifier {
   final Set<String> _deletingTaskIds = {};
   final Set<String> _deferredQueueStarts = {};
   final Map<String, StitchTask> _taskCache = {};
+  final ValueNotifier<int> _resultTaskRevision = ValueNotifier<int>(0);
   final Map<String, int> _generations = {};
   final Map<String, int> _timelineUiSequences = {};
   Future<void> _taskWriteTail = Future.value();
@@ -362,10 +363,28 @@ class BatchQueueController extends ChangeNotifier {
         _taskCache.remove(task.id);
       } else {
         _taskCache[task.id] = persisted;
+        if (!_disposed &&
+            _resultTaskSignature(previous) != _resultTaskSignature(persisted)) {
+          _resultTaskRevision.value++;
+        }
       }
     });
     _taskWriteTail = next.catchError((Object _) {});
     await next;
+  }
+
+  String? _resultTaskSignature(StitchTask? task) {
+    if (task == null) return null;
+    final isRecoverableExport =
+        task.phase == StitchPhase.interrupted &&
+        task.stage == 'result-library-export' &&
+        task.exportCheckpointPath != null;
+    if (task.phase != StitchPhase.completed && !isRecoverableExport) {
+      return null;
+    }
+    return '${task.phase.name}/${task.stage}/${task.exportPath ?? ''}/'
+        '${task.exportCheckpointPath ?? ''}/${task.displayName ?? ''}/'
+        '${jsonEncode(task.exportFingerprint?.toJson())}';
   }
 
   StitchTask _mergeNativeEvents(StitchTask task, Map<String, Object?> status) {
@@ -496,6 +515,7 @@ class BatchQueueController extends ChangeNotifier {
 
   List<BatchQueue> get queues => List.unmodifiable(_queues);
   bool get loading => _loading || _importing;
+  ValueListenable<int> get resultTaskRevision => _resultTaskRevision;
   TaskRepository get taskRepository => _taskRepository;
 
   String? _configuredExportDestination(AppSettings? settings) =>
@@ -4916,6 +4936,7 @@ class BatchQueueController extends ChangeNotifier {
     _disposed = true;
     _timer?.cancel();
     _usbDiscoveryTimer?.cancel();
+    _resultTaskRevision.dispose();
     super.dispose();
   }
 }

@@ -472,6 +472,8 @@ class _StitchHomePageState extends State<StitchHomePage>
     _scheduleRegistrationRepairPrompt();
   }
 
+  void _onBatchResultTaskChanged() => _resultLibraryRevision.value++;
+
   String _batchResultsSignature() {
     final completed = <String>[];
     for (final queue in _batchController?.queues ?? const <BatchQueue>[]) {
@@ -686,6 +688,7 @@ class _StitchHomePageState extends State<StitchHomePage>
       batchController.requireLargeJobApproval = _mobile;
       if (_mobile) batchController.resourceConfigurationReady = false;
       batchController.addListener(_onBatchQueueChanged);
+      batchController.resultTaskRevision.addListener(_onBatchResultTaskChanged);
       unawaited(_initializeBatchOwnership(batchController));
     } else {
       _batchOwnershipReady = true;
@@ -2006,9 +2009,12 @@ class _StitchHomePageState extends State<StitchHomePage>
     if (widget.batchQueueController == null) {
       _batchController
         ?..removeListener(_onBatchQueueChanged)
+        ..resultTaskRevision.removeListener(_onBatchResultTaskChanged)
         ..dispose();
     } else {
-      _batchController?.removeListener(_onBatchQueueChanged);
+      _batchController
+        ?..removeListener(_onBatchQueueChanged)
+        ..resultTaskRevision.removeListener(_onBatchResultTaskChanged);
     }
     _rows.dispose();
     _columns.dispose();
@@ -4333,7 +4339,7 @@ class _StitchHomePageState extends State<StitchHomePage>
     return false;
   }
 
-  Future<void> _openBatchQueue({bool fromModeSelection = false}) async {
+  Future<void> _openBatchQueue({Route<void>? galleryRoute}) async {
     if (_openingBatchQueue) return;
     _openingBatchQueue = true;
     try {
@@ -4362,7 +4368,10 @@ class _StitchHomePageState extends State<StitchHomePage>
         ),
       );
       if (!mounted || taskId == null) return;
-      if (fromModeSelection) setState(() => _showModeSelection = false);
+      if (_showModeSelection) setState(() => _showModeSelection = false);
+      if (galleryRoute?.isCurrent == true) {
+        navigator.pop<void>();
+      }
       await _openImportedDeviceTask(taskId);
     } finally {
       _openingBatchQueue = false;
@@ -4382,7 +4391,7 @@ class _StitchHomePageState extends State<StitchHomePage>
 
     await Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (_) => ResultGalleryPage(
+        builder: (galleryContext) => ResultGalleryPage(
           repository: _repository,
           service: ResultLibraryService(
             repository: _repository,
@@ -4403,7 +4412,11 @@ class _StitchHomePageState extends State<StitchHomePage>
           onOpenViewer: _openExportViewer,
           onAddBatch: _openingBatchQueue
               ? null
-              : () => unawaited(_openBatchQueue()),
+              : () => unawaited(
+                  _openBatchQueue(
+                    galleryRoute: ModalRoute.of<void>(galleryContext),
+                  ),
+                ),
           onForegroundOperationChanged: onGalleryOperationChanged,
         ),
       ),
@@ -4509,8 +4522,7 @@ class _StitchHomePageState extends State<StitchHomePage>
                       title: '批量合成',
                       description: '导入文件夹并管理批次任务。',
                       icon: Icons.queue_outlined,
-                      onTap: () =>
-                          unawaited(_openBatchQueue(fromModeSelection: true)),
+                      onTap: () => unawaited(_openBatchQueue()),
                     ),
                   ),
                 ],

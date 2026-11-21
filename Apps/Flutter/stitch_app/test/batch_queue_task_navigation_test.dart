@@ -131,9 +131,9 @@ void main() {
             ? '打开合成任务'
             : 'Open stitch task';
         final isChinese = locale.languageCode == 'zh';
-        final title = find.descendant(
+        final taskDetails = find.descendant(
           of: find.byKey(const Key('batch-item-item-failed')),
-          matching: find.text('Saved panorama'),
+          matching: find.textContaining('Stitch failed'),
         );
         expect(find.byTooltip(localizedOpen), findsOneWidget);
 
@@ -154,7 +154,9 @@ void main() {
           expect(controller.cancelCalls, 1);
         }
 
-        await tester.tap(title);
+        // The task details area is part of the row's open target, so a tap
+        // anywhere in the task information opens the same persisted task.
+        await tester.tap(taskDetails);
         await tester.pumpAndSettle();
 
         expect(openedTaskId, 'task-saved');

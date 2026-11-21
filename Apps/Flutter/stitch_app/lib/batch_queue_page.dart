@@ -1324,20 +1324,28 @@ class _BatchQueuePageState extends State<BatchQueuePage> {
                             onTap: item.taskId == null
                                 ? null
                                 : () => _openTask(item.taskId),
-                            child: Text(
-                              item.name,
-                              translate: false,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w600,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 4),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    item.name,
+                                    translate: false,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  Text(
+                                    _detail(item),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
                               ),
                             ),
                           ),
                         ),
-                      ),
-                      Text(
-                        _detail(item),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
                       ),
                       if (item.taskId != null) _itemProvenance(item),
                     ],
