@@ -532,8 +532,20 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('result-gallery-grid')), findsNothing);
       expect(find.text('暂无已完成的合成结果'), findsOneWidget);
-      await tester.binding.handlePopRoute();
+      await tester.tap(find.byKey(const Key('result-gallery-add-batch')));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('Saved mode task'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('batch-item-mode-navigation-item')),
+        findsNothing,
+      );
+      expect(find.byKey(const Key('result-gallery-add-batch')), findsNothing);
+      expect(find.byKey(const Key('back-to-mode-selection')), findsOneWidget);
+      expect(find.textContaining('0 张原片'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('back-to-mode-selection')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('selection-single')), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('selection-single')));
       await tester.pumpAndSettle();

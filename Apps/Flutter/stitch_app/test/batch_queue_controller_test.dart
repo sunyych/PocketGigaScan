@@ -554,6 +554,7 @@ void main() {
       expect(api.starts, 0);
       await controller.startQueue(queue.id);
       await controller.tick();
+      final initialResultRevision = controller.resultTaskRevision.value;
       expect(api.active, 2);
       expect(api.maxActive, 2);
       expect(api.jobs.values.map((job) => job.workers).toList(), [4, 4]);
@@ -566,6 +567,13 @@ void main() {
         await api.finishRender(job.id);
       }
       await controller.tick();
+      final renderCompleteRevision = controller.resultTaskRevision.value;
+      expect(
+        renderCompleteRevision,
+        greaterThan(initialResultRevision),
+        reason:
+            'A persisted completed render must notify an already-open gallery even while batch export proceeds.',
+      );
       expect(
         api.jobs.values.where((job) => job.operation == 'export'),
         hasLength(2),
@@ -586,6 +594,11 @@ void main() {
         await api.finishExport(job.id);
       }
       await controller.tick();
+      expect(
+        controller.resultTaskRevision.value,
+        greaterThan(renderCompleteRevision),
+        reason: 'The final exported result must refresh its gallery entry.',
+      );
       expect(
         controller.queues.single.items.where(
           (item) => item.state == BatchItemState.completed,
